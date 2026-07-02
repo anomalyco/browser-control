@@ -1,0 +1,233 @@
+import { Config, Context, Effect, Layer, Option, Schema } from "effect"
+import { FetchHttpClient, HttpClient, HttpClientRequest, type HttpClientResponse } from "effect/unstable/http"
+import {
+  ErrorEnvelope,
+  ExecuteResponse,
+  ExtensionStatus,
+  RecordingCancelResponse,
+  RecordingStartResponse,
+  RecordingStatusResponse,
+  RecordingStopResponse,
+  RelayVersion,
+  SessionContainer,
+  SessionDeleted,
+  SessionsContainer,
+  TargetSummaries,
+  type SessionSummary,
+  type TargetSummary,
+} from "./relay-schema.ts"
+
+/**
+ * RelayClient is the single typed client for the relay HTTP API, shared by the
+ * CLI and the MCP server. All responses are decoded against the shared wire
+ * schemas in `src/relay-schema.ts`, and failures are tagged errors that keep
+ * the relay's own error message as the top-level message.
+ */
+
+export const portConfig = Config.int("BROWSER_CONTROL_PORT").pipe(Config.withDefault(19989))
+
+export const endpointForPort = (port: number): string => `http://127.0.0.1:${port}`
+
+export class RelayUnreachable extends Schema.TaggedErrorClass<RelayUnreachable>()(
+  "RelayClient.RelayUnreachable",
+  {
+    message: Schema.String,
+    endpoint: Schema.String,
+    path: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {}
+
+export class RelayRejected extends Schema.TaggedErrorClass<RelayRejected>()(
+  "RelayClient.RelayRejected",
+  {
+    message: Schema.String,
+    status: Schema.Number,
+    path: Schema.String,
+  },
+) {}
+
+export class RelayDecodeFailed extends Schema.TaggedErrorClass<RelayDecodeFailed>()(
+  "RelayClient.RelayDecodeFailed",
+  {
+    message: Schema.String,
+    path: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {}
+
+export type RelayClientError = RelayUnreachable | RelayRejected | RelayDecodeFailed
+
+export type ExecuteTargetSelectionRequest = {
+  readonly urlIncludes?: string
+  readonly index?: number
+}
+
+export type ExecuteRequest = {
+  readonly sessionId: string
+  readonly code: string
+  readonly createIfMissing: boolean
+  readonly targetSelection?: ExecuteTargetSelectionRequest
+}
+
+export type RecordingTargetRequest = {
+  readonly sessionId?: string | undefined
+  readonly tabId?: number | undefined
+}
+
+export type RecordingStartRequest = RecordingTargetRequest & {
+  readonly outputPath: string
+  readonly mode?: "auto" | "tab-capture" | "cdp" | undefined
+  readonly audio?: boolean | undefined
+  readonly frameRate?: number | undefined
+  readonly maxDurationMs?: number | undefined
+}
+
+export interface Interface {
+  readonly endpoint: string
+  readonly version: Effect.Effect<RelayVersion, RelayClientError>
+  readonly extensionStatus: Effect.Effect<ExtensionStatus, RelayClientError>
+  readonly targets: Effect.Effect<readonly TargetSummary[], RelayClientError>
+  readonly sessions: Effect.Effect<readonly SessionSummary[], RelayClientError>
+  readonly sessionNew: (id?: string | undefined, options?: { readonly readOnly?: boolean }) => Effect.Effect<SessionSummary, RelayClientError>
+  readonly sessionReset: (id: string) => Effect.Effect<SessionSummary, RelayClientError>
+  readonly sessionDelete: (id: string) => Effect.Effect<SessionDeleted, RelayClientError>
+  readonly execute: (request: ExecuteRequest) => Effect.Effect<ExecuteResponse, RelayClientError>
+  readonly recordingStart: (request: RecordingStartRequest) => Effect.Effect<RecordingStartResponse, RelayClientError>
+  readonly recordingStop: (target: RecordingTargetRequest) => Effect.Effect<RecordingStopResponse, RelayClientError>
+  readonly recordingStatus: (target: RecordingTargetRequest) => Effect.Effect<RecordingStatusResponse, RelayClientError>
+  readonly recordingCancel: (target: RecordingTargetRequest) => Effect.Effect<RecordingCancelResponse, RelayClientError>
+}
+
+export class Service extends Context.Service<Service, Interface>()("browser-control/RelayClient") {}
+
+const decodeErrorEnvelope = Schema.decodeUnknownOption(ErrorEnvelope)
+
+export const make = Effect.fnUntraced(function* (options?: { readonly endpoint?: string }) {
+  const port = yield* Effect.orDie(portConfig)
+  const endpoint = options?.endpoint ?? endpointForPort(port)
+  const httpClient = yield* HttpClient.HttpClient
+
+  const readBody = (
+    response: HttpClientResponse.HttpClientResponse,
+    path: string,
+  ): Effect.Effect<unknown, RelayDecodeFailed> =>
+    response.json.pipe(
+      Effect.mapError((cause) =>
+        new RelayDecodeFailed({
+          message: `Relay returned an unreadable response for ${path}`,
+          path,
+          cause,
+        })
+      ),
+    )
+
+  const handleResponse = <A>(
+    response: HttpClientResponse.HttpClientResponse,
+    path: string,
+    schema: Schema.ConstraintDecoder<A>,
+  ): Effect.Effect<A, RelayClientError> =>
+    readBody(response, path).pipe(
+      Effect.flatMap((body): Effect.Effect<A, RelayClientError> => {
+        if (response.status < 200 || response.status >= 300) {
+          const envelope = decodeErrorEnvelope(body)
+          const message = Option.isSome(envelope)
+            ? envelope.value.error
+            : `Relay responded with HTTP ${response.status} for ${path}`
+          return Effect.fail(new RelayRejected({ message, status: response.status, path }))
+        }
+        return Schema.decodeUnknownEffect(schema)(body).pipe(
+          Effect.mapError((cause) =>
+            new RelayDecodeFailed({
+              message: `Relay response for ${path} did not match the expected shape: ${cause.message}`,
+              path,
+              cause,
+            })
+          ),
+        )
+      }),
+    )
+
+  const transportError = (path: string) => (cause: unknown) =>
+    new RelayUnreachable({
+      message: `Browser Control relay is not reachable at ${endpoint}. Start it with \`browser-control serve\`.`,
+      endpoint,
+      path,
+      cause,
+    })
+
+  const getJson = <A>(path: string, schema: Schema.ConstraintDecoder<A>): Effect.Effect<A, RelayClientError> =>
+    httpClient.get(new URL(path, endpoint)).pipe(
+      Effect.mapError(transportError(path)),
+      Effect.flatMap((response) => handleResponse(response, path, schema)),
+    )
+
+  const postJson = <A>(
+    path: string,
+    body: Record<string, unknown>,
+    schema: Schema.ConstraintDecoder<A>,
+  ): Effect.Effect<A, RelayClientError> =>
+    httpClient.execute(
+      HttpClientRequest.post(new URL(path, endpoint)).pipe(HttpClientRequest.bodyJsonUnsafe(body)),
+    ).pipe(
+      Effect.mapError(transportError(path)),
+      Effect.flatMap((response) => handleResponse(response, path, schema)),
+    )
+
+  const recordingTargetBody = (target: RecordingTargetRequest): Record<string, unknown> => ({
+    ...(target.sessionId ? { sessionId: target.sessionId } : {}),
+    ...(target.tabId === undefined ? {} : { tabId: target.tabId }),
+  })
+
+  const recordingTargetQuery = (target: RecordingTargetRequest): string => {
+    const searchParams = new URLSearchParams()
+    if (target.sessionId) {
+      searchParams.set("sessionId", target.sessionId)
+    }
+    if (target.tabId !== undefined) {
+      searchParams.set("tabId", String(target.tabId))
+    }
+    const text = searchParams.toString()
+    return text ? `?${text}` : ""
+  }
+
+  return Service.of({
+    endpoint,
+    version: getJson("/version", RelayVersion),
+    extensionStatus: getJson("/extension/status", ExtensionStatus),
+    targets: getJson("/json/list", TargetSummaries),
+    sessions: getJson("/cli/sessions", SessionsContainer).pipe(Effect.map((container) => container.sessions)),
+    sessionNew: (id, options) =>
+      postJson("/cli/session/new", {
+        ...(id ? { id } : {}),
+        ...(options?.readOnly ? { readOnly: true } : {}),
+      }, SessionContainer).pipe(Effect.map((container) => container.session)),
+    sessionReset: (id) =>
+      postJson("/cli/session/reset", { id }, SessionContainer).pipe(Effect.map((container) => container.session)),
+    sessionDelete: (id) => postJson("/cli/session/delete", { id }, SessionDeleted),
+    execute: (request) =>
+      postJson("/cli/execute", {
+        sessionId: request.sessionId,
+        code: request.code,
+        createIfMissing: request.createIfMissing,
+        targetSelection: request.targetSelection ?? {},
+      }, ExecuteResponse),
+    recordingStart: (request) =>
+      postJson("/recording/start", {
+        ...recordingTargetBody(request),
+        outputPath: request.outputPath,
+        ...(request.mode === undefined ? {} : { mode: request.mode }),
+        ...(request.audio === undefined ? {} : { audio: request.audio }),
+        ...(request.frameRate === undefined ? {} : { frameRate: request.frameRate }),
+        ...(request.maxDurationMs === undefined ? {} : { maxDurationMs: request.maxDurationMs }),
+      }, RecordingStartResponse),
+    recordingStop: (target) => postJson("/recording/stop", recordingTargetBody(target), RecordingStopResponse),
+    recordingStatus: (target) => getJson(`/recording/status${recordingTargetQuery(target)}`, RecordingStatusResponse),
+    recordingCancel: (target) => postJson("/recording/cancel", recordingTargetBody(target), RecordingCancelResponse),
+  })
+})
+
+export const layer: Layer.Layer<Service, never, HttpClient.HttpClient> = Layer.effect(Service, make())
+
+/** RelayClient backed by the global `fetch`, for standalone CLI/MCP wiring. */
+export const layerFetch: Layer.Layer<Service> = layer.pipe(Layer.provide(FetchHttpClient.layer))

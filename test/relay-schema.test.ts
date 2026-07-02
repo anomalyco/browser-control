@@ -1,0 +1,156 @@
+import { describe, expect, it } from "vitest"
+import { Schema } from "effect"
+import {
+  ExecuteResponse,
+  ExtensionStatus,
+  RecordingStartResponse,
+  RecordingStatusResponse,
+  SessionContainer,
+  SessionsContainer,
+  SessionSummary,
+  TargetSummaries,
+} from "../src/relay-schema.ts"
+
+const decodeSession = Schema.decodeUnknownSync(SessionSummary)
+const decodeSessions = Schema.decodeUnknownSync(SessionsContainer)
+const decodeSessionContainer = Schema.decodeUnknownSync(SessionContainer)
+const decodeExecute = Schema.decodeUnknownSync(ExecuteResponse)
+const decodeExtensionStatus = Schema.decodeUnknownSync(ExtensionStatus)
+const decodeTargets = Schema.decodeUnknownSync(TargetSummaries)
+const decodeRecordingStart = Schema.decodeUnknownSync(RecordingStartResponse)
+const decodeRecordingStatus = Schema.decodeUnknownSync(RecordingStatusResponse)
+
+const session = {
+  id: "rapid-otter-633",
+  createdAt: "2026-07-01T00:00:00.000Z",
+  updatedAt: "2026-07-01T00:00:01.000Z",
+  connected: true,
+  pageUrl: "https://example.com",
+  stateKeys: ["title"],
+}
+
+describe("relay-schema", () => {
+  it("decodes a session summary", () => {
+    expect(decodeSession(session)).toEqual(session)
+  })
+
+  it("decodes a session with null pageUrl", () => {
+    const decoded = decodeSession({ ...session, pageUrl: null, stateKeys: [] })
+    expect(decoded.pageUrl).toBeNull()
+    expect(decoded.stateKeys).toEqual([])
+  })
+
+  it("rejects a session with a missing id", () => {
+    const { id: _id, ...rest } = session
+    expect(() => decodeSession(rest)).toThrow()
+  })
+
+  it("decodes sessions and session containers", () => {
+    expect(decodeSessions({ sessions: [session] }).sessions).toHaveLength(1)
+    expect(decodeSessionContainer({ session }).session.id).toBe(session.id)
+  })
+
+  it("decodes the optional readOnly flag on sessions", () => {
+    expect(decodeSession(session).readOnly).toBeUndefined()
+    expect(decodeSession({ ...session, readOnly: true }).readOnly).toBe(true)
+  })
+
+  it("decodes an execute response with warnings and aftermath", () => {
+    const decoded = decodeExecute({
+      text: "ok",
+      isError: false,
+      logs: [],
+      warnings: ["The session default page was closed; created a new page."],
+      aftermath: {
+        startUrl: "about:blank",
+        endUrl: "https://example.com/",
+        navigations: ["https://example.com/"],
+        consoleErrorCount: 0,
+        pageErrorCount: 1,
+        handoffs: 2,
+      },
+      session,
+    })
+    expect(decoded.warnings).toHaveLength(1)
+    expect(decoded.aftermath?.endUrl).toBe("https://example.com/")
+    expect(decoded.aftermath?.handoffs).toBe(2)
+  })
+
+  it("decodes an execute response without warnings or aftermath (older relay)", () => {
+    const decoded = decodeExecute({ text: "ok", isError: false, logs: [], session })
+    expect(decoded.warnings).toBeUndefined()
+    expect(decoded.aftermath).toBeUndefined()
+  })
+
+  it("decodes an execute response with logs", () => {
+    const decoded = decodeExecute({
+      text: "ok",
+      isError: false,
+      logs: [
+        { source: "script", type: "log", text: "hello" },
+        { source: "page", type: "error", text: "boom", location: { url: "https://example.com", lineNumber: 1, columnNumber: 2 } },
+      ],
+      session,
+    })
+    expect(decoded.logs).toHaveLength(2)
+    expect(decoded.logs[1]?.location?.lineNumber).toBe(1)
+  })
+
+  it("rejects an execute log with an unknown source", () => {
+    expect(() =>
+      decodeExecute({
+        text: "ok",
+        isError: false,
+        logs: [{ source: "relay", type: "log", text: "hello" }],
+        session,
+      })
+    ).toThrow()
+  })
+
+  it("decodes extension status with and without optional fields", () => {
+    const minimal = decodeExtensionStatus({ connected: false, version: null, activeTargets: 0 })
+    expect(minimal.cdpClients).toBeUndefined()
+    const full = decodeExtensionStatus({
+      connected: true,
+      version: "0.0.5",
+      activeTargets: 2,
+      childTargets: 1,
+      cdpClients: 3,
+      sessions: [session],
+      targets: [],
+    })
+    expect(full.childTargets).toBe(1)
+    expect(full.sessions).toHaveLength(1)
+  })
+
+  it("decodes target summaries", () => {
+    const targets = decodeTargets([
+      {
+        id: "T1",
+        type: "page",
+        title: "Example",
+        url: "https://example.com",
+        tabId: 7,
+        sessionId: "bc-tab-1",
+        browserControlSessionId: "rapid-otter-633",
+        owner: "relay",
+      },
+      { id: "T2", type: "page", title: "", url: "" },
+    ])
+    expect(targets[0]?.owner).toBe("relay")
+    expect(targets[1]?.tabId).toBeUndefined()
+  })
+
+  it("rejects an invalid target owner", () => {
+    expect(() => decodeTargets([{ id: "T1", type: "page", title: "", url: "", owner: "someone-else" }])).toThrow()
+  })
+
+  it("decodes recording responses", () => {
+    const start = decodeRecordingStart({ success: true, tabId: 7, startedAt: 1, path: "/tmp/rec", mimeType: "image/jpeg", mode: "cdp", artifactType: "frame-directory" })
+    expect(start.mode).toBe("cdp")
+    const failed = decodeRecordingStart({ success: false, error: "nope" })
+    expect(failed.error).toBe("nope")
+    const status = decodeRecordingStatus({ isRecording: false })
+    expect(status.isRecording).toBe(false)
+  })
+})

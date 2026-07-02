@@ -1,0 +1,39 @@
+{
+  "name": "@anomalyco/browser-control",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local browser driver for trusted agents: control your existing Chromium-family browser through a small extension and a local relay.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/anomalyco/browser-control.git"
+  },
+  "type": "module",
+  "bin": {
+    "browser-control": "./dist/cli.js",
+    "browser-control-mcp": "./dist/mcp.js"
+  },
+  "scripts": {
+    "build:cli": "tsx scripts/build-cli.ts",
+    "build": "pnpm build:cli && pnpm build:extension",
+    "build:extension": "tsx scripts/build-extension.ts",
+    "smoke": "tsx scripts/smoke.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@effect/platform-node": "^4.0.0-beta.92",
+    "acorn": "^8.17.0",
+    "effect": "^4.0.0-beta.92",
+    "playwright-core": "^1.57.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.1.33",
+    "@types/node": "^25.0.3",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.27.2",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.9"
+  }
+}

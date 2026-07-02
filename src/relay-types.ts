@@ -1,0 +1,68 @@
+import type { Effect, Semaphore } from "effect"
+import type { ExecuteOptions, ExecuteResult } from "./execute.ts"
+import type { JsonObject, TargetInfo } from "./protocol.ts"
+import type { SessionSummary } from "./relay-schema.ts"
+
+export type ConnectedTarget = {
+  readonly tabId: number
+  readonly sessionId: string
+  /**
+   * The Browser Control session the tab was created for. Owned tabs are
+   * visible only to that session's CDP clients; unowned tabs (user
+   * toolbar-attached or raw-client-created) are visible to every client.
+   */
+  readonly browserControlSessionId?: string
+  readonly targetInfo: TargetInfo
+  readonly owner: "relay" | "user"
+}
+
+export type ChildTarget = {
+  readonly tabId: number
+  readonly sessionId: string
+  readonly parentSessionId: string
+  readonly targetInfo: TargetInfo
+  readonly waitingForDebugger: boolean
+}
+
+export type StoredFrameEvents = {
+  readonly frameId: string
+  readonly attached?: JsonObject
+  readonly navigated?: JsonObject
+}
+
+export type PendingExtensionRequest = {
+  readonly resolve: (value: JsonObject) => void
+  readonly reject: (error: Error) => void
+  readonly timeout: NodeJS.Timeout
+}
+
+/**
+ * The sandbox seam used by session management. `ExecuteSandbox` is the real
+ * implementation; tests can substitute a fake.
+ */
+export interface ExecuteSandboxLike {
+  execute(code: string, options?: ExecuteOptions): Effect.Effect<ExecuteResult>
+  close(): Effect.Effect<void, Error>
+  getStatus(): {
+    readonly sessionId?: string
+    readonly connected: boolean
+    readonly pageUrl: string | null
+    readonly stateKeys: string[]
+  }
+}
+
+export type BrowserControlSession = {
+  readonly id: string
+  readonly createdAt: string
+  readonly readOnly: boolean
+  readonly sandbox: ExecuteSandboxLike
+  readonly executeSemaphore: Semaphore.Semaphore
+  updatedAt: string
+}
+
+export type { SessionSummary }
+
+export type RelayServer = {
+  readonly url: string
+  readonly close: () => Effect.Effect<void>
+}
