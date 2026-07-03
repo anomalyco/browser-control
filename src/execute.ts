@@ -100,6 +100,22 @@ export type ExecuteTargetSelection = {
   readonly index?: number
 }
 
+export type AdoptTarget = {
+  readonly targetId: string
+  readonly url: string
+}
+
+export const defaultPageClosedWarning = "The session default page was closed; created a new page. References to the old page in state are stale."
+
+export const shouldCloseCurrentPageOnAdopt = (options: {
+  readonly hasCurrentPage: boolean
+  readonly ownsCurrentPage: boolean
+  readonly currentPageIsSelected: boolean
+  readonly currentPageIsClosed: boolean
+}): boolean => {
+  return options.hasCurrentPage && options.ownsCurrentPage && !options.currentPageIsSelected && !options.currentPageIsClosed
+}
+
 type ExecuteSandboxOptions = {
   readonly endpointUrl: string
   readonly sessionId?: string
@@ -226,6 +242,39 @@ export class ExecuteSandbox {
     })
   }
 
+  adoptPage(target: AdoptTarget): Effect.Effect<string, Error> {
+    return Effect.tryPromise({
+      try: async () => {
+        if (!this.browser?.isConnected()) {
+          await this.browser?.close().catch(() => {})
+          this.browser = await chromium.connectOverCDP(this.options.endpointUrl, {
+            ...(this.options.sessionId ? { headers: { "Browser-Control-Session-Id": this.options.sessionId } } : {}),
+          })
+          this.page = undefined
+          this.ownsPage = false
+        }
+        const context = this.browser.contexts()[0] ?? (await this.browser.newContext())
+        const selected = selectPageForAdopt({ pages: context.pages(), target })
+        if (!selected) {
+          throw new Error(`No attached page found for target ${target.targetId} (${target.url})`)
+        }
+        const currentPage = this.page
+        if (shouldCloseCurrentPageOnAdopt({
+          hasCurrentPage: currentPage !== undefined,
+          ownsCurrentPage: this.ownsPage,
+          currentPageIsSelected: currentPage === selected,
+          currentPageIsClosed: currentPage?.isClosed() ?? true,
+        })) {
+          await currentPage?.close().catch(() => {})
+        }
+        this.page = selected
+        this.ownsPage = false
+        return selected.url()
+      },
+      catch: (cause) => cause instanceof Error ? cause : new Error("adopt session page", { cause }),
+    })
+  }
+
   private async getGlobals(options: ExecuteOptions): Promise<SandboxGlobals> {
     if (!this.browser?.isConnected()) {
       const hadBrowser = this.browser !== undefined
@@ -317,7 +366,7 @@ export class ExecuteSandbox {
       return this.page
     }
     if (this.page?.isClosed()) {
-      this.pendingWarnings.push("The session default page was closed; created a new page. References to the old page in state are stale.")
+      this.pendingWarnings.push(defaultPageClosedWarning)
     }
     this.page = await context.newPage()
     this.ownsPage = true
@@ -356,13 +405,25 @@ async function hideHandoffBanner(page: Page): Promise<void> {
   })
 }
 
-function selectPage({ pages, selection }: { readonly pages: readonly Page[]; readonly selection: ExecuteTargetSelection }): Page | undefined {
+export function hasExplicitTargetSelection(selection: ExecuteTargetSelection | undefined): boolean {
+  return Boolean(selection?.urlIncludes) || selection?.index !== undefined
+}
+
+export function selectTarget<T>({
+  targets,
+  selection,
+  getUrl,
+}: {
+  readonly targets: readonly T[]
+  readonly selection: ExecuteTargetSelection
+  readonly getUrl: (target: T) => string
+}): T | undefined {
   if (selection.urlIncludes && selection.index !== undefined) {
     throw new Error("Use only one target selector: --target-url or --target-index")
   }
   if (selection.urlIncludes) {
-    const matches = pages.filter((candidate) => {
-      return candidate.url().includes(selection.urlIncludes ?? "")
+    const matches = targets.filter((candidate) => {
+      return getUrl(candidate).includes(selection.urlIncludes ?? "")
     })
     if (matches.length === 0) {
       throw new Error(`No attached page URL includes ${selection.urlIncludes}`)
@@ -376,16 +437,56 @@ function selectPage({ pages, selection }: { readonly pages: readonly Page[]; rea
     if (selection.index < 0) {
       throw new Error("Target index must be a non-negative integer")
     }
-    const page = pages[selection.index]
-    if (!page) {
-      throw new Error(`No attached page at index ${selection.index}; ${pages.length} page(s) available`)
+    const target = targets[selection.index]
+    if (!target) {
+      throw new Error(`No attached page at index ${selection.index}; ${targets.length} page(s) available`)
     }
-    return page
+    return target
   }
-  if (pages.length > 1) {
-    throw new Error(`Multiple attached pages (${pages.length}); use --target-url or --target-index to choose one`)
+  if (targets.length > 1) {
+    throw new Error(`Multiple attached pages (${targets.length}); use --target-url or --target-index to choose one`)
   }
-  return pages[0]
+  return targets[0]
+}
+
+function selectPage({ pages, selection }: { readonly pages: readonly Page[]; readonly selection: ExecuteTargetSelection }): Page | undefined {
+  return selectTarget({ targets: pages, selection, getUrl: (page) => page.url() })
+}
+
+export function selectTargetById<T>({
+  targets,
+  targetId,
+  getTargetId,
+}: {
+  readonly targets: readonly T[]
+  readonly targetId: string
+  readonly getTargetId: (target: T) => string | undefined
+}): T | undefined {
+  return targets.find((target) => getTargetId(target) === targetId)
+}
+
+export function selectAdoptCandidateByUrl<T>({
+  candidates,
+  targetUrl,
+  getUrl,
+}: {
+  readonly candidates: readonly T[]
+  readonly targetUrl: string
+  readonly getUrl: (candidate: T) => string
+}): T | undefined {
+  const matches = candidates.filter((candidate) => getUrl(candidate) === targetUrl)
+  if (matches.length > 1) {
+    throw new Error(`Multiple Playwright pages have URL ${targetUrl}; cannot safely map the validated target to a page without a relay target-id hook`)
+  }
+  return matches[0]
+}
+
+function selectPageForAdopt({ pages, target }: { readonly pages: readonly Page[]; readonly target: AdoptTarget }): Page | undefined {
+  return selectAdoptCandidateByUrl({
+    candidates: pages.filter((page) => !page.isClosed()),
+    targetUrl: target.url,
+    getUrl: (page) => page.url(),
+  })
 }
 
 function ghostCursorOptions(options: ShowGhostCursorOptions | undefined): GhostCursorClientOptions | undefined {

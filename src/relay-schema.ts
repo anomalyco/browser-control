@@ -40,6 +40,29 @@ export const SessionDeleted = Schema.Struct({
 
 export interface SessionDeleted extends Schema.Schema.Type<typeof SessionDeleted> {}
 
+export const TargetSelection = Schema.Struct({
+  urlIncludes: Schema.optionalKey(Schema.String),
+  index: Schema.optionalKey(Schema.Number),
+})
+
+export interface TargetSelection extends Schema.Schema.Type<typeof TargetSelection> {}
+
+export const SessionAdoptRequest = Schema.Struct({
+  sessionId: Schema.String,
+  createIfMissing: Schema.Boolean,
+  targetSelection: TargetSelection,
+})
+
+export interface SessionAdoptRequest extends Schema.Schema.Type<typeof SessionAdoptRequest> {}
+
+export const SessionAdoptResponse = Schema.Struct({
+  session: SessionSummary,
+  adoptedUrl: Schema.String,
+  adoptedTargetId: Schema.String,
+})
+
+export interface SessionAdoptResponse extends Schema.Schema.Type<typeof SessionAdoptResponse> {}
+
 export const ExecuteLogLocation = Schema.Struct({
   url: Schema.String,
   lineNumber: Schema.Number,

@@ -9,10 +9,12 @@ import {
   RecordingStatusResponse,
   RecordingStopResponse,
   RelayVersion,
+  SessionAdoptResponse,
   SessionContainer,
   SessionDeleted,
   SessionsContainer,
   TargetSummaries,
+  type SessionAdoptRequest,
   type SessionSummary,
   type TargetSummary,
 } from "./relay-schema.ts"
@@ -91,6 +93,7 @@ export interface Interface {
   readonly sessions: Effect.Effect<readonly SessionSummary[], RelayClientError>
   readonly sessionNew: (id?: string | undefined, options?: { readonly readOnly?: boolean }) => Effect.Effect<SessionSummary, RelayClientError>
   readonly sessionReset: (id: string) => Effect.Effect<SessionSummary, RelayClientError>
+  readonly sessionAdopt: (request: SessionAdoptRequest) => Effect.Effect<SessionAdoptResponse, RelayClientError>
   readonly sessionDelete: (id: string) => Effect.Effect<SessionDeleted, RelayClientError>
   readonly execute: (request: ExecuteRequest) => Effect.Effect<ExecuteResponse, RelayClientError>
   readonly recordingStart: (request: RecordingStartRequest) => Effect.Effect<RecordingStartResponse, RelayClientError>
@@ -204,6 +207,12 @@ export const make = Effect.fnUntraced(function* (options?: { readonly endpoint?:
       }, SessionContainer).pipe(Effect.map((container) => container.session)),
     sessionReset: (id) =>
       postJson("/cli/session/reset", { id }, SessionContainer).pipe(Effect.map((container) => container.session)),
+    sessionAdopt: (request) =>
+      postJson("/cli/session/adopt", {
+        sessionId: request.sessionId,
+        createIfMissing: request.createIfMissing,
+        targetSelection: request.targetSelection,
+      }, SessionAdoptResponse),
     sessionDelete: (id) => postJson("/cli/session/delete", { id }, SessionDeleted),
     execute: (request) =>
       postJson("/cli/execute", {

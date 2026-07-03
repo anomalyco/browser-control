@@ -48,6 +48,124 @@ type CaseRunResult = {
   readonly error?: string
 }
 
+const runLocalCartFlow = Effect.fnUntraced(function* (page: Page) {
+  yield* playwright("set cart fixture", () =>
+    page.setContent(`
+      <!doctype html>
+      <html>
+        <head><title>Cart Fixture</title></head>
+        <body>
+          <main id="product">
+            <h1 class="name">Samsung galaxy s6</h1>
+            <a href="#" id="add-to-cart">Add to cart</a>
+            <a href="#cart" id="cartur">Cart</a>
+          </main>
+          <main id="cart" hidden>
+            <table><tbody id="tbodyid"></tbody></table>
+          </main>
+          <script>
+            const productName = document.querySelector('.name').textContent
+            document.querySelector('#add-to-cart').addEventListener('click', (event) => {
+              event.preventDefault()
+              window.cartProduct = productName
+            })
+            document.querySelector('#cartur').addEventListener('click', (event) => {
+              event.preventDefault()
+              document.querySelector('#product').hidden = true
+              document.querySelector('#cart').hidden = false
+              document.querySelector('#tbodyid').innerHTML = '<tr><td>' + window.cartProduct + '</td></tr>'
+            })
+          </script>
+        </body>
+      </html>
+    `),
+  )
+  yield* playwright("wait product page", () => page.locator(".name").waitFor({ timeout: 10_000 }))
+  const productName = yield* textContent(page.locator(".name"), "product name")
+  yield* click(page.getByRole("link", { name: "Add to cart" }), "add to cart")
+  yield* click(page.locator("#cartur"), "cart link")
+  yield* playwright("wait cart row", () => page.locator("#tbodyid tr").first().waitFor({ timeout: 10_000 }))
+  return {
+    productName,
+    cartText: yield* textContent(page.locator("#tbodyid"), "cart contents"),
+  }
+})
+
+const runLocalCheckoutFlow = Effect.fnUntraced(function* (page: Page) {
+  yield* playwright("set checkout fixture", () =>
+    page.setContent(`
+      <!doctype html>
+      <html>
+        <head><title>Swag Labs Fixture</title></head>
+        <body>
+          <main id="login">
+            <h1>Swag Labs</h1>
+            <input id="user-name" placeholder="Username" />
+            <input id="password" placeholder="Password" type="password" />
+            <button id="login-button">Login</button>
+          </main>
+          <main id="products" hidden>
+            <h1>Products</h1>
+            <button>Add to cart</button>
+            <a class="shopping_cart_link" href="#cart">Cart</a>
+          </main>
+          <main id="cart" hidden>
+            <h1>Your Cart</h1>
+            <button>Checkout</button>
+          </main>
+          <main id="checkout" hidden>
+            <input id="first-name" />
+            <input id="last-name" />
+            <input id="postal-code" />
+            <button id="continue">Continue</button>
+            <button id="finish" hidden>Finish</button>
+          </main>
+          <main id="complete" hidden>
+            <h2 class="complete-header">Thank you for your order!</h2>
+          </main>
+          <script>
+            const show = (id) => {
+              document.querySelectorAll('main').forEach((element) => {
+                element.hidden = element.id !== id
+              })
+            }
+            document.querySelector('#login-button').addEventListener('click', () => show('products'))
+            document.querySelector('.shopping_cart_link').addEventListener('click', (event) => {
+              event.preventDefault()
+              show('cart')
+            })
+            document.querySelector('#cart button').addEventListener('click', () => show('checkout'))
+            document.querySelector('#continue').addEventListener('click', () => {
+              document.querySelector('#finish').hidden = false
+            })
+            document.querySelector('#finish').addEventListener('click', () => show('complete'))
+          </script>
+        </body>
+      </html>
+    `),
+  )
+  yield* fillInput(page.getByPlaceholder("Username"), "standard_user", "sauce username")
+  yield* fillInput(page.getByPlaceholder("Password"), "secret_sauce", "sauce password")
+  yield* click(page.getByRole("button", { name: "Login" }), "sauce login")
+  yield* playwright("wait products", () => page.getByText("Products").waitFor({ timeout: 10_000 }))
+  yield* click(page.getByRole("button", { name: "Add to cart" }).first(), "sauce add first item")
+  yield* click(page.locator(".shopping_cart_link"), "sauce cart")
+  yield* click(page.getByRole("button", { name: "Checkout" }), "sauce checkout")
+  yield* playwright("wait sauce checkout", () => page.locator("#continue").waitFor({ timeout: 10_000 }))
+  yield* fillInputs(
+    page,
+    [
+      { selector: "#first-name", value: "Kit" },
+      { selector: "#last-name", value: "BrowserControl" },
+      { selector: "#postal-code", value: "12345" },
+    ],
+    "sauce checkout fields",
+  )
+  yield* clickSelector(page, "#continue", "sauce continue")
+  yield* clickSelector(page, "#finish", "sauce finish")
+  return { complete: yield* textContent(page.locator(".complete-header"), "sauce complete") }
+})
+
 const cases: SmokeCase[] = [
   {
     name: "local-actions",
@@ -174,124 +292,57 @@ const cases: SmokeCase[] = [
   },
   {
     name: "local-cart",
-    run: Effect.fnUntraced(function* (page) {
-      yield* playwright("set cart fixture", () =>
-        page.setContent(`
-          <!doctype html>
-          <html>
-            <head><title>Cart Fixture</title></head>
-            <body>
-              <main id="product">
-                <h1 class="name">Samsung galaxy s6</h1>
-                <a href="#" id="add-to-cart">Add to cart</a>
-                <a href="#cart" id="cartur">Cart</a>
-              </main>
-              <main id="cart" hidden>
-                <table><tbody id="tbodyid"></tbody></table>
-              </main>
-              <script>
-                const productName = document.querySelector('.name').textContent
-                document.querySelector('#add-to-cart').addEventListener('click', (event) => {
-                  event.preventDefault()
-                  window.cartProduct = productName
-                })
-                document.querySelector('#cartur').addEventListener('click', (event) => {
-                  event.preventDefault()
-                  document.querySelector('#product').hidden = true
-                  document.querySelector('#cart').hidden = false
-                  document.querySelector('#tbodyid').innerHTML = '<tr><td>' + window.cartProduct + '</td></tr>'
-                })
-              </script>
-            </body>
-          </html>
-        `),
-      )
-      yield* playwright("wait product page", () => page.locator(".name").waitFor({ timeout: 10_000 }))
-      const productName = yield* textContent(page.locator(".name"), "product name")
-      yield* click(page.getByRole("link", { name: "Add to cart" }), "add to cart")
-      yield* click(page.locator("#cartur"), "cart link")
-      yield* playwright("wait cart row", () => page.locator("#tbodyid tr").first().waitFor({ timeout: 10_000 }))
-      return {
-        productName,
-        cartText: yield* textContent(page.locator("#tbodyid"), "cart contents"),
-      }
-    }),
+    run: runLocalCartFlow,
   },
   {
     name: "local-checkout",
+    run: runLocalCheckoutFlow,
+  },
+  {
+    // Regression for issue #7: a pre-existing Browser Control session sandbox
+    // must not attach to a second raw CDP client's pages. If it does, the cart
+    // page can appear to work but checkout's first locator.evaluate wedges.
+    name: "stale-client-checkout",
     run: Effect.fnUntraced(function* (page) {
-      yield* playwright("set checkout fixture", () =>
-        page.setContent(`
-          <!doctype html>
-          <html>
-            <head><title>Swag Labs Fixture</title></head>
-            <body>
-              <main id="login">
-                <h1>Swag Labs</h1>
-                <input id="user-name" placeholder="Username" />
-                <input id="password" placeholder="Password" type="password" />
-                <button id="login-button">Login</button>
-              </main>
-              <main id="products" hidden>
-                <h1>Products</h1>
-                <button>Add to cart</button>
-                <a class="shopping_cart_link" href="#cart">Cart</a>
-              </main>
-              <main id="cart" hidden>
-                <h1>Your Cart</h1>
-                <button>Checkout</button>
-              </main>
-              <main id="checkout" hidden>
-                <input id="first-name" />
-                <input id="last-name" />
-                <input id="postal-code" />
-                <button id="continue">Continue</button>
-                <button id="finish" hidden>Finish</button>
-              </main>
-              <main id="complete" hidden>
-                <h2 class="complete-header">Thank you for your order!</h2>
-              </main>
-              <script>
-                const show = (id) => {
-                  document.querySelectorAll('main').forEach((element) => {
-                    element.hidden = element.id !== id
-                  })
-                }
-                document.querySelector('#login-button').addEventListener('click', () => show('products'))
-                document.querySelector('.shopping_cart_link').addEventListener('click', (event) => {
-                  event.preventDefault()
-                  show('cart')
-                })
-                document.querySelector('#cart button').addEventListener('click', () => show('checkout'))
-                document.querySelector('#continue').addEventListener('click', () => {
-                  document.querySelector('#finish').hidden = false
-                })
-                document.querySelector('#finish').addEventListener('click', () => show('complete'))
-              </script>
-            </body>
-          </html>
-        `),
-      )
-      yield* fillInput(page.getByPlaceholder("Username"), "standard_user", "sauce username")
-      yield* fillInput(page.getByPlaceholder("Password"), "secret_sauce", "sauce password")
-      yield* click(page.getByRole("button", { name: "Login" }), "sauce login")
-      yield* playwright("wait products", () => page.getByText("Products").waitFor({ timeout: 10_000 }))
-      yield* click(page.getByRole("button", { name: "Add to cart" }).first(), "sauce add first item")
-      yield* click(page.locator(".shopping_cart_link"), "sauce cart")
-      yield* click(page.getByRole("button", { name: "Checkout" }), "sauce checkout")
-      yield* playwright("wait sauce checkout", () => page.locator("#continue").waitFor({ timeout: 10_000 }))
-      yield* fillInputs(
-        page,
-        [
-          { selector: "#first-name", value: "Kit" },
-          { selector: "#last-name", value: "BrowserControl" },
-          { selector: "#postal-code", value: "12345" },
-        ],
-        "sauce checkout fields",
-      )
-      yield* clickSelector(page, "#continue", "sauce continue")
-      yield* clickSelector(page, "#finish", "sauce finish")
-      return { complete: yield* textContent(page.locator(".complete-header"), "sauce complete") }
+      const marker = `bc-stale-${Date.now()}`
+      const staleSession = `${marker}-session`
+      yield* boundedCleanup("close wrapper stale-client page", () => page.close())
+      yield* closeOwningBrowser(page, "close wrapper client before stale-client checkout")
+      return yield* Effect.gen(function* () {
+        yield* runBrowserControl(["session", "new", staleSession])
+        const output = yield* runBrowserControl(["execute", "--session", staleSession, "return page.url()"])
+        return yield* Effect.scoped(
+          Effect.gen(function* () {
+            const browser = yield* scopedBrowser()
+            const context = yield* playwright("get stale checkout browser context", () => getBrowserContext(browser))
+            const checkoutPage = yield* playwright("create stale checkout page", () => context.newPage())
+            return yield* Effect.gen(function* () {
+              const cart = yield* runLocalCartFlow(checkoutPage)
+              const checkout = yield* runLocalCheckoutFlow(checkoutPage)
+              return { staleSession, output: output.trim(), cart, checkout }
+            }).pipe(Effect.ensuring(boundedCleanup("close stale checkout page", () => checkoutPage.close())))
+          }),
+        )
+      }).pipe(Effect.ensuring(runBrowserControl(["session", "delete", staleSession]).pipe(Effect.ignore)))
+    }),
+  },
+  {
+    // Reviewer regression: a raw client page can be announced to a session
+    // client before that session owns a target. When the session later creates
+    // its sandbox page, the relay must detach/prune the raw target from that
+    // session so the raw client's evaluate path stays healthy.
+    name: "raw-first-checkout",
+    run: Effect.fnUntraced(function* (page) {
+      const marker = `bc-raw-first-${Date.now()}`
+      const session = `${marker}-session`
+      yield* playwright("set raw-first marker", () => page.setContent(`<title>${marker}</title><input placeholder="raw marker" />`))
+      return yield* Effect.gen(function* () {
+        yield* runBrowserControl(["session", "new", session])
+        const output = yield* runBrowserControl(["execute", "--session", session, "return page.url()"])
+        const cart = yield* runLocalCartFlow(page)
+        const checkout = yield* runLocalCheckoutFlow(page)
+        return { session, output: output.trim(), cart, checkout }
+      }).pipe(Effect.ensuring(runBrowserControl(["session", "delete", session]).pipe(Effect.ignore)))
     }),
   },
   {

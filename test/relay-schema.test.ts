@@ -6,6 +6,8 @@ import {
   ExtensionStatus,
   RecordingStartResponse,
   RecordingStatusResponse,
+  SessionAdoptRequest,
+  SessionAdoptResponse,
   SessionContainer,
   SessionsContainer,
   SessionSummary,
@@ -15,6 +17,9 @@ import {
 const decodeSession = Schema.decodeUnknownSync(SessionSummary)
 const decodeSessions = Schema.decodeUnknownSync(SessionsContainer)
 const decodeSessionContainer = Schema.decodeUnknownSync(SessionContainer)
+const decodeAdoptRequest = Schema.decodeUnknownSync(SessionAdoptRequest)
+const decodeAdoptResponse = Schema.decodeUnknownSync(SessionAdoptResponse)
+const encodeAdoptResponse = Schema.encodeUnknownSync(SessionAdoptResponse)
 const decodeExecute = Schema.decodeUnknownSync(ExecuteResponse)
 const encodeExecute = Schema.encodeUnknownSync(ExecuteResponse)
 const decodeExecuteSession = Schema.decodeUnknownSync(ExecuteSessionSummary)
@@ -51,6 +56,16 @@ describe("relay-schema", () => {
   it("decodes sessions and session containers", () => {
     expect(decodeSessions({ sessions: [session] }).sessions).toHaveLength(1)
     expect(decodeSessionContainer({ session }).session.id).toBe(session.id)
+  })
+
+  it("decodes adopt requests and round-trips adopt responses", () => {
+    expect(decodeAdoptRequest({
+      sessionId: "rapid-otter-633",
+      createIfMissing: true,
+      targetSelection: { urlIncludes: "example.com" },
+    }).targetSelection.urlIncludes).toBe("example.com")
+    const response = { session, adoptedUrl: "https://example.com/", adoptedTargetId: "target-2" }
+    expect(encodeAdoptResponse(decodeAdoptResponse(response))).toEqual(response)
   })
 
   it("decodes the optional readOnly flag on sessions", () => {

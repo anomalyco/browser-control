@@ -1,5 +1,5 @@
 import type { Effect, Semaphore } from "effect"
-import type { ExecuteOptions, ExecuteResult } from "./execute.ts"
+import type { AdoptTarget, ExecuteOptions, ExecuteResult } from "./execute.ts"
 import type { JsonObject, TargetInfo } from "./protocol.ts"
 import type { SessionSummary } from "./relay-schema.ts"
 
@@ -42,6 +42,7 @@ export type PendingExtensionRequest = {
  */
 export interface ExecuteSandboxLike {
   execute(code: string, options?: ExecuteOptions): Effect.Effect<ExecuteResult>
+  adoptPage(target: AdoptTarget): Effect.Effect<string, Error>
   close(): Effect.Effect<void, Error>
   getStatus(): {
     readonly sessionId?: string
@@ -57,6 +58,7 @@ export type BrowserControlSession = {
   readonly readOnly: boolean
   readonly sandbox: ExecuteSandboxLike
   readonly executeSemaphore: Semaphore.Semaphore
+  adoptedTargetId?: string
   updatedAt: string
 }
 

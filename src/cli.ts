@@ -360,6 +360,47 @@ const sessionReset = Command.make(
   }),
 ).pipe(Command.withDescription("Reset a Browser Control session state and page"))
 
+const sessionAdopt = Command.make(
+  "adopt",
+  {
+    session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Use this Browser Control session id")),
+    targetUrl: Flag.string("target-url").pipe(Flag.optional, Flag.withDescription("Adopt the attached page whose URL contains this text")),
+    targetIndex: Flag.integer("target-index").pipe(Flag.optional, Flag.withDescription("Adopt the attached page at this zero-based target index")),
+  },
+  Effect.fn("Cli.sessionAdopt")(function* ({ session, targetUrl, targetIndex }) {
+    const relay = yield* RelayClient.Service
+    const explicitSessionId = optionString(session) ?? process.env.BROWSER_CONTROL_SESSION
+    const defaultSession = explicitSessionId ? undefined : yield* getOrCreateDefaultSessionId
+    const sessionId = explicitSessionId ?? defaultSession?.sessionId
+    if (!sessionId) {
+      return yield* Effect.fail(new Error("No session provided and no current Browser Control session exists"))
+    }
+    if (explicitSessionId) {
+      yield* ensureSessionExists(explicitSessionId)
+    }
+    const targetUrlValue = optionString(targetUrl)
+    const targetIndexValue = optionNumber(targetIndex)
+    if (!targetUrlValue && targetIndexValue === undefined) {
+      return yield* Effect.fail(new Error("session adopt requires --target-url or --target-index"))
+    }
+    if (targetIndexValue !== undefined && targetIndexValue < 0) {
+      return yield* Effect.fail(new Error("Target index must be a non-negative integer"))
+    }
+    if (targetUrlValue && targetIndexValue !== undefined) {
+      return yield* Effect.fail(new Error("Use only one target selector: --target-url or --target-index"))
+    }
+    const result = yield* relay.sessionAdopt({
+      sessionId,
+      createIfMissing: !explicitSessionId,
+      targetSelection: {
+        ...(targetUrlValue ? { urlIncludes: targetUrlValue } : {}),
+        ...(targetIndexValue !== undefined ? { index: targetIndexValue } : {}),
+      },
+    })
+    yield* Console.log(`Adopted session '${result.session.id}' default page: ${result.adoptedUrl}`)
+  }),
+).pipe(Command.withDescription("Make an attached tab the session's default page"))
+
 const sessionDelete = Command.make(
   "delete",
   {
@@ -380,7 +421,7 @@ const sessionDelete = Command.make(
 
 const session = Command.make("session").pipe(
   Command.withDescription("Manage Browser Control sessions"),
-  Command.withSubcommands([sessionNew, sessionList, sessionCurrent, sessionUse, sessionReset, sessionDelete]),
+  Command.withSubcommands([sessionNew, sessionList, sessionCurrent, sessionUse, sessionReset, sessionAdopt, sessionDelete]),
 )
 
 const status = Command.make(

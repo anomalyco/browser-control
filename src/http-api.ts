@@ -1,5 +1,5 @@
 import http from "node:http"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import {
   HttpRouteError,
   formatHostForUrl,
@@ -14,6 +14,8 @@ import {
   validateBrowserFetchSite,
   validateHostHeader,
 } from "./relay-helpers.ts"
+import { selectTarget } from "./execute.ts"
+import { SessionAdoptRequest } from "./relay-schema.ts"
 import type { BrowserControlSessions } from "./session-manager.ts"
 import type { RecordingMode, RecordingRelay, RecordingStartOptions, RecordingTargetOptions } from "./recording-relay.ts"
 import type { TargetRegistry } from "./target-registry.ts"
@@ -28,6 +30,11 @@ export function createHttpRequestHandler(options: {
   readonly registry: TargetRegistry
   readonly sessions: BrowserControlSessions
 }): (request: http.IncomingMessage, response: http.ServerResponse) => void {
+  options.sessions.setUserAttachedPageUrlsProvider(() =>
+    options.registry.listRootTargets()
+      .filter((target) => target.owner === "user")
+      .map((target) => target.targetInfo.url || "about:blank")
+  )
   return (request, response) => {
     const hostError = validateHostHeader({ hostHeader: request.headers.host, host: options.host, port: options.port })
     if (hostError) {
@@ -84,7 +91,7 @@ export function createHttpRequestHandler(options: {
       return
     }
     if (pathname.startsWith("/cli/")) {
-      Effect.runPromise(handleCliRequest({ request, response, pathname, sessions: options.sessions })).catch((error: unknown) => {
+      Effect.runPromise(handleCliRequest({ request, response, pathname, sessions: options.sessions, registry: options.registry })).catch((error: unknown) => {
         sendJson(response, {
           error: error instanceof Error ? error.message : String(error),
         }, error instanceof HttpRouteError ? error.status : 500)
@@ -182,6 +189,7 @@ function handleCliRequest(options: {
   readonly response: http.ServerResponse
   readonly pathname: string
   readonly sessions: BrowserControlSessions
+  readonly registry: TargetRegistry
 }): Effect.Effect<void, Error> {
   return Effect.gen(function* () {
     if (options.pathname === "/cli/sessions" && options.request.method === "GET") {
@@ -197,23 +205,55 @@ function handleCliRequest(options: {
     if (options.pathname === "/cli/session/delete" && options.request.method === "POST") {
       const body = yield* readJsonBody(options.request)
       const id = requiredSessionId(body.id)
+      const adoptedTargetId = options.sessions.adoptedTargetId(id)
       const deleted = yield* options.sessions.delete(id)
       if (!deleted) {
         sendJson(options.response, { error: `Session not found: ${id}` }, 404)
         return
       }
+      releaseSessionTargets(options.registry, id, adoptedTargetId ? [adoptedTargetId] : [])
       sendJson(options.response, { deleted: true, id })
       return
     }
     if (options.pathname === "/cli/session/reset" && options.request.method === "POST") {
       const body = yield* readJsonBody(options.request)
       const id = requiredSessionId(body.id)
+      const adoptedTargetId = options.sessions.adoptedTargetId(id)
       const session = yield* options.sessions.reset(id)
       if (!session) {
         sendJson(options.response, { error: `Session not found: ${id}` }, 404)
         return
       }
+      releaseSessionTargets(options.registry, id, adoptedTargetId ? [adoptedTargetId] : [])
       sendJson(options.response, { session })
+      return
+    }
+    if (options.pathname === "/cli/session/adopt" && options.request.method === "POST") {
+      const body = yield* readJsonBody(options.request)
+      const request = yield* Schema.decodeUnknownEffect(SessionAdoptRequest)(body).pipe(
+        Effect.mapError((cause) => new Error(`Invalid session adopt request: ${cause.message}`)),
+      )
+      const targetSelection = parseTargetSelection(request.targetSelection)
+      if (!targetSelection) {
+        throw new Error("targetSelection is required")
+      }
+      const selectedTarget = selectTarget({
+        targets: options.registry.listRootTargets(),
+        selection: targetSelection,
+        getUrl: (target) => target.targetInfo.url,
+      })
+      if (!selectedTarget) {
+        throw new Error("No page matched target selection")
+      }
+      const adoptedTargetId = selectedTarget.targetInfo.targetId
+      const { session, adoptedUrl, releasedTargetIds } = yield* options.sessions.adopt({
+        sessionId: request.sessionId,
+        createIfMissing: request.createIfMissing,
+        targetId: adoptedTargetId,
+        targetUrl: selectedTarget.targetInfo.url,
+      })
+      releaseSessionTargets(options.registry, request.sessionId, releasedTargetIds)
+      sendJson(options.response, { session, adoptedUrl, adoptedTargetId })
       return
     }
     if (options.pathname === "/cli/execute" && options.request.method === "POST") {
@@ -244,6 +284,23 @@ function targetSummaries(registry: TargetRegistry) {
         owner: target.owner,
       }
   })
+}
+
+export function releaseSessionTargets(registry: TargetRegistry, browserControlSessionId: string, targetIds: readonly string[]): void {
+  const releaseTargetIds = new Set(targetIds)
+  if (releaseTargetIds.size === 0) {
+    return
+  }
+  for (const target of registry.listRootTargets()) {
+    if (target.browserControlSessionId !== browserControlSessionId) {
+      continue
+    }
+    if (!releaseTargetIds.has(target.targetInfo.targetId)) {
+      continue
+    }
+    const { browserControlSessionId: _released, ...releasedTarget } = target
+    registry.addRootTarget(releasedTarget)
+  }
 }
 
 function resolveAttachedRecordingTarget(options: {

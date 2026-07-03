@@ -75,6 +75,15 @@ local Node relay.
   add `process.argv[1] === import.meta.url` self-run guards to modules that get
   bundled into `dist/cli.js`; esbuild inlining makes the guard fire inside the
   CLI bundle.
+- CDP target visibility is scoped per client (`src/cdp-visibility.ts`):
+  session-owned tabs are announced and their events delivered only to that
+  session's clients; unowned tabs stay visible to everyone. Do not reintroduce
+  broadcast-to-all: it double-initializes pages across clients and hangs
+  `newPage`/`setContent`/`evaluate` (regression case: `stale-client-checkout`
+  smoke).
+- `session adopt` makes a user-attached tab the session's default page. Adopted
+  tabs are never closed by session reset/delete — only released. Adopting
+  closes the session's previously relay-created page.
 - Relay-created tabs should persist across short-lived `browser-control execute`
   commands so shell-based agents do not create and delete a visible tab for every
   probe.
@@ -100,7 +109,7 @@ local Node relay.
 - Extension shim changes require reloading the unpacked extension once in Brave.
 - Relay-only changes should not require reloading the extension.
 - Use `termctrl` for long-running relay sessions during testing.
-- Run `SMOKE_CASE=local-forms,local-cart,local-checkout,reconnect-evaluate,execute-target-url,execute-fill-helpers,oopif-reconnect,session-isolation,multi-client pnpm smoke`
+- Run `SMOKE_CASE=local-forms,local-cart,local-checkout,reconnect-evaluate,execute-target-url,execute-fill-helpers,oopif-reconnect,session-isolation,multi-client,stale-client-checkout,raw-first-checkout pnpm smoke`
   before claiming the current smoke set is green.
 - CDP target visibility is scoped per client (`src/cdp-visibility.ts`):
   session-owned tabs are announced and their events delivered only to that
@@ -133,7 +142,7 @@ browser-control skill
 
 - Load `extension/dist` as the unpacked extension.
 - The relay listens on `127.0.0.1:19989` by default.
-- Current shim version is `0.0.7`.
+- Current shim version is `0.0.8`.
 - On socket open the shim sends `hello` and then re-announces every tab it still
   has `chrome.debugger` attached to (`debugger.attached` events), so a restarted
   relay rebuilds its target registry without the user re-clicking the toolbar.
@@ -145,4 +154,7 @@ browser-control skill
 - The relay installs scoped `uncaughtException`/`unhandledRejection` guards for
   its lifetime; in-process playwright event dispatch errors are logged, not
   fatal.
-- The attached tab group should use the purple `browser-control` group.
+- The attached tab group should use the purple `browser-control` group. The
+  shim ungroups tabs when their debugger attachment ends (including the user
+  dismissing the "being debugged" banner, which detaches all tabs) and
+  reconciles stale `browser-control`/`bc:*` groups on startup and reconnect.

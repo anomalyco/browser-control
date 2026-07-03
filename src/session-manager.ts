@@ -1,5 +1,5 @@
 import { Effect, Option, Semaphore } from "effect"
-import { ExecuteSandbox, type ExecuteResult, type ExecuteTargetSelection } from "./execute.ts"
+import { defaultPageClosedWarning, ExecuteSandbox, hasExplicitTargetSelection, type ExecuteResult, type ExecuteTargetSelection } from "./execute.ts"
 import { generateSessionId } from "./relay-helpers.ts"
 import type { BrowserControlSession, ExecuteSandboxLike, SessionSummary } from "./relay-types.ts"
 
@@ -17,6 +17,25 @@ export type SessionHooks = {
   readonly onExecuteRecord?: (record: SessionExecuteRecord) => void
   /** How long delete waits for an in-flight execute before force-closing. */
   readonly deletePermitTimeoutMs?: number
+  /** Current user-owned attached page URLs, used for relay-side adoption hints. */
+  readonly getUserAttachedPageUrls?: () => readonly string[]
+}
+
+export const adoptionTipForUrl = (url: string): string => {
+  const selector = targetUrlHintSelector(url)
+  return `Tip: an attached tab is open (${url}). Use browser-control session adopt --target-url '${selector}' to drive it instead of this new tab.`
+}
+
+export const shouldAppendAdoptionTip = (options: {
+  readonly explicitTargetSelection: boolean
+  readonly sessionCreated: boolean
+  readonly warnings: readonly string[]
+  readonly userAttachedPageUrls: readonly string[]
+}): boolean => {
+  if (options.explicitTargetSelection || options.userAttachedPageUrls.length === 0) {
+    return false
+  }
+  return options.sessionCreated || options.warnings.includes(defaultPageClosedWarning)
 }
 
 export class BrowserControlSessions {
@@ -24,6 +43,7 @@ export class BrowserControlSessions {
   private readonly createSandbox: (id: string) => ExecuteSandboxLike
   private readonly hooks: SessionHooks
   private readonly executing = new Set<string>()
+  private userAttachedPageUrlsProvider: (() => readonly string[]) | undefined
 
   constructor(
     private readonly endpointUrl: string,
@@ -32,6 +52,11 @@ export class BrowserControlSessions {
   ) {
     this.createSandbox = createSandbox ?? ((id) => new ExecuteSandbox({ endpointUrl: this.endpointUrl, sessionId: id }))
     this.hooks = hooks ?? {}
+    this.userAttachedPageUrlsProvider = this.hooks.getUserAttachedPageUrls
+  }
+
+  setUserAttachedPageUrlsProvider(provider: () => readonly string[]): void {
+    this.userAttachedPageUrlsProvider = provider
   }
 
   listSummaries(): SessionSummary[] {
@@ -107,6 +132,10 @@ export class BrowserControlSessions {
     })
   }
 
+  adoptedTargetId(id: string): string | undefined {
+    return this.sessions.get(id)?.adoptedTargetId
+  }
+
   execute(options: {
     readonly sessionId: string
     readonly code: string
@@ -130,10 +159,50 @@ export class BrowserControlSessions {
           const result = yield* session.sandbox
             .execute(options.code, { ...(options.targetSelection ? { targetSelection: options.targetSelection } : {}) })
             .pipe(Effect.ensuring(Effect.sync(() => manager.setExecuting(session.id, false))))
+          const userAttachedPageUrls = manager.userAttachedPageUrlsProvider?.() ?? []
+          const resultWithHint = shouldAppendAdoptionTip({
+            explicitTargetSelection: hasExplicitTargetSelection(options.targetSelection),
+            sessionCreated: resolved.created,
+            warnings: result.warnings,
+            userAttachedPageUrls,
+          })
+            ? { ...result, warnings: [...result.warnings, adoptionTipForUrl(userAttachedPageUrls[0] ?? "about:blank")] }
+            : result
           session.updatedAt = new Date().toISOString()
-          manager.recordExecute({ sessionId: session.id, code: options.code, durationMs: Date.now() - startedAt, result })
+          manager.recordExecute({ sessionId: session.id, code: options.code, durationMs: Date.now() - startedAt, result: resultWithHint })
           const summary = manager.sessionSummary(session)
-          return { result, session: { ...summary, ...(resolved.created ? { created: true } : {}) } }
+          return { result: resultWithHint, session: { ...summary, ...(resolved.created ? { created: true } : {}) } }
+        }),
+      )
+    })
+  }
+
+  adopt(options: {
+    readonly sessionId: string
+    readonly createIfMissing: boolean
+    readonly targetId: string
+    readonly targetUrl: string
+  }): Effect.Effect<{ readonly adoptedUrl: string; readonly session: SessionSummary & { readonly created?: boolean }; readonly releasedTargetIds: readonly string[] }, Error> {
+    const manager = this
+    return Effect.gen(function* () {
+      const resolved = options.createIfMissing
+        ? manager.getOrCreate(options.sessionId)
+        : { session: manager.sessions.get(options.sessionId), created: false }
+      const session = resolved.session
+      if (!session) {
+        return yield* Effect.fail(new Error(`Session not found: ${options.sessionId}`))
+      }
+      return yield* session.executeSemaphore.withPermit(
+        Effect.gen(function* () {
+          const previousAdoptedTargetId = session.adoptedTargetId
+          const adoptedUrl = yield* session.sandbox.adoptPage({ targetId: options.targetId, url: options.targetUrl })
+          session.adoptedTargetId = options.targetId
+          session.updatedAt = new Date().toISOString()
+          const summary = manager.sessionSummary(session)
+          const releasedTargetIds = previousAdoptedTargetId && previousAdoptedTargetId !== options.targetId
+            ? [previousAdoptedTargetId]
+            : []
+          return { adoptedUrl, releasedTargetIds, session: { ...summary, ...(resolved.created ? { created: true } : {}) } }
         }),
       )
     })
@@ -205,5 +274,14 @@ export class BrowserControlSessions {
 
   private closeBrowserControlSession(session: BrowserControlSession): Effect.Effect<void> {
     return session.sandbox.close().pipe(Effect.ignore)
+  }
+}
+
+function targetUrlHintSelector(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl)
+    return parsed.host || rawUrl
+  } catch {
+    return rawUrl
   }
 }

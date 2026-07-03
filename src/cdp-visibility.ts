@@ -10,9 +10,15 @@
  *
  * Visibility rule:
  * - Session-owned targets are visible only to that session's clients.
- * - Everything else (user toolbar-attached tabs and tabs created by raw
- *   `connectOverCDP` clients) stays visible to every client, so raw-client
- *   reconnects and `--target-url` recovery keep working.
+ * - User toolbar-attached targets stay visible to every client, so
+ *   `--target-url` recovery keeps working.
+ * - Relay-created targets without a Browser Control session id belong to raw
+ *   `connectOverCDP` clients. They are visible to raw clients and to a session
+ *   client that does not already own a target, so explicit `--target-url`
+ *   adoption can still find existing attached pages. Once a session has its own
+ *   sandbox target, it must not attach to raw-client pages, or Playwright
+ *   double-initializes the page on Chrome's single debugger attachment and
+ *   `locator.evaluate` can wedge.
  *
  * Two simultaneous raw clients can still interfere with each other's tabs;
  * Browser Control sessions are the isolated, supported path.
@@ -20,9 +26,11 @@
 export function canClientSeeTarget(options: {
   readonly clientSessionId: string | undefined
   readonly targetOwnerSessionId: string | undefined
+  readonly targetOwner: "relay" | "user"
+  readonly clientHasOwnedTarget: boolean
 }): boolean {
   if (options.targetOwnerSessionId === undefined) {
-    return true
+    return options.targetOwner === "user" || options.clientSessionId === undefined || !options.clientHasOwnedTarget
   }
   return options.clientSessionId === options.targetOwnerSessionId
 }

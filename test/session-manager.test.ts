@@ -1,16 +1,18 @@
 import { describe, expect, it } from "vitest"
 import { Deferred, Effect, Fiber } from "effect"
-import { BrowserControlSessions } from "../src/session-manager.ts"
+import { adoptionTipForUrl, BrowserControlSessions, shouldAppendAdoptionTip } from "../src/session-manager.ts"
 import type { ExecuteSandboxLike } from "../src/relay-types.ts"
 
 type FakeSandbox = ExecuteSandboxLike & {
   readonly closes: () => number
+  readonly adoptedSelections: () => unknown[]
 }
 
 const makeFakeSandbox = (options?: {
   readonly onExecute?: Effect.Effect<void>
 }): FakeSandbox => {
   let closes = 0
+  const adoptedSelections: unknown[] = []
   return {
     execute: () =>
       (options?.onExecute ?? Effect.void).pipe(
@@ -20,8 +22,14 @@ const makeFakeSandbox = (options?: {
       Effect.sync(() => {
         closes += 1
       }),
+    adoptPage: (selection) =>
+      Effect.sync(() => {
+        adoptedSelections.push(selection)
+        return "https://example.com/adopted"
+      }),
     getStatus: () => ({ connected: false, pageUrl: null, stateKeys: [] }),
     closes: () => closes,
+    adoptedSelections: () => adoptedSelections,
   }
 }
 
@@ -241,5 +249,66 @@ describe("BrowserControlSessions", () => {
       sessions.execute({ sessionId: "alpha", code: "noop", createIfMissing: false }),
     )
     expect(result.text).toBe("ok")
+  })
+
+  it("adopts a selected page while serializing on the session execute permit", async () => {
+    const sandbox = makeFakeSandbox()
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox)
+    sessions.createNew("alpha")
+
+    const result = await Effect.runPromise(
+      sessions.adopt({ sessionId: "alpha", createIfMissing: false, targetId: "target-2", targetUrl: "https://example.com/adopted" }),
+    )
+
+    expect(result.session.id).toBe("alpha")
+    expect(result.adoptedUrl).toBe("https://example.com/adopted")
+    expect(sandbox.adoptedSelections()).toEqual([{ targetId: "target-2", url: "https://example.com/adopted" }])
+  })
+
+  it("reports whether adopt created a missing session", async () => {
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox())
+    const result = await Effect.runPromise(
+      sessions.adopt({ sessionId: "ghost", createIfMissing: true, targetId: "target-1", targetUrl: "https://example.com/adopted" }),
+    )
+    expect(result.session.id).toBe("ghost")
+    expect(result.session.created).toBe(true)
+  })
+
+  it("appends the adoption tip only for bare fresh-page executes with user-attached tabs", async () => {
+    expect(shouldAppendAdoptionTip({
+      explicitTargetSelection: false,
+      sessionCreated: true,
+      warnings: [],
+      userAttachedPageUrls: ["https://example.com/path"],
+    })).toBe(true)
+    expect(shouldAppendAdoptionTip({
+      explicitTargetSelection: true,
+      sessionCreated: true,
+      warnings: [],
+      userAttachedPageUrls: ["https://example.com/path"],
+    })).toBe(false)
+    expect(shouldAppendAdoptionTip({
+      explicitTargetSelection: false,
+      sessionCreated: false,
+      warnings: [],
+      userAttachedPageUrls: ["https://example.com/path"],
+    })).toBe(false)
+    expect(adoptionTipForUrl("https://example.com/path")).toBe(
+      "Tip: an attached tab is open (https://example.com/path). Use browser-control session adopt --target-url 'example.com' to drive it instead of this new tab.",
+    )
+  })
+
+  it("adds the adoption tip to execute warnings when a missing session is recreated", async () => {
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox(), {
+      getUserAttachedPageUrls: () => ["https://example.com/path"],
+    })
+
+    const { result } = await Effect.runPromise(
+      sessions.execute({ sessionId: "ghost", code: "noop", createIfMissing: true }),
+    )
+
+    expect(result.warnings).toContain(
+      "Tip: an attached tab is open (https://example.com/path). Use browser-control session adopt --target-url 'example.com' to drive it instead of this new tab.",
+    )
   })
 })

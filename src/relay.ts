@@ -780,6 +780,9 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       ...(options.browserControlSessionId ? { browserControlSessionId: options.browserControlSessionId } : {}),
     }
     registry.addRootTarget(target)
+    if (options.browserControlSessionId) {
+      pruneInvisibleAnnouncementsForSession(options.browserControlSessionId)
+    }
     yield* sendDebuggerCommand({
       tabId,
       method: "Target.setAutoAttach",
@@ -873,10 +876,17 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
   }
 
   function canSeeTarget(socket: WebSocket, target: ConnectedTarget): boolean {
+    const clientSessionId = cdpClientBrowserControlSessionIds.get(socket)
     return canClientSeeTarget({
-      clientSessionId: cdpClientBrowserControlSessionIds.get(socket),
+      clientSessionId,
       targetOwnerSessionId: target.browserControlSessionId,
+      targetOwner: target.owner,
+      clientHasOwnedTarget: clientHasOwnedTarget(clientSessionId),
     })
+  }
+
+  function clientHasOwnedTarget(clientSessionId: string | undefined): boolean {
+    return clientSessionId ? registry.listRootTargets().some((candidate) => candidate.browserControlSessionId === clientSessionId) : false
   }
 
   function canSeeTabId(socket: WebSocket, tabId: number): boolean {
@@ -894,10 +904,58 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
   // the tab's root target. Broadcasting to every client lets concurrently
   // connected sandboxes attach to each other's pages and interfere.
   function sendEventToTargetViewers(rootSessionId: string, event: CdpEvent): void {
+    const target = registry.targets.get(rootSessionId)
     for (const client of cdpClients) {
-      if (hasAnnouncedSession(cdpClientAnnouncements.get(client), rootSessionId)) {
-        sendCdpEvent(client, event)
+      if (!hasAnnouncedSession(cdpClientAnnouncements.get(client), rootSessionId)) {
+        continue
       }
+      if (target && !canSeeTarget(client, target)) {
+        detachAnnouncedSession(client, rootSessionId)
+        continue
+      }
+      sendCdpEvent(client, event)
+    }
+  }
+
+  function pruneInvisibleAnnouncementsForSession(browserControlSessionId: string): void {
+    for (const client of cdpClients) {
+      if (cdpClientBrowserControlSessionIds.get(client) === browserControlSessionId) {
+        pruneInvisibleAnnouncementsForClient(client)
+      }
+    }
+  }
+
+  function pruneInvisibleAnnouncementsForClient(client: WebSocket): void {
+    const announcements = cdpClientAnnouncements.get(client)
+    if (!announcements) {
+      return
+    }
+    for (const announced of Array.from(announcements.targets.values())) {
+      const rootTarget = registry.targets.get(announced.sessionId)
+      if (rootTarget) {
+        if (!canSeeTarget(client, rootTarget)) {
+          detachAnnouncedSession(client, announced.sessionId)
+        }
+        continue
+      }
+      const childTarget = registry.childTargets.get(announced.sessionId)
+      if (childTarget && !canSeeTabId(client, childTarget.tabId)) {
+        detachAnnouncedSession(client, announced.sessionId)
+      }
+    }
+  }
+
+  function detachAnnouncedSession(client: WebSocket, sessionId: string): void {
+    const announcements = cdpClientAnnouncements.get(client)
+    const targetId = announcements?.sessionTargets.get(sessionId)
+    const announced = targetId ? announcements?.targets.get(targetId) : undefined
+    removeAnnouncedSession(announcements, sessionId)
+    if (targetId && announced) {
+      sendCdpEvent(client, {
+        ...(announced.parentSessionId === undefined ? {} : { sessionId: announced.parentSessionId }),
+        method: "Target.detachedFromTarget",
+        params: { sessionId, targetId },
+      })
     }
   }
 

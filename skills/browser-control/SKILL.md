@@ -80,7 +80,24 @@ session new <id>` or MCP `session_new`. Each session gets one owned default page
 that persists across execute calls. If the stored current session no longer
 exists on the relay (for example after a relay restart), execute recreates it
 and prints a one-line stderr notice — the page and persistent `state` were
-reset, so re-establish any context you relied on. For multi-field forms that wedge on repeated
+reset, so re-establish any context you relied on.
+
+Bare execute drives the session's own page, never the user's attached tabs. To
+drive a tab the user attached with the toolbar, adopt it as the session's
+default page:
+
+```bash
+browser-control session adopt --target-url opencode-agent
+browser-control session adopt --target-index 0 -s my-session
+```
+
+Adoption is sticky: later executes reuse the adopted tab. Adopting closes the
+session's previous relay-created page; session reset/delete releases an adopted
+tab but never closes it. MCP exposes the same operation as `session_adopt`.
+When a bare execute has to create a fresh page while a user-attached tab is
+open, the result includes a warning tip suggesting the adopt command —
+that is the "why did a new tab appear?" moment. `--target-url`/`--target-index`
+on execute itself remain one-command selections, not sticky adoption. For multi-field forms that wedge on repeated
 locator-level DOM evaluation, use `fillInputs(page, fields)` to fill several
 selectors in one page execution.
 
@@ -373,11 +390,19 @@ language changes, update `CONTEXT.md` too.
 - Extension changes not taking effect: rebuild `extension/dist` and reload the
   unpacked extension once.
 - Repeated `hello` messages or in-flight RPC timeouts: check for duplicate shim
-  websocket reconnects. The current shim version is `0.0.7`.
-- Relay restarted while tabs were attached: shim `0.0.7` re-announces attached
+  websocket reconnects. The current shim version is `0.0.8`.
+- Relay restarted while tabs were attached: shim `0.0.7`+ re-announces attached
   tabs after reconnecting, so the relay rebuilds its target registry without
   re-clicking the toolbar. If `activeTargets` stays 0 with an older shim,
   reload the unpacked extension and re-attach.
+- All tabs suddenly detached (`activeTargets: 0`) while the browser looks fine:
+  the user probably dismissed the "is being debugged" banner, which detaches
+  chrome.debugger from every tab at once. Re-attach via the toolbar (or
+  `session adopt` after re-attaching).
+- Purple groups: shim `0.0.8` removes tabs from `browser-control`/`bc:*` groups
+  when their debugger attachment ends and reconciles stale groups on startup
+  and reconnect, so a purple group means "currently attached". Lingering groups
+  indicate an older shim — reload the unpacked extension.
 - Attached tabs group under a purple tab group titled `bc:<session-id>` for
   session-owned tabs (plain `browser-control` for user-attached tabs). The
   toolbar badge shows `ON` when attached, `RUN` while a script is executing, and

@@ -35,6 +35,12 @@ type ExecuteArguments = {
   readonly targetIndex?: number | undefined
 }
 
+type AdoptArguments = {
+  readonly session?: string | undefined
+  readonly targetUrl?: string | undefined
+  readonly targetIndex?: number | undefined
+}
+
 const emptyInputSchema = objectSchema({})
 
 function makeToolSpecs(relay: RelayClient.Interface): readonly ToolSpec[] {
@@ -175,6 +181,33 @@ function makeToolSpecs(relay: RelayClient.Interface): readonly ToolSpec[] {
       }),
     },
     {
+      name: "session_adopt",
+      description: "Make an attached tab the Browser Control session's default page for subsequent bare execute calls.",
+      inputSchema: objectSchema({
+        session: { type: "string", description: "Optional Browser Control session id. Defaults to this MCP server's current session, which may be created if missing." },
+        targetUrl: { type: "string", description: "Adopt the attached page whose URL contains this text." },
+        targetIndex: { type: "integer", minimum: 0, description: "Adopt the attached page at this zero-based target index." },
+      }),
+      readOnly: false,
+      destructive: false,
+      idempotent: false,
+      handle: (input) => Effect.gen(function* () {
+        const args = yield* Effect.try(() => parseAdoptArguments(input))
+        const sessionId = args.session ?? currentSession.id
+        const result = yield* relay.sessionAdopt({
+          sessionId,
+          createIfMissing: !args.session,
+          targetSelection: {
+            ...(args.targetUrl ? { urlIncludes: args.targetUrl } : {}),
+            ...(args.targetIndex !== undefined ? { index: args.targetIndex } : {}),
+          },
+        })
+        currentSession.id = sessionId
+        currentSession.established = true
+        return { ...result, confirmation: `Adopted session '${result.session.id}' default page: ${result.adoptedUrl}` }
+      }),
+    },
+    {
       name: "skill",
       description: "Return the Browser Control agent skill instructions.",
       inputSchema: emptyInputSchema,
@@ -277,6 +310,27 @@ function parseExecuteArguments(input: unknown): ExecuteArguments {
   }
   return {
     code,
+    ...(session ? { session } : {}),
+    ...(targetUrl ? { targetUrl } : {}),
+    ...(targetIndex !== undefined ? { targetIndex } : {}),
+  }
+}
+
+function parseAdoptArguments(input: unknown): AdoptArguments {
+  const object = requireObject(input)
+  const session = optionalStringField(object, "session")
+  const targetUrl = optionalStringField(object, "targetUrl")
+  const targetIndex = optionalNumberField(object, "targetIndex")
+  if (!targetUrl && targetIndex === undefined) {
+    throw new Error("session_adopt requires targetUrl or targetIndex")
+  }
+  if (targetUrl && targetIndex !== undefined) {
+    throw new Error("Use only one target selector: targetUrl or targetIndex")
+  }
+  if (targetIndex !== undefined && (!Number.isInteger(targetIndex) || targetIndex < 0)) {
+    throw new Error("targetIndex must be a non-negative integer")
+  }
+  return {
     ...(session ? { session } : {}),
     ...(targetUrl ? { targetUrl } : {}),
     ...(targetIndex !== undefined ? { targetIndex } : {}),

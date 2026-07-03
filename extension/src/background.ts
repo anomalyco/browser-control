@@ -6,12 +6,11 @@ import type {
   OffscreenStatusRecordingResult,
   OffscreenStopRecordingResult,
 } from "./recording-types.ts"
+import { isBrowserControlGroupTitle, shouldUngroupBrowserControlTab, tabGroupColor, tabGroupTitle } from "./tab-groups.ts"
 
 const relayHost = "127.0.0.1"
 const relayPort = 19989
-const shimVersion = "0.0.7"
-const tabGroupTitle = "browser-control"
-const tabGroupColor = "purple" as const
+const shimVersion = "0.0.8"
 const offscreenDocumentPath = "offscreen.html"
 
 let socket: WebSocket | undefined
@@ -69,10 +68,12 @@ chrome.debugger.onDetach.addListener((source, reason) => {
       ...(sourceSession.sessionId === undefined ? {} : { sessionId: sourceSession.sessionId }),
     },
   })
+  void guardedUngroupBrowserControlTab(source.tabId)
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   void cleanupRecordingForTab(tabId)
+  void guardedUngroupBrowserControlTab(tabId)
   sendMessage({ method: "tabs.removed", params: { tabId } })
 })
 
@@ -82,6 +83,7 @@ chrome.runtime.onMessage.addListener((message: unknown) => {
 })
 
 connect()
+void reconcileBrowserControlGroups().catch(() => {})
 
 function connect(): void {
   if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
@@ -140,18 +142,21 @@ async function ensureConnection(): Promise<void> {
 
 function announceHelloAndAttachedTabs(): void {
   sendMessage({ method: "hello", params: { version: shimVersion } })
-  void reannounceAttachedTabs().catch((error: unknown) => {
-    sendMessage({ method: "log", params: { level: "error", message: `Failed to re-announce attached tabs: ${error instanceof Error ? error.message : String(error)}` } })
+  void reannounceAttachedTabsAndReconcileGroups().catch((error: unknown) => {
+    sendMessage({ method: "log", params: { level: "error", message: `Failed to re-announce attached tabs and reconcile groups: ${error instanceof Error ? error.message : String(error)}` } })
   })
 }
 
-async function reannounceAttachedTabs(): Promise<void> {
+async function reannounceAttachedTabsAndReconcileGroups(): Promise<void> {
+  const attachedTabIds = new Set<number>()
   const targets = await chrome.debugger.getTargets()
   for (const target of targets) {
     if (target.attached && typeof target.tabId === "number") {
+      attachedTabIds.add(target.tabId)
       sendMessage({ method: "debugger.attached", params: { tabId: target.tabId } })
     }
   }
+  await reconcileBrowserControlGroups(attachedTabIds)
 }
 
 async function handleSocketMessage(data: unknown): Promise<void> {
@@ -183,6 +188,7 @@ async function handleCommand(command: ShimCommand): Promise<JsonObject> {
   if (command.method === "debugger.detach") {
     const tabId = numberParam(command.params, "tabId")
     await chrome.debugger.detach({ tabId })
+    await guardedUngroupBrowserControlTab(tabId)
     return {}
   }
   if (command.method === "debugger.sendCommand") {
@@ -373,6 +379,71 @@ async function getTabCaptureStreamId(tabId: number): Promise<string> {
     }
     throw error
   }
+}
+
+async function reconcileBrowserControlGroups(knownAttachedTabIds?: ReadonlySet<number>): Promise<void> {
+  if (!chrome.tabGroups) {
+    return
+  }
+  const attachedTabIds = knownAttachedTabIds ?? await getAttachedTabIds()
+  const groups = await chrome.tabGroups.query({})
+  for (const group of groups) {
+    if (!isBrowserControlGroupTitle(group.title)) {
+      continue
+    }
+    const tabs = await chrome.tabs.query({ groupId: group.id })
+    for (const tab of tabs) {
+      if (typeof tab.id !== "number") {
+        continue
+      }
+      if (attachedTabIds.has(tab.id)) {
+        continue
+      }
+      if (await isTabDebuggerAttached(tab.id)) {
+        continue
+      }
+      await guardedUngroupBrowserControlTab(tab.id)
+    }
+  }
+}
+
+async function guardedUngroupBrowserControlTab(tabId: number): Promise<void> {
+  try {
+    const tab = await chrome.tabs.get(tabId)
+    if (tab.groupId === undefined || tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) {
+      return
+    }
+    let groupTitle: string | undefined
+    if (chrome.tabGroups) {
+      const group = await chrome.tabGroups.get(tab.groupId)
+      groupTitle = group.title
+    }
+    const isDebuggerAttached = await isTabDebuggerAttached(tabId)
+    if (!shouldUngroupBrowserControlTab({ groupTitle, isDebuggerAttached })) {
+      return
+    }
+    await chrome.tabs.ungroup(tabId)
+  } catch {
+    // Tabs and groups can disappear while detach/close/reconnect cleanup is racing
+    // the browser. Ungrouping is best-effort because stale groups are reconciled
+    // again on service-worker startup and relay reconnect.
+  }
+}
+
+async function getAttachedTabIds(): Promise<Set<number>> {
+  const attachedTabIds = new Set<number>()
+  const targets = await chrome.debugger.getTargets()
+  for (const target of targets) {
+    if (target.attached && typeof target.tabId === "number") {
+      attachedTabIds.add(target.tabId)
+    }
+  }
+  return attachedTabIds
+}
+
+async function isTabDebuggerAttached(tabId: number): Promise<boolean> {
+  const targets = await chrome.debugger.getTargets()
+  return targets.some((target) => target.attached && target.tabId === tabId)
 }
 
 function handleRuntimeMessage(message: unknown): void {

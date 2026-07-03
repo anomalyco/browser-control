@@ -191,9 +191,18 @@ Prove the smallest end-to-end path before adding product polish:
 Current status:
 
 - Relay starts at `http://127.0.0.1:19989`.
-- Extension shim `0.0.7` connects without websocket reconnect storms, reports
+- Extension shim `0.0.8` connects without websocket reconnect storms, reports
   its version in relay status, and re-announces attached tabs after reconnect so
-  a restarted relay recovers the attached-tab pool.
+  a restarted relay recovers the attached-tab pool. It removes tabs from purple
+  groups when their debugger attachment ends and reconciles stale groups on
+  startup/reconnect.
+- `browser-control session adopt --target-url/--target-index` makes a
+  user-attached tab the session's sticky default page; adopted tabs are
+  released, never closed, by session reset/delete. Execute warns with an adopt
+  tip when it creates a fresh page while a user-attached tab is open.
+- CDP target visibility is scoped per client so concurrent sessions and raw
+  clients cannot double-initialize each other's pages (`stale-client-checkout`
+  smoke pins the regression).
 - `browser-control execute "return await page.title()"` works.
 - `context.newPage()` works.
 - `page.goto("https://example.com")` reaches load and locator reads work.

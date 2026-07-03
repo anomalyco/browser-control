@@ -109,4 +109,16 @@ describe("RelayClient", () => {
     expect(result.logs[0]?.text).toBe("hi")
     expect(result.session.id).toBe(session.id)
   })
+
+  it("decodes session adopt responses", async () => {
+    routes.set("POST /cli/session/adopt", {
+      status: 200,
+      body: { session: { ...session, pageUrl: "https://example.com/" }, adoptedUrl: "https://example.com/", adoptedTargetId: "target-2" },
+    })
+    const result = await withClient((client) =>
+      client.sessionAdopt({ sessionId: session.id, createIfMissing: true, targetSelection: { urlIncludes: "example.com" } }))
+    expect(result.session.id).toBe(session.id)
+    expect(result.adoptedUrl).toBe("https://example.com/")
+    expect(result.adoptedTargetId).toBe("target-2")
+  })
 })
