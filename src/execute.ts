@@ -27,6 +27,7 @@ type SandboxGlobals = {
   readonly fillInput: (target: InputTarget, value: string) => Promise<void>
   readonly fillInputs: (page: Page, fields: ReadonlyArray<InputField>) => Promise<void>
   readonly screenshotWithLabels: (options: ScreenshotWithLabelsOptions) => Promise<ScreenshotWithLabelsResult>
+  readonly ariaSnapshot: (target?: InputTarget) => Promise<string>
   readonly showGhostCursor: (options?: ShowGhostCursorOptions) => Promise<void>
   readonly hideGhostCursor: (options?: HideGhostCursorOptions) => Promise<void>
   readonly ghostCursor: {
@@ -75,7 +76,6 @@ type ScreenshotWithLabelsResult = {
   readonly size: number
   readonly labelCount: number
   readonly labels: readonly ScreenshotLabel[]
-  readonly refs: Record<string, ScreenshotLabelRef>
 }
 
 type ScreenshotLabel = {
@@ -83,11 +83,10 @@ type ScreenshotLabel = {
   readonly selector: string
   readonly role: string
   readonly text: string
+  readonly context?: string
   readonly tagName: string
   readonly rect: ScreenshotLabelRect
 }
-
-type ScreenshotLabelRef = Omit<ScreenshotLabel, "ref">
 
 type ScreenshotLabelRect = {
   readonly x: number
@@ -109,6 +108,7 @@ type ExecuteSandboxOptions = {
 
 export type ExecuteResult = {
   readonly text: string
+  readonly value?: unknown
   readonly isError: boolean
   readonly logs: readonly ExecuteLogEntry[]
   readonly warnings: readonly string[]
@@ -165,7 +165,19 @@ export class ExecuteSandbox {
       try: async () => {
         const globals = await this.getGlobals(options)
         const { result, logs, aftermath } = await runUserCode({ code, globals })
-        return { text: stringifyResult(result), isError: false, logs, warnings: this.drainWarnings(), aftermath }
+        const jsonSafeResult = toJsonSafeValue(result)
+        const warnings = this.drainWarnings()
+        if (!jsonSafeResult.serializable) {
+          warnings.push(`Execute result could not be represented as JSON value: ${jsonSafeResult.reason}`)
+        }
+        return {
+          text: stringifyResult(result),
+          ...(jsonSafeResult.serializable ? { value: jsonSafeResult.value } : {}),
+          isError: false,
+          logs,
+          warnings,
+          aftermath,
+        }
       },
       catch: (cause) => {
         if (cause instanceof ExecuteCodeError) {
@@ -237,6 +249,10 @@ export class ExecuteSandbox {
     const hideGhostCursor = async (options?: HideGhostCursorOptions) => {
       await hideGhostCursorOnPage({ page: options?.page ?? page })
     }
+    const ariaSnapshot = async (target?: InputTarget): Promise<string> => {
+      const locator = target === undefined ? page.locator("body") : typeof target === "string" ? page.locator(target) : target
+      return await locator.ariaSnapshot()
+    }
     const handoffTracker = { count: 0 }
     const requestHandoff = this.options.requestHandoff
     const handoff = async (message?: string, options?: HandoffCallOptions) => {
@@ -266,6 +282,7 @@ export class ExecuteSandbox {
       fillInput: (target, value) => fillInput({ page, target, value }),
       fillInputs,
       screenshotWithLabels,
+      ariaSnapshot,
       showGhostCursor,
       hideGhostCursor,
       ghostCursor: {
@@ -448,10 +465,6 @@ async function screenshotWithLabels(options: ScreenshotWithLabelsOptions): Promi
       size: screenshot.byteLength,
       labelCount: labels.length,
       labels,
-      refs: Object.fromEntries(labels.map((label) => {
-        const { ref, ...metadata } = label
-        return [ref, metadata]
-      })),
     }
   } finally {
     await hideScreenshotLabels(options.page)
@@ -465,6 +478,7 @@ async function showScreenshotLabels(page: Page): Promise<readonly ScreenshotLabe
       readonly selector: string
       readonly role: string
       readonly text: string
+      readonly context?: string
       readonly tagName: string
       readonly rect: {
         readonly x: number
@@ -583,13 +597,84 @@ async function showScreenshotLabels(page: Page): Promise<readonly ScreenshotLabe
       return (ariaLabel || placeholder || value || title || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 80)
     }
 
+    const normalizeText = (value: string): string => {
+      return value.replace(/\s+/g, " ").trim()
+    }
+
+    const trimContext = (value: string): string => {
+      return normalizeText(value).slice(0, 60)
+    }
+
+    const accessibleTextForElement = (element: Element): string => {
+      const ariaLabel = element.getAttribute("aria-label")
+      if (ariaLabel) {
+        return ariaLabel
+      }
+      const labelledBy = element.getAttribute("aria-labelledby")
+      if (labelledBy) {
+        const text = labelledBy
+          .split(/\s+/)
+          .map((id) => document.getElementById(id)?.textContent ?? "")
+          .join(" ")
+        if (normalizeText(text)) {
+          return text
+        }
+      }
+      if (element instanceof HTMLFieldSetElement) {
+        const legend = element.querySelector(":scope > legend")
+        if (legend?.textContent) {
+          return legend.textContent
+        }
+      }
+      const heading = element.querySelector(":scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > h5, :scope > h6")
+      if (heading?.textContent) {
+        return heading.textContent
+      }
+      return element.textContent ?? ""
+    }
+
+    const nearestPrecedingHeading = (element: Element): string => {
+      const elementRect = element.getBoundingClientRect()
+      const headings = Array.from(document.querySelectorAll("h1, h2, h3, h4, h5, h6, [role='heading']"))
+      let nearest: Element | undefined
+      let nearestDistance = Number.POSITIVE_INFINITY
+      for (const heading of headings) {
+        const rect = heading.getBoundingClientRect()
+        if (rect.bottom > elementRect.top || rect.right < 0 || rect.left > window.innerWidth) {
+          continue
+        }
+        const distance = elementRect.top - rect.bottom
+        if (distance < nearestDistance) {
+          nearest = heading
+          nearestDistance = distance
+        }
+      }
+      return nearest?.textContent ?? ""
+    }
+
+    const contextForElement = (element: Element, ownText: string): string | undefined => {
+      const contextElement = element.closest("tr, [role='row'], li, [role='listitem'], fieldset, section, article, form, [aria-label], [aria-labelledby]")
+      const rawContext = contextElement && contextElement !== element
+        ? accessibleTextForElement(contextElement)
+        : nearestPrecedingHeading(element)
+      const context = trimContext(rawContext)
+      const label = trimContext(ownText)
+      if (!context || context.toLowerCase() === label.toLowerCase()) {
+        return undefined
+      }
+      return context
+    }
+
     const labels: BrowserLabel[] = candidates.map((element, index) => {
       const rect = element.getBoundingClientRect()
+      const text = textForElement(element)
+      const context = contextForElement(element, text)
       return {
         ref: `e${index + 1}`,
         selector: selectorForElement(element),
         role: roleForElement(element),
-        text: textForElement(element),
+        text,
+        ...(context ? { context } : {}),
         tagName: element.tagName.toLowerCase(),
         rect: {
           x: Math.round(rect.left),
@@ -709,6 +794,7 @@ async function runUserCode({ code, globals }: { readonly code: string; readonly 
     "fillInput",
     "fillInputs",
     "screenshotWithLabels",
+    "ariaSnapshot",
     "showGhostCursor",
     "hideGhostCursor",
     "ghostCursor",
@@ -726,6 +812,7 @@ async function runUserCode({ code, globals }: { readonly code: string; readonly 
       globals.fillInput,
       globals.fillInputs,
       globals.screenshotWithLabels,
+      globals.ariaSnapshot,
       globals.showGhostCursor,
       globals.hideGhostCursor,
       globals.ghostCursor,
@@ -833,4 +920,221 @@ function stringifyResult(result: unknown): string {
     return "undefined"
   }
   return util.inspect(result, { depth: 3, colors: false, maxArrayLength: 50, maxStringLength: 4000 })
+}
+
+type JsonSafeResult =
+  | { readonly serializable: true; readonly value: unknown }
+  | { readonly serializable: false; readonly reason: string }
+
+const maxJsonSafeDepth = 8
+const maxJsonSafeBytes = 32 * 1024
+
+/**
+ * Best-effort structured execute value for machine consumers.
+ *
+ * Only plain JSON-ish data is preserved, with Map converted to a plain object
+ * when all keys are strings and Set converted to an array. Class instances (for
+ * example Playwright Page/Locator/Response objects) are not serialized: a
+ * top-level instance omits `value` entirely, while nested instances are omitted
+ * from object branches and become `null` in array branches. Throwing proxies or
+ * other unexpected conversion failures also omit `value`; throwing getters on
+ * otherwise plain objects are skipped property-by-property. Oversized values are
+ * also omitted so `value` stays compact for agents; `text` remains the human
+ * fallback for every result.
+ */
+export function toJsonSafeValue(value: unknown): JsonSafeResult {
+  try {
+    const seen = new WeakSet<object>()
+    const converted = convertJsonSafe(value, { seen, depth: 0, topLevel: true })
+    if (converted.omit) {
+      return { serializable: false, reason: converted.reason }
+    }
+    const jsonText = safeJsonStringify(converted.value)
+    if (jsonText === undefined) {
+      return { serializable: false, reason: "JSON serialization failed" }
+    }
+    if (Buffer.byteLength(jsonText, "utf8") > maxJsonSafeBytes) {
+      return { serializable: false, reason: `JSON value exceeds ${maxJsonSafeBytes} bytes` }
+    }
+    return { serializable: true, value: converted.value }
+  } catch (cause) {
+    return { serializable: false, reason: cause instanceof Error && cause.message ? cause.message : "JSON conversion failed" }
+  }
+}
+
+type JsonSafeConversion =
+  | { readonly omit: false; readonly value: unknown }
+  | { readonly omit: true; readonly reason: string }
+
+function convertJsonSafe(value: unknown, options: { readonly seen: WeakSet<object>; readonly depth: number; readonly topLevel: boolean }): JsonSafeConversion {
+  if (value === null || typeof value === "string" || typeof value === "boolean") {
+    return { omit: false, value }
+  }
+  if (typeof value === "number") {
+    return { omit: false, value: Number.isFinite(value) ? value : null }
+  }
+  if (typeof value === "bigint") {
+    return { omit: false, value: value.toString() }
+  }
+  if (value === undefined) {
+    return options.topLevel ? { omit: true, reason: "undefined" } : { omit: true, reason: "undefined property" }
+  }
+  if (typeof value === "function" || typeof value === "symbol") {
+    return { omit: true, reason: `${typeof value} value` }
+  }
+  if (typeof value !== "object") {
+    return { omit: true, reason: `unsupported ${typeof value} value` }
+  }
+  if (value instanceof Map) {
+    return convertMapJsonSafe(value, options)
+  }
+  if (value instanceof Set) {
+    return convertSetJsonSafe(value, options)
+  }
+  if (!isPlainJsonContainer(value)) {
+    return { omit: true, reason: options.topLevel ? "class instance" : "class instance property" }
+  }
+  if (options.seen.has(value)) {
+    return options.topLevel ? { omit: true, reason: "circular reference" } : { omit: true, reason: "circular property" }
+  }
+  if (options.depth >= maxJsonSafeDepth) {
+    return options.topLevel ? { omit: true, reason: "maximum object depth exceeded" } : { omit: true, reason: "nested value exceeded maximum depth" }
+  }
+  options.seen.add(value)
+  try {
+    if (Array.isArray(value)) {
+      let length: number
+      try {
+        length = value.length
+      } catch {
+        return { omit: true, reason: options.topLevel ? "array length unavailable" : "array property unavailable" }
+      }
+      const items: unknown[] = []
+      for (let index = 0; index < length; index++) {
+        let item: unknown
+        try {
+          item = value[index]
+        } catch {
+          items.push(null)
+          continue
+        }
+        const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1, topLevel: false })
+        items.push(converted.omit ? null : converted.value)
+      }
+      return {
+        omit: false,
+        value: items,
+      }
+    }
+    const output: Record<string, unknown> = {}
+    const keys = safeObjectKeys(value)
+    if (!keys) {
+      return { omit: true, reason: options.topLevel ? "object keys unavailable" : "object property keys unavailable" }
+    }
+    for (const key of keys) {
+      let item: unknown
+      try {
+        item = value[key as keyof typeof value]
+      } catch {
+        continue
+      }
+      const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1, topLevel: false })
+      if (!converted.omit) {
+        output[key] = converted.value
+      }
+    }
+    return { omit: false, value: output }
+  } finally {
+    options.seen.delete(value)
+  }
+}
+
+function convertMapJsonSafe(value: Map<unknown, unknown>, options: { readonly seen: WeakSet<object>; readonly depth: number; readonly topLevel: boolean }): JsonSafeConversion {
+  if (options.seen.has(value)) {
+    return options.topLevel ? { omit: true, reason: "circular reference" } : { omit: true, reason: "circular property" }
+  }
+  if (options.depth >= maxJsonSafeDepth) {
+    return options.topLevel ? { omit: true, reason: "maximum object depth exceeded" } : { omit: true, reason: "nested value exceeded maximum depth" }
+  }
+  options.seen.add(value)
+  try {
+    const output: Record<string, unknown> = {}
+    let entries: IterableIterator<[unknown, unknown]>
+    try {
+      entries = value.entries()
+    } catch {
+      return { omit: true, reason: options.topLevel ? "map entries unavailable" : "map property entries unavailable" }
+    }
+    for (const [key, item] of entries) {
+      if (typeof key !== "string") {
+        return { omit: true, reason: options.topLevel ? "map contains non-string key" : "map property contains non-string key" }
+      }
+      const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1, topLevel: false })
+      if (!converted.omit) {
+        output[key] = converted.value
+      }
+    }
+    return { omit: false, value: output }
+  } catch {
+    return { omit: true, reason: options.topLevel ? "map iteration failed" : "map property iteration failed" }
+  } finally {
+    options.seen.delete(value)
+  }
+}
+
+function convertSetJsonSafe(value: Set<unknown>, options: { readonly seen: WeakSet<object>; readonly depth: number; readonly topLevel: boolean }): JsonSafeConversion {
+  if (options.seen.has(value)) {
+    return options.topLevel ? { omit: true, reason: "circular reference" } : { omit: true, reason: "circular property" }
+  }
+  if (options.depth >= maxJsonSafeDepth) {
+    return options.topLevel ? { omit: true, reason: "maximum object depth exceeded" } : { omit: true, reason: "nested value exceeded maximum depth" }
+  }
+  options.seen.add(value)
+  try {
+    const output: unknown[] = []
+    let values: IterableIterator<unknown>
+    try {
+      values = value.values()
+    } catch {
+      return { omit: true, reason: options.topLevel ? "set values unavailable" : "set property values unavailable" }
+    }
+    for (const item of values) {
+      const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1, topLevel: false })
+      output.push(converted.omit ? null : converted.value)
+    }
+    return { omit: false, value: output }
+  } catch {
+    return { omit: true, reason: options.topLevel ? "set iteration failed" : "set property iteration failed" }
+  } finally {
+    options.seen.delete(value)
+  }
+}
+
+function isPlainJsonContainer(value: object): boolean {
+  if (Array.isArray(value)) {
+    return true
+  }
+  let prototype: object | null
+  try {
+    prototype = Object.getPrototypeOf(value)
+  } catch {
+    return false
+  }
+  return prototype === Object.prototype || prototype === null
+}
+
+function safeObjectKeys(value: object): string[] | undefined {
+  try {
+    return Object.keys(value)
+  } catch {
+    return undefined
+  }
+}
+
+function safeJsonStringify(value: unknown): string | undefined {
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return undefined
+  }
 }

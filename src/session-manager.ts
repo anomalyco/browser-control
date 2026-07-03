@@ -50,14 +50,14 @@ export class BrowserControlSessions {
     return session
   }
 
-  getOrCreate(id: string): BrowserControlSession {
+  getOrCreate(id: string): { readonly session: BrowserControlSession; readonly created: boolean } {
     const existing = this.sessions.get(id)
     if (existing) {
-      return existing
+      return { session: existing, created: false }
     }
     const session = this.createBrowserControlSession(id, false)
     this.sessions.set(id, session)
-    return session
+    return { session, created: true }
   }
 
   isReadOnly(id: string): boolean {
@@ -112,10 +112,13 @@ export class BrowserControlSessions {
     readonly code: string
     readonly createIfMissing: boolean
     readonly targetSelection?: ExecuteTargetSelection
-  }): Effect.Effect<{ readonly result: ExecuteResult; readonly session: SessionSummary }, Error> {
+  }): Effect.Effect<{ readonly result: ExecuteResult; readonly session: SessionSummary & { readonly created?: boolean } }, Error> {
     const manager = this
     return Effect.gen(function* () {
-      const session = options.createIfMissing ? manager.getOrCreate(options.sessionId) : manager.sessions.get(options.sessionId)
+      const resolved = options.createIfMissing
+        ? manager.getOrCreate(options.sessionId)
+        : { session: manager.sessions.get(options.sessionId), created: false }
+      const session = resolved.session
       if (!session) {
         return yield* Effect.fail(new Error(`Session not found: ${options.sessionId}`))
       }
@@ -129,7 +132,8 @@ export class BrowserControlSessions {
             .pipe(Effect.ensuring(Effect.sync(() => manager.setExecuting(session.id, false))))
           session.updatedAt = new Date().toISOString()
           manager.recordExecute({ sessionId: session.id, code: options.code, durationMs: Date.now() - startedAt, result })
-          return { result, session: manager.sessionSummary(session) }
+          const summary = manager.sessionSummary(session)
+          return { result, session: { ...summary, ...(resolved.created ? { created: true } : {}) } }
         }),
       )
     })

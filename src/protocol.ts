@@ -69,6 +69,7 @@ export type ExtensionEvent = {
     | "hello"
     | "toolbar.clicked"
     | "debugger.event"
+    | "debugger.attached"
     | "debugger.detached"
     | "tabs.removed"
     | "pong"

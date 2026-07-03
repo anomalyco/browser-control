@@ -9,7 +9,7 @@ import type {
 
 const relayHost = "127.0.0.1"
 const relayPort = 19989
-const shimVersion = "0.0.6"
+const shimVersion = "0.0.7"
 const tabGroupTitle = "browser-control"
 const tabGroupColor = "purple" as const
 const offscreenDocumentPath = "offscreen.html"
@@ -93,9 +93,7 @@ function connect(): void {
   }
   const currentSocket = new WebSocket(`ws://${relayHost}:${relayPort}/extension`)
   socket = currentSocket
-  currentSocket.onopen = () => {
-    sendMessage({ method: "hello", params: { version: shimVersion } })
-  }
+  currentSocket.onopen = announceHelloAndAttachedTabs
   currentSocket.onmessage = (event) => {
     void handleSocketMessage(event.data)
   }
@@ -130,7 +128,7 @@ async function ensureConnection(): Promise<void> {
     }
     current.onopen = () => {
       clearTimeout(timeout)
-      sendMessage({ method: "hello", params: { version: shimVersion } })
+      announceHelloAndAttachedTabs()
       resolve()
     }
     current.onerror = () => {
@@ -138,6 +136,22 @@ async function ensureConnection(): Promise<void> {
       reject(new Error("Relay connection failed"))
     }
   })
+}
+
+function announceHelloAndAttachedTabs(): void {
+  sendMessage({ method: "hello", params: { version: shimVersion } })
+  void reannounceAttachedTabs().catch((error: unknown) => {
+    sendMessage({ method: "log", params: { level: "error", message: `Failed to re-announce attached tabs: ${error instanceof Error ? error.message : String(error)}` } })
+  })
+}
+
+async function reannounceAttachedTabs(): Promise<void> {
+  const targets = await chrome.debugger.getTargets()
+  for (const target of targets) {
+    if (target.attached && typeof target.tabId === "number") {
+      sendMessage({ method: "debugger.attached", params: { tabId: target.tabId } })
+    }
+  }
 }
 
 async function handleSocketMessage(data: unknown): Promise<void> {
@@ -157,7 +171,13 @@ async function handleCommand(command: ShimCommand): Promise<JsonObject> {
   }
   if (command.method === "debugger.attach") {
     const tabId = numberParam(command.params, "tabId")
-    await chrome.debugger.attach({ tabId }, "1.3")
+    try {
+      await chrome.debugger.attach({ tabId }, "1.3")
+    } catch (error) {
+      if (!isAlreadyAttachedError(error)) {
+        throw error
+      }
+    }
     return {}
   }
   if (command.method === "debugger.detach") {
@@ -393,6 +413,11 @@ function sendBinary(data: Uint8Array): void {
   if (socket?.readyState === WebSocket.OPEN) {
     socket.send(data.buffer)
   }
+}
+
+function isAlreadyAttachedError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return message.includes("Another debugger is already attached") || message.includes("Debugger is already attached")
 }
 
 function numberParam(params: JsonObject | undefined, key: string): number {

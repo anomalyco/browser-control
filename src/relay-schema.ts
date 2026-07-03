@@ -73,13 +73,20 @@ export const ExecuteAftermath = Schema.Struct({
 
 export interface ExecuteAftermath extends Schema.Schema.Type<typeof ExecuteAftermath> {}
 
+export const ExecuteSessionSummary = SessionSummary.pipe(Schema.fieldsAssign({
+  created: Schema.optionalKey(Schema.Boolean),
+}))
+
+export interface ExecuteSessionSummary extends Schema.Schema.Type<typeof ExecuteSessionSummary> {}
+
 export const ExecuteResponse = Schema.Struct({
   text: Schema.String,
+  value: Schema.optionalKey(Schema.Unknown),
   isError: Schema.Boolean,
   logs: Schema.Array(ExecuteLogEntry),
   warnings: Schema.optionalKey(Schema.Array(Schema.String)),
   aftermath: Schema.optionalKey(ExecuteAftermath),
-  session: SessionSummary,
+  session: ExecuteSessionSummary,
 })
 
 export interface ExecuteResponse extends Schema.Schema.Type<typeof ExecuteResponse> {}

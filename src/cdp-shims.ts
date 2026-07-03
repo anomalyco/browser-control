@@ -4,16 +4,57 @@ import { getObject, sendCdpEvent } from "./relay-helpers.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
 import type { TargetRegistry } from "./target-registry.ts"
 
-export function sendAttachedToTarget(options: {
-  readonly socket: WebSocket
-  readonly clientAttachedSessions: ReadonlyMap<WebSocket, Set<string>>
-  readonly target: ConnectedTarget
-}): void {
-  const attachedSessions = options.clientAttachedSessions.get(options.socket)
-  if (attachedSessions?.has(options.target.sessionId)) {
+export type ClientTargetAnnouncements = {
+  readonly sessions: Set<string>
+  readonly targets: Map<string, { readonly sessionId: string; readonly parentSessionId?: string }>
+  readonly sessionTargets: Map<string, string>
+}
+
+export function createClientTargetAnnouncements(): ClientTargetAnnouncements {
+  return { sessions: new Set(), targets: new Map(), sessionTargets: new Map() }
+}
+
+export function hasAnnouncedSession(state: ClientTargetAnnouncements | undefined, sessionId: string): boolean {
+  return state?.sessions.has(sessionId) ?? false
+}
+
+export function removeAnnouncedSession(state: ClientTargetAnnouncements | undefined, sessionId: string): void {
+  if (!state) {
     return
   }
-  attachedSessions?.add(options.target.sessionId)
+  state.sessions.delete(sessionId)
+  const targetId = state.sessionTargets.get(sessionId)
+  state.sessionTargets.delete(sessionId)
+  if (targetId && state.targets.get(targetId)?.sessionId === sessionId) {
+    state.targets.delete(targetId)
+  }
+}
+
+export function sendAttachedToTarget(options: {
+  readonly socket: WebSocket
+  readonly clientAnnouncements: ReadonlyMap<WebSocket, ClientTargetAnnouncements>
+  readonly target: ConnectedTarget
+  readonly onDuplicateTarget?: (duplicate: { readonly targetId: string; readonly oldSessionId: string; readonly newSessionId: string }) => void
+}): void {
+  const announcements = options.clientAnnouncements.get(options.socket)
+  const targetId = options.target.targetInfo.targetId
+  const existing = announcements?.targets.get(targetId)
+  if (existing?.sessionId === options.target.sessionId) {
+    return
+  }
+  if (existing) {
+    options.onDuplicateTarget?.({ targetId, oldSessionId: existing.sessionId, newSessionId: options.target.sessionId })
+    removeAnnouncedSession(announcements, existing.sessionId)
+    sendCdpEvent(options.socket, {
+      ...(existing.parentSessionId === undefined ? {} : { sessionId: existing.parentSessionId }),
+      method: "Target.detachedFromTarget",
+      params: { sessionId: existing.sessionId, targetId },
+    })
+  }
+  removeAnnouncedSession(announcements, options.target.sessionId)
+  announcements?.sessions.add(options.target.sessionId)
+  announcements?.targets.set(targetId, { sessionId: options.target.sessionId })
+  announcements?.sessionTargets.set(options.target.sessionId, targetId)
   sendCdpEvent(options.socket, {
     method: "Target.attachedToTarget",
     params: {
@@ -26,14 +67,29 @@ export function sendAttachedToTarget(options: {
 
 export function sendAttachedToChildTarget(options: {
   readonly socket: WebSocket
-  readonly clientAttachedSessions: ReadonlyMap<WebSocket, Set<string>>
+  readonly clientAnnouncements: ReadonlyMap<WebSocket, ClientTargetAnnouncements>
   readonly target: ChildTarget
+  readonly onDuplicateTarget?: (duplicate: { readonly targetId: string; readonly oldSessionId: string; readonly newSessionId: string }) => void
 }): void {
-  const attachedSessions = options.clientAttachedSessions.get(options.socket)
-  if (attachedSessions?.has(options.target.sessionId)) {
+  const announcements = options.clientAnnouncements.get(options.socket)
+  const targetId = options.target.targetInfo.targetId
+  const existing = announcements?.targets.get(targetId)
+  if (existing?.sessionId === options.target.sessionId) {
     return
   }
-  attachedSessions?.add(options.target.sessionId)
+  if (existing) {
+    options.onDuplicateTarget?.({ targetId, oldSessionId: existing.sessionId, newSessionId: options.target.sessionId })
+    removeAnnouncedSession(announcements, existing.sessionId)
+    sendCdpEvent(options.socket, {
+      ...(existing.parentSessionId === undefined ? {} : { sessionId: existing.parentSessionId }),
+      method: "Target.detachedFromTarget",
+      params: { sessionId: existing.sessionId, targetId },
+    })
+  }
+  removeAnnouncedSession(announcements, options.target.sessionId)
+  announcements?.sessions.add(options.target.sessionId)
+  announcements?.targets.set(targetId, { sessionId: options.target.sessionId, parentSessionId: options.target.parentSessionId })
+  announcements?.sessionTargets.set(options.target.sessionId, targetId)
   sendCdpEvent(options.socket, {
     sessionId: options.target.parentSessionId,
     method: "Target.attachedToTarget",
@@ -49,12 +105,18 @@ export function replayChildTargetsForParent(options: {
   readonly socket: WebSocket
   readonly parentSessionId: string
   readonly registry: TargetRegistry
-  readonly clientAttachedSessions: ReadonlyMap<WebSocket, Set<string>>
+  readonly clientAnnouncements: ReadonlyMap<WebSocket, ClientTargetAnnouncements>
+  readonly onDuplicateTarget?: (duplicate: { readonly targetId: string; readonly oldSessionId: string; readonly newSessionId: string }) => void
 }): void {
   for (const target of options.registry.childTargets.values()) {
     if (target.parentSessionId === options.parentSessionId) {
       replayFrameEventsForChild({ socket: options.socket, registry: options.registry, target })
-      sendAttachedToChildTarget({ socket: options.socket, clientAttachedSessions: options.clientAttachedSessions, target })
+      sendAttachedToChildTarget({
+        socket: options.socket,
+        clientAnnouncements: options.clientAnnouncements,
+        target,
+        ...(options.onDuplicateTarget ? { onDuplicateTarget: options.onDuplicateTarget } : {}),
+      })
       replayChildFrameNavigation({ socket: options.socket, registry: options.registry, target })
     }
   }

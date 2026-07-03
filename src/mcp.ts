@@ -11,7 +11,10 @@ import { startRelay } from "./relay.ts"
 import { browserControlVersion } from "./version.ts"
 
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
-const currentSession = { id: process.env.BROWSER_CONTROL_SESSION || `mcp-${crypto.randomUUID().slice(0, 8)}` }
+const currentSession = {
+  id: process.env.BROWSER_CONTROL_SESSION || `mcp-${crypto.randomUUID().slice(0, 8)}`,
+  established: Boolean(process.env.BROWSER_CONTROL_SESSION),
+}
 
 type JsonObject = Record<string, unknown>
 
@@ -60,8 +63,13 @@ function makeToolSpecs(relay: RelayClient.Interface): readonly ToolSpec[] {
             ...(args.targetIndex !== undefined ? { index: args.targetIndex } : {}),
           },
         })
+        const recreated = !args.session && currentSession.established && result.session.created === true
         currentSession.id = sessionId
-        return result
+        currentSession.established = true
+        return {
+          ...result,
+          ...(recreated ? { notice: `Recreated session '${sessionId}' — relay had no such session; page and state were reset.` } : {}),
+        }
       }),
     },
     {
@@ -91,6 +99,7 @@ function makeToolSpecs(relay: RelayClient.Interface): readonly ToolSpec[] {
         const readOnly = optionalBooleanField(input, "readOnly")
         const session = yield* relay.sessionNew(requestedId, readOnly ? { readOnly: true } : {})
         currentSession.id = session.id
+        currentSession.established = true
         return { session }
       }),
     },
@@ -125,6 +134,7 @@ function makeToolSpecs(relay: RelayClient.Interface): readonly ToolSpec[] {
         const id = yield* Effect.try(() => requiredStringField(input, "id"))
         yield* ensureSessionExists(relay, id)
         currentSession.id = id
+        currentSession.established = true
         return { currentSession: currentSession.id }
       }),
     },
@@ -141,6 +151,7 @@ function makeToolSpecs(relay: RelayClient.Interface): readonly ToolSpec[] {
         const id = optionalStringField(input, "id") ?? currentSession.id
         const session = yield* relay.sessionReset(id)
         currentSession.id = id
+        currentSession.established = true
         return { session }
       }),
     },
@@ -158,6 +169,7 @@ function makeToolSpecs(relay: RelayClient.Interface): readonly ToolSpec[] {
         const result = yield* relay.sessionDelete(id)
         if (currentSession.id === id) {
           currentSession.id = `mcp-${crypto.randomUUID().slice(0, 8)}`
+          currentSession.established = false
         }
         return { ...result, currentSession: currentSession.id }
       }),

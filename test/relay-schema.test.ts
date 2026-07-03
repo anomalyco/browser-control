@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import { Schema } from "effect"
 import {
   ExecuteResponse,
+  ExecuteSessionSummary,
   ExtensionStatus,
   RecordingStartResponse,
   RecordingStatusResponse,
@@ -15,6 +16,8 @@ const decodeSession = Schema.decodeUnknownSync(SessionSummary)
 const decodeSessions = Schema.decodeUnknownSync(SessionsContainer)
 const decodeSessionContainer = Schema.decodeUnknownSync(SessionContainer)
 const decodeExecute = Schema.decodeUnknownSync(ExecuteResponse)
+const encodeExecute = Schema.encodeUnknownSync(ExecuteResponse)
+const decodeExecuteSession = Schema.decodeUnknownSync(ExecuteSessionSummary)
 const decodeExtensionStatus = Schema.decodeUnknownSync(ExtensionStatus)
 const decodeTargets = Schema.decodeUnknownSync(TargetSummaries)
 const decodeRecordingStart = Schema.decodeUnknownSync(RecordingStartResponse)
@@ -74,6 +77,21 @@ describe("relay-schema", () => {
     expect(decoded.warnings).toHaveLength(1)
     expect(decoded.aftermath?.endUrl).toBe("https://example.com/")
     expect(decoded.aftermath?.handoffs).toBe(2)
+  })
+
+  it("decodes and encodes execute responses with optional structured value and session-created flag", () => {
+    const response = {
+      text: "{ a: 1 }",
+      value: { a: 1, nested: [true, null] },
+      isError: false,
+      logs: [],
+      session: { ...session, created: true },
+    }
+    const decoded = decodeExecute(response)
+    expect(decoded.value).toEqual({ a: 1, nested: [true, null] })
+    expect(decoded.session.created).toBe(true)
+    expect(encodeExecute(decoded)).toEqual(response)
+    expect(decodeExecuteSession(session).created).toBeUndefined()
   })
 
   it("decodes an execute response without warnings or aftermath (older relay)", () => {

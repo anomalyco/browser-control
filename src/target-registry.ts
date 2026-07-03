@@ -21,12 +21,31 @@ export class TargetRegistry {
   }
 
   addRootTarget(target: ConnectedTarget): void {
+    const existingForTab = this.tabTargets.get(target.tabId)
+    if (existingForTab) {
+      this.targets.delete(existingForTab.sessionId)
+      this.targetsByTargetId.delete(existingForTab.targetInfo.targetId)
+    }
+    const existingForTargetId = this.targetsByTargetId.get(target.targetInfo.targetId)
+    if (existingForTargetId) {
+      this.targets.delete(existingForTargetId.sessionId)
+      this.tabTargets.delete(existingForTargetId.tabId)
+    }
     this.targets.set(target.sessionId, target)
     this.tabTargets.set(target.tabId, target)
     this.targetsByTargetId.set(target.targetInfo.targetId, target)
   }
 
   addChildTarget(target: ChildTarget): void {
+    const existingForSession = this.childTargets.get(target.sessionId)
+    if (existingForSession) {
+      this.childTargetsByTargetId.delete(existingForSession.targetInfo.targetId)
+    }
+    const existingForTargetId = this.childTargetsByTargetId.get(target.targetInfo.targetId)
+    if (existingForTargetId) {
+      this.childSessionTabs.delete(existingForTargetId.sessionId)
+      this.childTargets.delete(existingForTargetId.sessionId)
+    }
     this.childSessionTabs.set(target.sessionId, target.tabId)
     this.childTargets.set(target.sessionId, target)
     this.childTargetsByTargetId.set(target.targetInfo.targetId, target)

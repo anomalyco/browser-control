@@ -23,17 +23,22 @@ const readExecuteFile = Effect.fnUntraced(function* (filePath: string) {
   )
 })
 
+type ResolvedDefaultSessionId = {
+  readonly sessionId: string
+  readonly existedInStore: boolean
+}
+
 const getOrCreateDefaultSessionId = Effect.gen(function* () {
   const relay = yield* RelayClient.Service
   const store = yield* SessionStore.Service
   const current = yield* store.read
   if (current) {
-    return current
+    return { sessionId: current, existedInStore: true }
   }
   const session = yield* relay.sessionNew(undefined)
   yield* store.write(session.id)
   yield* Console.error(`Created Browser Control session: ${session.id}`)
-  return session.id
+  return { sessionId: session.id, existedInStore: false }
 })
 
 const resolveExistingSessionId = Effect.fnUntraced(function* (explicitSessionId: string | undefined) {
@@ -123,7 +128,10 @@ function formatAftermath(aftermath: ExecuteAftermath): string | null {
 
 type ExecuteJsonEnvelope = {
   readonly ok: boolean
-  readonly value?: string
+  readonly isError: boolean
+  readonly text: string
+  readonly value: unknown | null
+  readonly valueUnavailable: boolean
   readonly error?: { readonly _tag: string; readonly message: string }
   readonly logs: readonly ExecuteLogEntry[]
   readonly warnings: readonly string[]
@@ -131,10 +139,15 @@ type ExecuteJsonEnvelope = {
   readonly session?: ExecuteResponse["session"]
 }
 
-function executeJsonEnvelope(result: ExecuteResponse): ExecuteJsonEnvelope {
+export function executeJsonEnvelope(result: ExecuteResponse): ExecuteJsonEnvelope {
+  const hasStructuredValue = Object.hasOwn(result, "value") && result.value !== undefined
   return {
     ok: !result.isError,
-    ...(result.isError ? { error: { _tag: "ScriptError", message: result.text } } : { value: result.text }),
+    isError: result.isError,
+    text: result.text,
+    value: hasStructuredValue ? result.value : null,
+    valueUnavailable: !hasStructuredValue,
+    ...(result.isError ? { error: { _tag: "ScriptError", message: result.text } } : {}),
     logs: result.logs,
     warnings: result.warnings ?? [],
     ...(result.aftermath ? { aftermath: result.aftermath } : {}),
@@ -145,7 +158,19 @@ function executeJsonEnvelope(result: ExecuteResponse): ExecuteJsonEnvelope {
 function errorJsonEnvelope(error: unknown): ExecuteJsonEnvelope {
   const tag = typeof error === "object" && error !== null && "_tag" in error && typeof error._tag === "string" ? error._tag : "Error"
   const message = error instanceof Error ? error.message : String(error)
-  return { ok: false, error: { _tag: tag, message }, logs: [], warnings: [] }
+  return { ok: false, isError: true, text: message, value: null, valueUnavailable: true, error: { _tag: tag, message }, logs: [], warnings: [] }
+}
+
+export function shouldPrintRecreatedSessionNotice(options: {
+  readonly explicitSessionId: string | undefined
+  readonly sessionExistedInStoreBeforeCommand: boolean
+  readonly result: ExecuteResponse
+}): boolean {
+  return options.explicitSessionId === undefined && options.sessionExistedInStoreBeforeCommand && options.result.session.created === true
+}
+
+export function formatRecreatedSessionNotice(sessionId: string): string {
+  return `Recreated session '${sessionId}' — relay had no such session; page and state were reset.`
 }
 
 function optionString(value: Option.Option<string>): string | undefined {
@@ -180,7 +205,7 @@ const execute = Command.make(
     session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Use this Browser Control session id")),
     targetUrl: Flag.string("target-url").pipe(Flag.optional, Flag.withDescription("Use the attached page whose URL contains this text")),
     targetIndex: Flag.integer("target-index").pipe(Flag.optional, Flag.withDescription("Use the attached page at this zero-based index")),
-    json: Flag.boolean("json").pipe(Flag.withDescription("Print a machine-readable result envelope: { ok, value|error, logs, warnings, aftermath, session }")),
+    json: Flag.boolean("json").pipe(Flag.withDescription("Print a machine-readable result envelope: { ok, isError, text, value, valueUnavailable, error?, logs, warnings, aftermath, session }")),
   },
   Effect.fn("Cli.execute")(function* ({ code, file, session, targetUrl, targetIndex, json }) {
     const run = Effect.gen(function* () {
@@ -194,7 +219,11 @@ const execute = Command.make(
       }
       const executeCode = filePath ? yield* readExecuteFile(filePath) : code.join(" ")
       const explicitSessionId = optionString(session) ?? process.env.BROWSER_CONTROL_SESSION
-      const sessionId = explicitSessionId ?? (yield* getOrCreateDefaultSessionId)
+      const defaultSession = explicitSessionId ? undefined : yield* getOrCreateDefaultSessionId
+      const sessionId = explicitSessionId ?? defaultSession?.sessionId
+      if (!sessionId) {
+        return yield* Effect.fail(new Error("No session provided and no current Browser Control session exists"))
+      }
       if (explicitSessionId) {
         yield* ensureSessionExists(explicitSessionId)
       }
@@ -206,7 +235,7 @@ const execute = Command.make(
       if (targetUrlValue && targetIndexValue !== undefined) {
         return yield* Effect.fail(new Error("Use only one target selector: --target-url/BROWSER_CONTROL_TARGET_URL or --target-index/BROWSER_CONTROL_TARGET_INDEX"))
       }
-      return yield* relay.execute({
+      const result = yield* relay.execute({
         sessionId,
         code: executeCode,
         createIfMissing: !explicitSessionId,
@@ -215,6 +244,10 @@ const execute = Command.make(
           ...(targetIndexValue !== undefined ? { index: targetIndexValue } : {}),
         },
       })
+      if (shouldPrintRecreatedSessionNotice({ explicitSessionId, sessionExistedInStoreBeforeCommand: defaultSession?.existedInStore ?? false, result })) {
+        yield* Console.error(formatRecreatedSessionNotice(sessionId))
+      }
+      return result
     })
     if (json) {
       const envelope = yield* run.pipe(

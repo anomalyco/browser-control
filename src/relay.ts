@@ -3,6 +3,9 @@ import stream from "node:stream"
 import { Effect, Fiber } from "effect"
 import { WebSocket, WebSocketServer, type RawData } from "ws"
 import {
+  createClientTargetAnnouncements,
+  hasAnnouncedSession,
+  removeAnnouncedSession,
   replayChildFrameNavigation,
   replayChildTargetsForParent,
   replayTargetCreated,
@@ -44,9 +47,69 @@ import { TargetRegistry } from "./target-registry.ts"
 export type { RelayServer } from "./relay-types.ts"
 
 export function startRelay(options: { readonly host?: string; readonly port?: number } = {}) {
-  return Effect.acquireRelease(makeRelay(options), (server) => {
-    return server.close()
+  return Effect.gen(function* () {
+    yield* installRelayProcessGuard
+    return yield* Effect.acquireRelease(makeRelay(options), (server) => {
+      return server.close()
+    })
   })
+}
+
+type RelayProcessFaultKind = "uncaughtException" | "unhandledRejection"
+
+const installRelayProcessGuard = Effect.acquireRelease(
+  Effect.sync(() => {
+    const onUncaughtException = (error: Error, origin: NodeJS.UncaughtExceptionOrigin) => {
+      handleRelayProcessFault("uncaughtException", error, { origin })
+    }
+    const onUnhandledRejection = (reason: unknown, promise: Promise<unknown>) => {
+      handleRelayProcessFault("unhandledRejection", reason, { promise })
+    }
+    process.on("uncaughtException", onUncaughtException)
+    process.on("unhandledRejection", onUnhandledRejection)
+    return { onUncaughtException, onUnhandledRejection }
+  }),
+  (handlers) => {
+    return Effect.sync(() => {
+      process.off("uncaughtException", handlers.onUncaughtException)
+      process.off("unhandledRejection", handlers.onUnhandledRejection)
+    })
+  },
+)
+
+export function shouldSuppressRelayProcessFault(cause: unknown): boolean {
+  const errorText = cause instanceof Error ? `${cause.message}\n${cause.stack ?? ""}` : String(cause)
+  return /playwright-core|coreBundle|Duplicate target/i.test(errorText)
+}
+
+export function handleRelayProcessFault(
+  kind: RelayProcessFaultKind,
+  cause: unknown,
+  detail: Record<string, unknown>,
+  options: { readonly rethrow?: (cause: unknown) => never } = {},
+): void {
+  if (shouldSuppressRelayProcessFault(cause)) {
+    logProcessFault(kind, cause, detail, "keeping relay alive")
+    return
+  }
+  logProcessFault(kind, cause, detail, "not a known Playwright dispatch fault; rethrowing")
+  const rethrow = options.rethrow ?? rethrowProcessFault
+  rethrow(cause)
+}
+
+function rethrowProcessFault(cause: unknown): never {
+  if (cause instanceof Error) {
+    throw cause
+  }
+  throw new Error(String(cause))
+}
+
+function logProcessFault(kind: RelayProcessFaultKind, cause: unknown, detail: Record<string, unknown>, disposition: string): void {
+  const errorText = cause instanceof Error ? cause.stack ?? cause.message : String(cause)
+  console.error(`[browser-control relay] ${kind}; ${disposition}\n${errorText}`)
+  if (process.env.BROWSER_CONTROL_DEBUG) {
+    console.error(`[browser-control relay] ${kind} detail`, detail)
+  }
 }
 
 const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string; readonly port?: number } = {}) {
@@ -154,7 +217,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
   const debugLog = process.env.BROWSER_CONTROL_DEBUG ? (line: string) => console.error(`[bc ${new Date().toISOString().slice(11, 23)}] ${line}`) : undefined
   const websocketServer = new WebSocketServer({ noServer: true })
   const cdpClients = new Set<WebSocket>()
-  const cdpClientAttachedSessions = new Map<WebSocket, Set<string>>()
+  const cdpClientAnnouncements = new Map<WebSocket, ReturnType<typeof createClientTargetAnnouncements>>()
   const cdpClientBrowserControlSessionIds = new Map<WebSocket, string>()
   const runtimeContextWaiters = new Set<(event: CdpEvent) => void>()
   let nextTargetSessionId = 1
@@ -233,7 +296,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
 
     cdpClients.add(socket)
     idleRuntimeResetGeneration++
-    cdpClientAttachedSessions.set(socket, new Set())
+    cdpClientAnnouncements.set(socket, createClientTargetAnnouncements())
     const browserControlSessionId = requestUrl.searchParams.get("browserControlSessionId") ?? headerValue(request.headers["browser-control-session-id"])
     if (browserControlSessionId) {
       cdpClientBrowserControlSessionIds.set(socket, browserControlSessionId)
@@ -250,7 +313,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     socket.on("close", () => {
       debugLog?.(`client- ${cdpClientBrowserControlSessionIds.get(socket) ?? "raw"} total=${cdpClients.size - 1}`)
       cdpClients.delete(socket)
-      cdpClientAttachedSessions.delete(socket)
+      cdpClientAnnouncements.delete(socket)
       cdpClientBrowserControlSessionIds.delete(socket)
       if (cdpClients.size === 0) {
         const generation = ++idleRuntimeResetGeneration
@@ -282,18 +345,28 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     if (!isExtensionEvent(message)) {
       return
     }
-    if (message.method === "hello") {
+    const extensionMethod = message.method as string
+    if (extensionMethod === "hello") {
       extensionRpc.markReady(typeof message.params?.version === "string" ? message.params.version : undefined)
       return
     }
-    if (message.method === "toolbar.clicked") {
+    if (extensionMethod === "debugger.attached") {
+      const tabId = typeof message.params?.tabId === "number" ? message.params.tabId : undefined
+      if (tabId && !registry.tabTargets.has(tabId)) {
+        Effect.runPromise(attachTab({ tabId, owner: "user" })).catch((error: unknown) => {
+          console.error("Debugger re-announce failed", error)
+        })
+      }
+      return
+    }
+    if (extensionMethod === "toolbar.clicked") {
       const tabId = typeof message.params?.tabId === "number" ? message.params.tabId : undefined
       if (tabId) {
         handleToolbarClick(tabId)
       }
       return
     }
-    if (message.method === "debugger.detached") {
+    if (extensionMethod === "debugger.detached") {
       const tabId = typeof message.params?.tabId === "number" ? message.params.tabId : undefined
       const detachedSessionId = typeof message.params?.sessionId === "string" ? message.params.sessionId : undefined
       const reason = typeof message.params?.reason === "string" ? message.params.reason : undefined
@@ -309,22 +382,22 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       }
       return
     }
-    if (message.method === "tabs.removed") {
+    if (extensionMethod === "tabs.removed") {
       const tabId = typeof message.params?.tabId === "number" ? message.params.tabId : undefined
       if (tabId) {
         detachTargetState(tabId)
       }
       return
     }
-    if (message.method === "recording.data") {
+    if (extensionMethod === "recording.data") {
       recordingRelay.handleRecordingData(message)
       return
     }
-    if (message.method === "recording.cancelled") {
+    if (extensionMethod === "recording.cancelled") {
       recordingRelay.handleRecordingCancelled(message)
       return
     }
-    if (message.method !== "debugger.event") {
+    if (extensionMethod !== "debugger.event") {
       return
     }
 
@@ -341,6 +414,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     const sourceSessionId = typeof message.params?.sessionId === "string" ? message.params.sessionId : undefined
     debugLog?.(`evt tab=${tabId} ${method} src=${sourceSessionId ?? "root"}`)
     let shouldBroadcast = true
+    let attachedChildTarget: ChildTarget | undefined
 
     if (method === "Target.attachedToTarget") {
       const childSessionId = typeof params?.sessionId === "string" ? params.sessionId : undefined
@@ -375,6 +449,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
             waitingForDebugger: params?.waitingForDebugger === true,
           }
           registry.addChildTarget(childTarget)
+          attachedChildTarget = childTarget
         }
       }
     }
@@ -415,6 +490,10 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     const eventSessionId = sourceSessionId ?? target.sessionId
     const event: CdpEvent = { method, ...(params === undefined ? {} : { params }), sessionId: eventSessionId }
     notifyRuntimeContextWaiters(event)
+    if (attachedChildTarget) {
+      announceAttachedChildTarget(target.sessionId, attachedChildTarget)
+      return
+    }
     if (shouldBroadcast) {
       sendEventToTargetViewers(target.sessionId, event)
     }
@@ -508,7 +587,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       for (const target of registry.targets.values()) {
         yield* Effect.ignore(sendDebuggerCommand({ tabId: target.tabId, method: "Target.setAutoAttach", params: message.params ?? {} }))
         if (canSeeTarget(socket, target)) {
-          sendAttachedToTarget({ socket, clientAttachedSessions: cdpClientAttachedSessions, target })
+          sendAttachedToTarget({ socket, clientAnnouncements: cdpClientAnnouncements, target, onDuplicateTarget: logDuplicateTargetAnnouncement })
         }
       }
       return {}
@@ -519,7 +598,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
         return yield* Effect.fail(new Error(`Target not found: ${message.sessionId}`))
       }
       const result = yield* sendDebuggerCommand({ tabId: target.tabId, method: "Target.setAutoAttach", params: message.params ?? {} })
-      replayChildTargetsForParent({ socket, parentSessionId: target.sessionId, registry, clientAttachedSessions: cdpClientAttachedSessions })
+      replayChildTargetsForParent({ socket, parentSessionId: target.sessionId, registry, clientAnnouncements: cdpClientAnnouncements, onDuplicateTarget: logDuplicateTargetAnnouncement })
       return result
     }
     if (message.method === "Target.getTargets") {
@@ -531,12 +610,12 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       const targetId = typeof message.params?.targetId === "string" ? message.params.targetId : ""
       const target = registry.targetsByTargetId.get(targetId)
       if (target && canSeeTarget(socket, target)) {
-        sendAttachedToTarget({ socket, clientAttachedSessions: cdpClientAttachedSessions, target })
+        sendAttachedToTarget({ socket, clientAnnouncements: cdpClientAnnouncements, target, onDuplicateTarget: logDuplicateTargetAnnouncement })
         return { sessionId: target.sessionId }
       }
       const childTarget = registry.childTargetsByTargetId.get(targetId)
       if (childTarget && canSeeTabId(socket, childTarget.tabId)) {
-        sendAttachedToChildTarget({ socket, clientAttachedSessions: cdpClientAttachedSessions, target: childTarget })
+        sendAttachedToChildTarget({ socket, clientAnnouncements: cdpClientAnnouncements, target: childTarget, onDuplicateTarget: logDuplicateTargetAnnouncement })
         replayChildFrameNavigation({ socket, registry, target: childTarget })
         return { sessionId: childTarget.sessionId }
       }
@@ -575,7 +654,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     if (message.method === "Target.detachFromTarget") {
       const childSessionId = typeof message.params?.sessionId === "string" ? message.params.sessionId : undefined
       if (childSessionId) {
-        cdpClientAttachedSessions.get(socket)?.delete(childSessionId)
+        removeAnnouncedSession(cdpClientAnnouncements.get(socket), childSessionId)
       }
       return {}
     }
@@ -778,18 +857,18 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       method: "Target.detachedFromTarget",
       params: { sessionId: detached.target.sessionId, targetId: detached.target.targetInfo.targetId },
     })
-    for (const attachedSessions of cdpClientAttachedSessions.values()) {
-      attachedSessions.delete(detached.target.sessionId)
+    for (const announcements of cdpClientAnnouncements.values()) {
+      removeAnnouncedSession(announcements, detached.target.sessionId)
       for (const childSessionId of detached.childSessionIds) {
-        attachedSessions.delete(childSessionId)
+        removeAnnouncedSession(announcements, childSessionId)
       }
     }
   }
 
   function detachChildTargetState(sessionId: string): void {
     registry.detachChildTargetState(sessionId)
-    for (const attachedSessions of cdpClientAttachedSessions.values()) {
-      attachedSessions.delete(sessionId)
+    for (const announcements of cdpClientAnnouncements.values()) {
+      removeAnnouncedSession(announcements, sessionId)
     }
   }
 
@@ -816,16 +895,28 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
   // connected sandboxes attach to each other's pages and interfere.
   function sendEventToTargetViewers(rootSessionId: string, event: CdpEvent): void {
     for (const client of cdpClients) {
-      if (cdpClientAttachedSessions.get(client)?.has(rootSessionId)) {
+      if (hasAnnouncedSession(cdpClientAnnouncements.get(client), rootSessionId)) {
         sendCdpEvent(client, event)
       }
     }
   }
 
+  function logDuplicateTargetAnnouncement(duplicate: { readonly targetId: string; readonly oldSessionId: string; readonly newSessionId: string }): void {
+    console.error(`Deduped duplicate target announcement for ${duplicate.targetId}: ${duplicate.oldSessionId} -> ${duplicate.newSessionId}`)
+  }
+
   function announceAttachedTarget(target: ConnectedTarget): void {
     for (const client of cdpClients) {
       if (canSeeTarget(client, target)) {
-        sendAttachedToTarget({ socket: client, clientAttachedSessions: cdpClientAttachedSessions, target })
+        sendAttachedToTarget({ socket: client, clientAnnouncements: cdpClientAnnouncements, target, onDuplicateTarget: logDuplicateTargetAnnouncement })
+      }
+    }
+  }
+
+  function announceAttachedChildTarget(rootSessionId: string, target: ChildTarget): void {
+    for (const client of cdpClients) {
+      if (hasAnnouncedSession(cdpClientAnnouncements.get(client), rootSessionId)) {
+        sendAttachedToChildTarget({ socket: client, clientAnnouncements: cdpClientAnnouncements, target, onDuplicateTarget: logDuplicateTargetAnnouncement })
       }
     }
   }

@@ -153,6 +153,21 @@ describe("BrowserControlSessions", () => {
     expect(result.message).toContain("Session not found")
   })
 
+  it("reports whether execute created a missing session", async () => {
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox())
+    const first = await Effect.runPromise(
+      sessions.execute({ sessionId: "ghost", code: "noop", createIfMissing: true }),
+    )
+    expect(first.session.id).toBe("ghost")
+    expect(first.session.created).toBe(true)
+
+    const second = await Effect.runPromise(
+      sessions.execute({ sessionId: "ghost", code: "noop", createIfMissing: true }),
+    )
+    expect(second.session.id).toBe("ghost")
+    expect(second.session.created).toBeUndefined()
+  })
+
   it("tracks read-only sessions and preserves the flag across reset", async () => {
     const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox())
     sessions.createNew("locked", { readOnly: true })

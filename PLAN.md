@@ -191,8 +191,9 @@ Prove the smallest end-to-end path before adding product polish:
 Current status:
 
 - Relay starts at `http://127.0.0.1:19989`.
-- Extension shim `0.0.6` connects without websocket reconnect storms and reports
-  its version in relay status.
+- Extension shim `0.0.7` connects without websocket reconnect storms, reports
+  its version in relay status, and re-announces attached tabs after reconnect so
+  a restarted relay recovers the attached-tab pool.
 - `browser-control execute "return await page.title()"` works.
 - `context.newPage()` works.
 - `page.goto("https://example.com")` reaches load and locator reads work.

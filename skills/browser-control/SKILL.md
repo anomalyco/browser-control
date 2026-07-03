@@ -77,7 +77,10 @@ id, stores it in `~/.browser-control/session.json`, and reuses it. Explicit
 session ids from `--session`, `BROWSER_CONTROL_SESSION`, or MCP `execute({ session:
 "id" })` must already exist; create them intentionally with `browser-control
 session new <id>` or MCP `session_new`. Each session gets one owned default page
-that persists across execute calls. For multi-field forms that wedge on repeated
+that persists across execute calls. If the stored current session no longer
+exists on the relay (for example after a relay restart), execute recreates it
+and prints a one-line stderr notice — the page and persistent `state` were
+reset, so re-establish any context you relied on. For multi-field forms that wedge on repeated
 locator-level DOM evaluation, use `fillInputs(page, fields)` to fill several
 selectors in one page execution.
 
@@ -91,8 +94,15 @@ warnings and a one-line aftermath summary when the page URL changed or the call
 navigated, hit page errors, or paused for handoffs.
 
 Use `browser-control execute --json` when you want to branch on the result: it
-prints `{ ok, value | error: { _tag, message }, logs, warnings, aftermath,
-session }`. `aftermath` reports `startUrl`, `endUrl`, main-frame `navigations`,
+prints `{ ok, isError, text, value, valueUnavailable, error?: { _tag, message },
+logs, warnings, aftermath, session }`. `value` is the structured JSON result of
+the script (jq-able: `execute --json "({a: 1})" | jq .value.a` prints `1`);
+`text` is the human-formatted rendering. `value` carries plain data only: objects,
+arrays, and primitives round-trip; `Map` becomes a plain object, `Set` an
+array, bigints strings. Class instances (Playwright `Page`, `Locator`, ...)
+and results whose JSON exceeds 32KB are withheld: `value` is `null` and
+`valueUnavailable` is `true` — fall back to `text`.
+`aftermath` reports `startUrl`, `endUrl`, main-frame `navigations`,
 `consoleErrorCount`, `pageErrorCount`, and `handoffs` for that one call.
 Warnings are delivered with the call that caused them, for example when the
 session default page was closed and recreated.
@@ -234,7 +244,7 @@ that the next action must consume.
 Use `screenshotWithLabels({ page, path })` when a visual page read would help.
 `path` must be absolute. The helper overlays simple `e1`, `e2`, ... labels on
 visible likely-interactive elements, saves a Playwright screenshot, removes the
-overlay, and returns `{ path, size, labelCount, labels, refs }`.
+overlay, and returns `{ path, size, labelCount, labels }`.
 
 ```js
 const screenshotPath = path.resolve("tmp/home-labels.png")
@@ -242,9 +252,26 @@ return await screenshotWithLabels({ page, path: screenshotPath })
 ```
 
 Labels cover a small DOM-only set: buttons, links, inputs, textareas, selects,
-`role=button/link/tab/menuitem`, `[onclick]`, and `[contenteditable]`. Use the
-returned `refs.e1.selector` metadata to decide the next Playwright locator; this
-is not a full accessibility snapshot.
+`role=button/link/tab/menuitem`, `[onclick]`, and `[contenteditable]`. Each
+label entry carries its `ref` (`e1`, `e2`, ...), a `selector` for the next
+Playwright locator, and, when ambiguous, a short `context` string from the
+nearest row/section/heading so identical buttons (five "Connect" buttons in
+five integration rows) are distinguishable without another round-trip.
+
+## Accessibility Snapshot
+
+Prefer `ariaSnapshot(target?)` for cheap read-before-act structure checks. It
+returns Playwright's YAML aria snapshot for a selector, locator, or the whole
+page (default `body`), so one call shows you whether a "tab bar" is really a
+`<select>`, what a control's accessible name is, and which roles exist —
+without burning a 30s locator timeout on a wrong `getByRole` guess:
+
+```js
+return await ariaSnapshot("main")
+```
+
+Use it before interacting with unfamiliar UI regions; use
+`screenshotWithLabels` when you need visual layout rather than structure.
 
 ## Destructive UI Recipe
 
@@ -346,12 +373,16 @@ language changes, update `CONTEXT.md` too.
 - Extension changes not taking effect: rebuild `extension/dist` and reload the
   unpacked extension once.
 - Repeated `hello` messages or in-flight RPC timeouts: check for duplicate shim
-  websocket reconnects. The current shim version is `0.0.6`.
+  websocket reconnects. The current shim version is `0.0.7`.
+- Relay restarted while tabs were attached: shim `0.0.7` re-announces attached
+  tabs after reconnecting, so the relay rebuilds its target registry without
+  re-clicking the toolbar. If `activeTargets` stays 0 with an older shim,
+  reload the unpacked extension and re-attach.
 - Attached tabs group under a purple tab group titled `bc:<session-id>` for
   session-owned tabs (plain `browser-control` for user-attached tabs). The
   toolbar badge shows `ON` when attached, `RUN` while a script is executing, and
-  `WAIT` while a handoff is pending. Badges beyond `ON` require shim `0.0.6`;
-  older shims still work but skip them.
+  `WAIT` while a handoff is pending. Badges beyond `ON` require shim `0.0.6`
+  or newer; older shims still work but skip them.
 - Active targets after an execute run are expected: relay-created tabs persist
   across short-lived CLI calls. Close the visible tab, call `await page.close()`,
   or detach it with the toolbar if you want `/extension/status` to return to zero.

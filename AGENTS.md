@@ -133,5 +133,16 @@ browser-control skill
 
 - Load `extension/dist` as the unpacked extension.
 - The relay listens on `127.0.0.1:19989` by default.
-- Current shim version is `0.0.6`.
+- Current shim version is `0.0.7`.
+- On socket open the shim sends `hello` and then re-announces every tab it still
+  has `chrome.debugger` attached to (`debugger.attached` events), so a restarted
+  relay rebuilds its target registry without the user re-clicking the toolbar.
+- The relay dedupes target announcements per CDP client by targetId: a
+  re-announce under a new sessionId emits `Target.detachedFromTarget` for the
+  old session first. Never announce the same targetId twice to one client
+  without a detach — playwright-core's `Duplicate target` assert kills the
+  connection's process.
+- The relay installs scoped `uncaughtException`/`unhandledRejection` guards for
+  its lifetime; in-process playwright event dispatch errors are logged, not
+  fatal.
 - The attached tab group should use the purple `browser-control` group.
