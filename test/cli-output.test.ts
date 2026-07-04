@@ -11,7 +11,7 @@ vi.mock("@effect/platform-node", async (importOriginal) => {
   }
 })
 
-import { executeJsonEnvelope, formatRecreatedSessionNotice, shouldPrintRecreatedSessionNotice } from "../src/cli.ts"
+import { executeJsonEnvelope, formatSessionContinuation } from "../src/cli.ts"
 import type { ExecuteResponse } from "../src/relay-schema.ts"
 
 const session: ExecuteResponse["session"] = {
@@ -70,34 +70,10 @@ describe("executeJsonEnvelope", () => {
   })
 })
 
-describe("recreated session notice", () => {
-  it("prints for a stored current session recreated by execute", () => {
-    expect(shouldPrintRecreatedSessionNotice({
-      explicitSessionId: undefined,
-      sessionExistedInStoreBeforeCommand: true,
-      result: executeResponse({ session: { ...session, created: true } }),
-    })).toBe(true)
-  })
-
-  it("does not print for a freshly minted default session", () => {
-    expect(shouldPrintRecreatedSessionNotice({
-      explicitSessionId: undefined,
-      sessionExistedInStoreBeforeCommand: false,
-      result: executeResponse({ session: { ...session, created: true } }),
-    })).toBe(false)
-  })
-
-  it("does not print for an explicit session", () => {
-    expect(shouldPrintRecreatedSessionNotice({
-      explicitSessionId: "schedules-check",
-      sessionExistedInStoreBeforeCommand: true,
-      result: executeResponse({ session: { ...session, created: true } }),
-    })).toBe(false)
-  })
-
-  it("formats the one-line stderr notice", () => {
-    expect(formatRecreatedSessionNotice("schedules-check")).toBe(
-      "Recreated session 'schedules-check' — relay had no such session; page and state were reset.",
+describe("session continuation", () => {
+  it("prints one exact continuation instruction", () => {
+    expect(formatSessionContinuation("cosmic-otter-866")).toBe(
+      "Session: cosmic-otter-866. Continue with --session cosmic-otter-866.",
     )
   })
 })

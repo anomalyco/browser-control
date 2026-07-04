@@ -2,6 +2,7 @@ import { Config, Context, Effect, Layer, Option, Schema } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest, type HttpClientResponse } from "effect/unstable/http"
 import {
   ErrorEnvelope,
+  type ExecuteRequest,
   ExecuteResponse,
   ExtensionStatus,
   RecordingCancelResponse,
@@ -59,18 +60,6 @@ export class RelayDecodeFailed extends Schema.TaggedErrorClass<RelayDecodeFailed
 ) {}
 
 export type RelayClientError = RelayUnreachable | RelayRejected | RelayDecodeFailed
-
-export type ExecuteTargetSelectionRequest = {
-  readonly urlIncludes?: string
-  readonly index?: number
-}
-
-export type ExecuteRequest = {
-  readonly sessionId: string
-  readonly code: string
-  readonly createIfMissing: boolean
-  readonly targetSelection?: ExecuteTargetSelectionRequest
-}
 
 export type RecordingTargetRequest = {
   readonly sessionId?: string | undefined
@@ -153,7 +142,7 @@ export const make = Effect.fnUntraced(function* (options?: { readonly endpoint?:
 
   const transportError = (path: string) => (cause: unknown) =>
     new RelayUnreachable({
-      message: `Browser Control relay is not reachable at ${endpoint}. Start it with \`browser-control serve\`.`,
+      message: `Browser Control relay is not reachable at ${endpoint}. Relay-backed CLI commands start it automatically; use \`browser-control serve\` only for foreground debugging.`,
       endpoint,
       path,
       cause,
@@ -209,14 +198,14 @@ export const make = Effect.fnUntraced(function* (options?: { readonly endpoint?:
       postJson("/cli/session/reset", { id }, SessionContainer).pipe(Effect.map((container) => container.session)),
     sessionAdopt: (request) =>
       postJson("/cli/session/adopt", {
-        sessionId: request.sessionId,
+        ...(request.sessionId ? { sessionId: request.sessionId } : {}),
         createIfMissing: request.createIfMissing,
         targetSelection: request.targetSelection,
       }, SessionAdoptResponse),
     sessionDelete: (id) => postJson("/cli/session/delete", { id }, SessionDeleted),
     execute: (request) =>
       postJson("/cli/execute", {
-        sessionId: request.sessionId,
+        ...(request.sessionId ? { sessionId: request.sessionId } : {}),
         code: request.code,
         createIfMissing: request.createIfMissing,
         targetSelection: request.targetSelection ?? {},

@@ -25,9 +25,12 @@ local Node relay.
 - Use the user's already-running Chromium-family browser first.
 - Keep tabs in a loose attached-tab pool for v1.
 - Prefer a code-first `execute(code)` interface over many tiny action tools.
-- Execute runs inside relay-backed sessions. If the user does not provide a
-  session id, the CLI creates a readable id such as `cosmic-otter-866`, stores it
-  as the current local session, and reuses that session for later commands.
+- Execute runs inside relay-backed sessions. Bare CLI execute atomically creates
+  a fresh readable id such as `cosmic-otter-866` and prints how to continue with
+  `--session`; it never infers agent identity from shared current-session state.
+- Relay-backed CLI commands auto-start a detached relay when needed. `status`
+  and `doctor` remain observational, and `serve` is only the foreground/debug
+  path. The first session is created atomically in the execute request.
 - Each Browser Control session owns one default page and persistent JavaScript
   `state`; do not default to arbitrary shared tabs for normal execute calls.
 - Use stock `playwright-core` for v1.
@@ -49,8 +52,8 @@ local Node relay.
   `src/relay-client.ts` service (`RelayClient.Service`), never through ad-hoc
   fetch/node:http calls. Failures are tagged errors that keep the relay's own
   error message as the top-level message.
-- The CLI's current session id is endpoint-scoped in
-  `~/.browser-control/session.json` via `src/session-store.ts`.
+- Human session-management commands keep an endpoint-scoped current id in
+  `~/.browser-control/session.json`; execute and adopt never use it implicitly.
 - An extension RPC timeout fails only that command; the extension socket is
   closed only when a websocket-level ping probe also fails.
 - CDP guardrails are pure logic in `src/cdp-guardrails.ts`, enforced at the top
@@ -64,6 +67,8 @@ local Node relay.
 - Session adopt/reset/delete HTTP handlers immediately refresh page status for
   both selected and released target ids; do not rely on navigation or a later
   content-script ready event to clear stale session context.
+- Adopted targets are exclusive to one Browser Control session. Serialize adopts,
+  reject competing owners, and release ownership on detach, reset, or delete.
 - Execute results carry per-call `warnings` and an `aftermath` summary
   (URL movement, navigations, error counts, handoffs). Do not add a passive
   `page.on("dialog")` listener for aftermath: it would suppress Playwright's
@@ -109,6 +114,9 @@ local Node relay.
 - Root page targets must be stored before applying `Target.setAutoAttach`, because
   Chrome can emit child/OOPIF attach events immediately and the relay needs the
   root target to route and store them.
+- `Target.setAutoAttach` also reports unsupported children such as service
+  workers. If they start paused, resume them directly and suppress them from
+  Playwright; exposing an unroutable child session can hang its parent navigation.
 - OOPIF reconnect depends on replaying stored child target attaches plus the
   current child frame navigation on the child session for stock Playwright.
 - Relay shutdown should await HTTP and websocket close callbacks so scoped tests

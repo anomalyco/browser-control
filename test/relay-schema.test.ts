@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { Schema } from "effect"
 import {
+  ExecuteRequest,
   ExecuteResponse,
   ExecuteSessionSummary,
   ExtensionStatus,
@@ -21,6 +22,7 @@ const decodeSessionContainer = Schema.decodeUnknownSync(SessionContainer)
 const decodeAdoptRequest = Schema.decodeUnknownSync(SessionAdoptRequest)
 const decodeAdoptResponse = Schema.decodeUnknownSync(SessionAdoptResponse)
 const encodeAdoptResponse = Schema.encodeUnknownSync(SessionAdoptResponse)
+const decodeExecuteRequest = Schema.decodeUnknownSync(ExecuteRequest)
 const decodeExecute = Schema.decodeUnknownSync(ExecuteResponse)
 const encodeExecute = Schema.encodeUnknownSync(ExecuteResponse)
 const decodeExecuteSession = Schema.decodeUnknownSync(ExecuteSessionSummary)
@@ -66,8 +68,26 @@ describe("relay-schema", () => {
       createIfMissing: true,
       targetSelection: { urlIncludes: "example.com" },
     }).targetSelection.urlIncludes).toBe("example.com")
-    const response = { session, adoptedUrl: "https://example.com/", adoptedTargetId: "target-2" }
+    expect(decodeAdoptRequest({
+      createIfMissing: true,
+      targetSelection: { index: 0 },
+    }).sessionId).toBeUndefined()
+    const response = { session: { ...session, created: true }, adoptedUrl: "https://example.com/", adoptedTargetId: "target-2" }
     expect(encodeAdoptResponse(decodeAdoptResponse(response))).toEqual(response)
+  })
+
+  it("decodes execute requests with atomic or explicit session ownership", () => {
+    expect(decodeExecuteRequest({ code: "page.url()", createIfMissing: true })).toEqual({
+      code: "page.url()",
+      createIfMissing: true,
+    })
+    expect(decodeExecuteRequest({
+      sessionId: "rapid-otter-633",
+      code: "page.url()",
+      createIfMissing: false,
+      targetSelection: { index: 0 },
+    }).sessionId).toBe("rapid-otter-633")
+    expect(() => decodeExecuteRequest({ code: "page.url()" })).toThrow()
   })
 
   it("decodes the optional readOnly flag on sessions", () => {

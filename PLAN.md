@@ -44,9 +44,10 @@ Agent / MCP client / CLI
 - **Persistent sandbox**: CLI and MCP execute calls run through relay-backed
   Browser Control sessions with long-lived JavaScript `state`.
 - **MCP semantics**: one MCP server process owns one implicit execute sandbox.
-- **CLI semantics**: CLI creates a readable current session id automatically when
-  none is provided. Explicit session ids must already exist and are created with
-  `browser-control session new <id>`.
+- **CLI semantics**: bare execute atomically creates one fresh readable session
+  and returns its id; later calls continue it only through `--session` or
+  `BROWSER_CONTROL_SESSION`. The CLI never guesses agent identity from shared
+  ambient current-session state.
 - **Playwright v1**: v1 uses stock `playwright-core`; it does not clone
   Playwright.
 - **Effect v4**: the Node-side CLI, relay, and later MCP code should use
@@ -69,8 +70,9 @@ Agent / MCP client / CLI
 - **Name**: use `browser-control` for the product, repository, CLI command, and
   MCP server name. Publish as `@anomalyco/browser-control` unless the unscoped
   npm name becomes available.
-- **Npm-first install**: v1 optimizes for global CLI/MCP installation via npm,
-  with manual unpacked extension installation during early development.
+- **Source install until publication**: while the package is private, setup uses
+  a source checkout, `pnpm build`, and a global link. Switch the documented flow
+  to npm when the package is actually published.
 - **Extension distribution**: v1 uses an unpacked extension. Later releases can
   add Chrome Web Store distribution for user browsers and a bundled unpacked
   extension for managed/dev browser modes.
@@ -84,11 +86,17 @@ Agent / MCP client / CLI
   attached after short-lived CLI commands disconnect, so repeated shell commands
   reuse the same visible browser state. Users can close tabs, call `page.close()`,
   or detach with the toolbar.
+- **Automatic CLI relay startup**: relay-backed CLI commands start a detached
+  relay when none is reachable and wait briefly for the extension to reconnect.
+  `status` and `doctor` remain observational; `serve` is the explicit foreground
+  debugging path. Existing relay build mismatches are reported, never silent.
 - **Explicit target selection**: when multiple tabs are attached, CLI execute can
   select by URL substring or zero-based page index for manual recovery. Normal
   execute calls use the session-owned default page instead of guessing from the
   shared attached-tab pool. URL selection must match exactly one page, and
   URL/index selectors cannot be combined.
+- **Exclusive adoption**: one attached target can be the sticky default of only
+  one Browser Control session at a time; detach, reset, and delete release it.
 - **Shared wire contract**: the relay HTTP API shapes (sessions, execute
   responses, targets, extension status, recording responses) are defined once in
   `src/relay-schema.ts` with Effect Schema, and both server responders and
@@ -108,9 +116,9 @@ Agent / MCP client / CLI
 - **Session close is serialized with execute**: session delete/reset acquire the
   session's execute permit before closing the sandbox, so a running script is
   never yanked mid-flight.
-- **Endpoint-scoped current session**: `~/.browser-control/session.json` stores
-  the current session id per relay endpoint, so switching
-  `BROWSER_CONTROL_PORT` cannot silently reuse a session id from another relay.
+- **Human-shell current session**: `~/.browser-control/session.json` stores the
+  session selected by management commands per relay endpoint. Agent execute and
+  adopt calls never consume or update this ambient selection.
 - **Build-time version**: the CLI/MCP/relay report the package version injected
   by esbuild at build time (`0.0.0-dev` when running from source); no hardcoded
   version literals.
@@ -222,9 +230,9 @@ Current status:
 - CLI execute supports `--file <path>` for longer scripts, auto-returns
   conservative single-expression snippets such as `page.url()`, and returns
   structured per-call script/page console logs plus page errors.
-- CLI execute auto-creates a readable current session id when none is provided,
-  persists it under `~/.browser-control/session.json`, and reuses the session's
-  default page and JavaScript `state` across commands.
+- Bare CLI execute creates a fresh readable session in the execute request and
+  prints the id. `--session` or `BROWSER_CONTROL_SESSION` explicitly reuses that
+  session's default page and JavaScript `state` across commands.
 - The relay stores and replays child target attach events, replays current child
   frame navigation for OOPIF reconnects, replays discovery events, filters
   restricted Chrome/extension targets, resumes filtered targets that were waiting

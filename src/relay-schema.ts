@@ -21,6 +21,12 @@ export const SessionSummary = Schema.Struct({
 
 export interface SessionSummary extends Schema.Schema.Type<typeof SessionSummary> {}
 
+export const ExecuteSessionSummary = SessionSummary.pipe(Schema.fieldsAssign({
+  created: Schema.optionalKey(Schema.Boolean),
+}))
+
+export interface ExecuteSessionSummary extends Schema.Schema.Type<typeof ExecuteSessionSummary> {}
+
 export const SessionContainer = Schema.Struct({
   session: SessionSummary,
 })
@@ -47,8 +53,17 @@ export const TargetSelection = Schema.Struct({
 
 export interface TargetSelection extends Schema.Schema.Type<typeof TargetSelection> {}
 
+export const ExecuteRequest = Schema.Struct({
+  sessionId: Schema.optionalKey(Schema.String),
+  code: Schema.String,
+  createIfMissing: Schema.Boolean,
+  targetSelection: Schema.optionalKey(TargetSelection),
+})
+
+export interface ExecuteRequest extends Schema.Schema.Type<typeof ExecuteRequest> {}
+
 export const SessionAdoptRequest = Schema.Struct({
-  sessionId: Schema.String,
+  sessionId: Schema.optionalKey(Schema.String),
   createIfMissing: Schema.Boolean,
   targetSelection: TargetSelection,
 })
@@ -56,7 +71,7 @@ export const SessionAdoptRequest = Schema.Struct({
 export interface SessionAdoptRequest extends Schema.Schema.Type<typeof SessionAdoptRequest> {}
 
 export const SessionAdoptResponse = Schema.Struct({
-  session: SessionSummary,
+  session: ExecuteSessionSummary,
   adoptedUrl: Schema.String,
   adoptedTargetId: Schema.String,
 })
@@ -105,12 +120,6 @@ export const ExecuteAftermath = Schema.Struct({
 })
 
 export interface ExecuteAftermath extends Schema.Schema.Type<typeof ExecuteAftermath> {}
-
-export const ExecuteSessionSummary = SessionSummary.pipe(Schema.fieldsAssign({
-  created: Schema.optionalKey(Schema.Boolean),
-}))
-
-export interface ExecuteSessionSummary extends Schema.Schema.Type<typeof ExecuteSessionSummary> {}
 
 export const ExecuteResponse = Schema.Struct({
   text: Schema.String,

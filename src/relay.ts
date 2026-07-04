@@ -640,6 +640,21 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     if (method === "Target.attachedToTarget") {
       const childSessionId = typeof params?.sessionId === "string" ? params.sessionId : undefined
       const targetInfo = getTargetInfo(params?.targetInfo)
+      if (childSessionId && !targetInfo) {
+        if (params?.waitingForDebugger === true) {
+          Effect.runPromise(
+            sendDebuggerCommand({
+              tabId,
+              sessionId: childSessionId,
+              method: "Runtime.runIfWaitingForDebugger",
+              params: {},
+            }).pipe(Effect.ignore),
+          ).catch((error: unknown) => {
+            console.error("Failed to resume unsupported target", error)
+          })
+        }
+        return
+      }
       if (childSessionId && targetInfo) {
         if (isRestrictedTarget(targetInfo)) {
           if (params?.waitingForDebugger === true) {
@@ -1156,6 +1171,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     if (!detached) {
       return
     }
+    sessions.releaseAdoptedTarget(detached.target.targetInfo.targetId)
     mainFrameIdsByTab.delete(tabId)
     contextDebugLog?.(`target-detached kind=root ${targetDiagnosticIdentity(detached.target)}`)
     sendEventToTargetViewers(detached.target.sessionId, {

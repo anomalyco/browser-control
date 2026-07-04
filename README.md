@@ -20,12 +20,14 @@ What you get:
   exactly what an agent did to your browser.
 - **Recording**: capture attached tabs to WebM or CDP frame directories.
 
-## Team Setup
+## Source Setup
 
 Requirements: Node 20+, [pnpm](https://pnpm.io), [bun](https://bun.sh) (for
 `bun link`), and a Chromium-family browser.
 
 ### 1. Install the CLI
+
+The package is currently private, so install it from a source checkout:
 
 ```bash
 git clone git@github.com:anomalyco/browser-control.git
@@ -33,7 +35,6 @@ cd browser-control
 pnpm install
 pnpm build
 bun link          # installs `browser-control` and `browser-control-mcp` globally
-browser-control doctor
 ```
 
 ### 2. Load the extension
@@ -46,15 +47,20 @@ browser-control doctor
 The current extension shim version is `0.0.10`; reload the unpacked extension
 after rebuilding when its source changes.
 
-### 3. Start the relay
+### 3. Run it
 
 ```bash
-browser-control serve
+browser-control execute "await page.goto('https://example.com'); return await page.title()"
+browser-control status
 ```
 
-Keep this running in a terminal (the relay listens on `127.0.0.1:19989`).
-`browser-control doctor` should now report the relay reachable and the
-extension connected.
+The first relay-backed CLI command starts a background relay on
+`127.0.0.1:19989`; the extension reconnects automatically. `status` is
+observational and reports a stopped relay without starting it. Use
+`browser-control serve` only when you want the relay in the foreground for
+debugging. Bare execute prints the new session id and exact `--session`
+continuation command. `browser-control doctor` performs a read-only
+setup/runtime check.
 
 ### 4. Install the agent skill
 
@@ -95,7 +101,7 @@ claude mcp add browser-control -- browser-control-mcp
 
 The skill-driven CLI workflow and MCP expose the same relay sessions.
 
-### Try it
+### Explicit sessions
 
 ```bash
 browser-control session new demo
@@ -116,13 +122,11 @@ selected Node built-ins, `fillInput(selectorOrLocator, value)`,
 `fillInputs(page, fields)`, `snapshot(options?)`, `ref(id)`,
 `screenshotWithLabels({ page, path })`, `ariaSnapshot(target?, { timeout })`, and
 `handoff(message, { timeoutMs })`, plus opt-in `showGhostCursor()` /
-`hideGhostCursor()` helpers. If no session is provided, the CLI creates a
-readable session id, stores it at `~/.browser-control/session.json`, and reuses
-that session on later commands. Explicit session ids from `--session` or
-`BROWSER_CONTROL_SESSION` must already exist; create them intentionally with
-`browser-control session new <id>`. Each session owns one default page so
-concurrent agents do not collide, and other clients are never told about a
-session's tabs.
+`hideGhostCursor()` helpers. Bare execute creates a fresh readable session and
+prints `Session: <id>. Continue with --session <id>.` Pass that id through `--session` or
+`BROWSER_CONTROL_SESSION` to reuse its page and `state`; those explicit ids must
+already exist. Each session owns one default page so concurrent agents do not
+collide, and other clients are never told about a session's tabs.
 
 Use `browser-control session new <id> --read-only` for inspect-only sessions:
 the relay rejects input-dispatching CDP so scripts can navigate, read, and
@@ -160,8 +164,8 @@ summarized; text input and textarea values are omitted. Its timeout defaults to
 return await snapshot()
 ```
 
-On the next execute call, resolve a current ref to a Playwright locator with
-`ref("e12")`. Refs belong to the latest snapshot and become stale after
+On the next execute call in that same named session, resolve a current ref to a
+Playwright locator with `ref("e12")`. Refs belong to the latest snapshot and become stale after
 main-frame navigation. Ref locators combine structural position with captured
 accessible identity so DOM drift fails closed rather than silently retargeting
 a different named control. Use `snapshot({ within, interactive, compact, depth,
@@ -211,10 +215,12 @@ enables the ghost cursor.
 Use `browser-control doctor` for a read-only install/runtime diagnosis,
 including relay reachability, extension connection/version, sessions, active
 targets, built artifacts, and whether the long-running relay matches the current
-CLI build. Restart `browser-control serve` when the relay build is stale. Use `browser-control session list` and
-`browser-control status` to inspect session-owned pages and attached targets.
-`--target-url` and `--target-index` are manual recovery selectors; normal
-`execute` calls use the current session page. Scripts can use
+CLI build. `status` warns and relay-backed commands reject a stale build; stop
+the process that owns the old relay before starting the current build. Use
+`browser-control session list` and `browser-control status` to inspect
+session-owned pages and attached targets.
+`--target-url` and `--target-index` are manual recovery selectors; explicit
+session executes use that session's page. Scripts can use
 `BROWSER_CONTROL_SESSION`, `BROWSER_CONTROL_TARGET_URL`, or
 `BROWSER_CONTROL_TARGET_INDEX`. URL selection must match exactly one page, and
 URL/index selectors cannot be combined.

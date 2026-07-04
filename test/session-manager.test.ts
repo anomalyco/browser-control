@@ -10,29 +10,44 @@ type FakeSandbox = ExecuteSandboxLike & {
 
 const makeFakeSandbox = (options?: {
   readonly onExecute?: Effect.Effect<void>
+  readonly setupFailure?: Error
+  readonly adoptFailure?: Error
+  readonly onAdopt?: ExecuteSandboxLike["adoptPage"]
 }): FakeSandbox => {
   let closes = 0
   const adoptedSelections: unknown[] = []
   return {
     execute: () =>
       (options?.onExecute ?? Effect.void).pipe(
-        Effect.as({
-          text: "ok",
-          isError: false,
-          logs: [],
-          logSummary: { totalCount: 0, returnedCount: 0, repeatedCount: 0, omittedCount: 0 },
-          warnings: [],
-        }),
+        Effect.as(options?.setupFailure
+          ? {
+              text: options.setupFailure.message,
+              isError: true as const,
+              logs: [],
+              logSummary: { totalCount: 0, returnedCount: 0, repeatedCount: 0, omittedCount: 0 },
+              warnings: [],
+              setupFailed: true as const,
+            }
+          : {
+              text: "ok",
+              isError: false as const,
+              logs: [],
+              logSummary: { totalCount: 0, returnedCount: 0, repeatedCount: 0, omittedCount: 0 },
+              warnings: [],
+            }),
       ),
     close: () =>
       Effect.sync(() => {
         closes += 1
       }),
-    adoptPage: (selection) =>
-      Effect.sync(() => {
-        adoptedSelections.push(selection)
-        return "https://example.com/adopted"
-      }),
+    adoptPage: (selection) => options?.onAdopt
+      ? options.onAdopt(selection)
+      : options?.adoptFailure
+      ? Effect.fail(options.adoptFailure)
+      : Effect.sync(() => {
+          adoptedSelections.push(selection)
+          return "https://example.com/adopted"
+        }),
     getStatus: () => ({ connected: false, pageUrl: null, stateKeys: [] }),
     closes: () => closes,
     adoptedSelections: () => adoptedSelections,
@@ -40,6 +55,36 @@ const makeFakeSandbox = (options?: {
 }
 
 describe("BrowserControlSessions", () => {
+  it("creates a readable session id inside the first execute request", async () => {
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox())
+
+    const result = await Effect.runPromise(sessions.execute({ code: "noop", createIfMissing: true }))
+
+    expect(result.session.id).toMatch(/^[a-z]+-[a-z]+-\d{3}$/)
+    expect(result.session.created).toBe(true)
+    expect(sessions.listSummaries().map((session) => session.id)).toEqual([result.session.id])
+  })
+
+  it("requires createIfMissing when execute omits the session id", async () => {
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox())
+
+    const error = await Effect.runPromise(sessions.execute({ code: "noop", createIfMissing: false }).pipe(Effect.flip))
+
+    expect(error.message).toBe("sessionId is required when createIfMissing is false")
+    expect(sessions.listSummaries()).toEqual([])
+  })
+
+  it("removes an implicitly created session when page acquisition fails", async () => {
+    const sandbox = makeFakeSandbox({ setupFailure: new Error("extension disconnected") })
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox)
+
+    const error = await Effect.runPromise(sessions.execute({ code: "noop", createIfMissing: true }).pipe(Effect.flip))
+
+    expect(error.message).toBe("extension disconnected")
+    expect(sessions.listSummaries()).toEqual([])
+    expect(sandbox.closes()).toBe(1)
+  })
+
   it("creates, lists, and deletes sessions", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -293,6 +338,77 @@ describe("BrowserControlSessions", () => {
     )
     expect(result.session.id).toBe("ghost")
     expect(result.session.created).toBe(true)
+  })
+
+  it("creates and cleans up an implicit adopt session transactionally", async () => {
+    const success = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox())
+    const result = await Effect.runPromise(
+      success.adopt({ createIfMissing: true, targetId: "target-1", targetUrl: "https://example.com/adopted" }),
+    )
+    expect(result.session.id).toMatch(/^[a-z]+-[a-z]+-\d{3}$/)
+    expect(result.session.created).toBe(true)
+
+    const sandbox = makeFakeSandbox({ adoptFailure: new Error("target detached") })
+    const failure = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox)
+    const error = await Effect.runPromise(
+      failure.adopt({ createIfMissing: true, targetId: "target-1", targetUrl: "https://example.com/adopted" }).pipe(Effect.flip),
+    )
+    expect(error.message).toBe("target detached")
+    expect(failure.listSummaries()).toEqual([])
+    expect(sandbox.closes()).toBe(1)
+  })
+
+  it("requires createIfMissing when adopt omits the session id", async () => {
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox())
+
+    const error = await Effect.runPromise(
+      sessions.adopt({ createIfMissing: false, targetId: "target-1", targetUrl: "https://example.com/adopted" }).pipe(Effect.flip),
+    )
+
+    expect(error.message).toBe("sessionId is required when createIfMissing is false")
+    expect(sessions.listSummaries()).toEqual([])
+  })
+
+  it("serializes competing adopts and gives one session exclusive target ownership", async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const started = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", (id) => makeFakeSandbox(id === "alpha"
+        ? {
+            onAdopt: () => Deferred.succeed(started, undefined).pipe(
+              Effect.andThen(Deferred.await(release)),
+              Effect.as("https://example.com/adopted"),
+            ),
+          }
+        : undefined))
+      sessions.createNew("alpha")
+      sessions.createNew("beta")
+
+      const alpha = yield* Effect.forkChild(
+        sessions.adopt({ sessionId: "alpha", createIfMissing: false, targetId: "target-1", targetUrl: "https://example.com/adopted" }),
+      )
+      yield* Deferred.await(started)
+      const beta = yield* Effect.forkChild(
+        sessions.adopt({ sessionId: "beta", createIfMissing: false, targetId: "target-1", targetUrl: "https://example.com/adopted" }),
+      )
+
+      yield* Deferred.succeed(release, undefined)
+      expect((yield* Fiber.join(alpha)).session.id).toBe("alpha")
+      const betaResult = yield* Effect.result(Fiber.join(beta))
+      expect(betaResult._tag).toBe("Failure")
+      if (betaResult._tag === "Failure") {
+        expect(betaResult.failure.message).toBe("Target is already adopted by session alpha")
+      }
+
+      const implicitResult = yield* Effect.result(
+        sessions.adopt({ createIfMissing: true, targetId: "target-1", targetUrl: "https://example.com/adopted" }),
+      )
+      expect(implicitResult._tag).toBe("Failure")
+      expect(sessions.listSummaries().map((session) => session.id).sort()).toEqual(["alpha", "beta"])
+
+      expect(sessions.releaseAdoptedTarget("target-1")).toBe("alpha")
+      expect((yield* sessions.adopt({ sessionId: "beta", createIfMissing: false, targetId: "target-1", targetUrl: "https://example.com/adopted" })).session.id).toBe("beta")
+    }))
   })
 
   it("adopt fails within the lifecycle timeout when Playwright never settles", async () => {

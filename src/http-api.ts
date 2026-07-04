@@ -7,7 +7,6 @@ import {
   optionalSessionId,
   parseTargetSelection,
   readJsonBody,
-  requiredBoolean,
   requiredSessionId,
   requiredString,
   sendJson,
@@ -15,7 +14,7 @@ import {
   validateHostHeader,
 } from "./relay-helpers.ts"
 import { selectTarget } from "./execute.ts"
-import { SessionAdoptRequest } from "./relay-schema.ts"
+import { ExecuteRequest, SessionAdoptRequest } from "./relay-schema.ts"
 import type { BrowserControlSessions } from "./session-manager.ts"
 import type { RecordingMode, RecordingRelay, RecordingStartOptions, RecordingTargetOptions } from "./recording-relay.ts"
 import type { TargetRegistry } from "./target-registry.ts"
@@ -242,6 +241,7 @@ function handleCliRequest(options: {
       const request = yield* Schema.decodeUnknownEffect(SessionAdoptRequest)(body).pipe(
         Effect.mapError((cause) => new Error(`Invalid session adopt request: ${cause.message}`)),
       )
+      const requestedSessionId = optionalSessionId(request.sessionId)
       const targetSelection = parseTargetSelection(request.targetSelection)
       if (!targetSelection) {
         throw new Error("targetSelection is required")
@@ -254,14 +254,17 @@ function handleCliRequest(options: {
       if (!selectedTarget) {
         throw new Error("No page matched target selection")
       }
+      if (selectedTarget.browserControlSessionId && selectedTarget.browserControlSessionId !== requestedSessionId) {
+        throw new Error(`Target is already owned by session ${selectedTarget.browserControlSessionId}`)
+      }
       const adoptedTargetId = selectedTarget.targetInfo.targetId
       const { session, adoptedUrl, releasedTargetIds } = yield* options.sessions.adopt({
-        sessionId: request.sessionId,
+        ...(requestedSessionId ? { sessionId: requestedSessionId } : {}),
         createIfMissing: request.createIfMissing,
         targetId: adoptedTargetId,
         targetUrl: selectedTarget.targetInfo.url,
       })
-      const releasedTabIds = releaseSessionTargets(options.registry, request.sessionId, releasedTargetIds)
+      const releasedTabIds = releaseSessionTargets(options.registry, session.id, releasedTargetIds)
       const adoptedTabId = options.registry.targetsByTargetId.get(adoptedTargetId)?.tabId
       options.refreshPageStatuses?.(uniqueTabIds(releasedTabIds, adoptedTabId))
       sendJson(options.response, { session, adoptedUrl, adoptedTargetId })
@@ -269,12 +272,19 @@ function handleCliRequest(options: {
     }
     if (options.pathname === "/cli/execute" && options.request.method === "POST") {
       const body = yield* readJsonBody(options.request)
-      const sessionId = requiredSessionId(body.sessionId)
-      const code = requiredString(body.code, "code")
-      const createIfMissing = requiredBoolean(body.createIfMissing, "createIfMissing")
-      const targetSelection = parseTargetSelection(body.targetSelection)
-      const { result, session } = yield* options.sessions.execute({ sessionId, code, createIfMissing, ...(targetSelection ? { targetSelection } : {}) })
-      sendJson(options.response, { ...result, session })
+      const request = yield* Schema.decodeUnknownEffect(ExecuteRequest)(body).pipe(
+        Effect.mapError((cause) => new Error(`Invalid execute request: ${cause.message}`)),
+      )
+      const requestedSessionId = optionalSessionId(request.sessionId)
+      const targetSelection = parseTargetSelection(request.targetSelection)
+      const { result, session } = yield* options.sessions.execute({
+        ...(requestedSessionId ? { sessionId: requestedSessionId } : {}),
+        code: request.code,
+        createIfMissing: request.createIfMissing,
+        ...(targetSelection ? { targetSelection } : {}),
+      })
+      const { setupFailed: _setupFailed, ...wireResult } = result
+      sendJson(options.response, { ...wireResult, session })
       return
     }
     options.response.writeHead(404)

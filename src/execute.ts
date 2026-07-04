@@ -223,6 +223,7 @@ export type ExecuteResult = {
   readonly warnings: readonly string[]
   readonly diagnostic?: string
   readonly aftermath?: ExecuteAftermath
+  readonly setupFailed?: true
 }
 
 class ExecuteCodeError extends Error {
@@ -303,13 +304,14 @@ export class ExecuteSandbox {
             warnings.push(logCompactionWarning)
           }
           return {
-            text: error.stack ?? error.message,
+            text: error instanceof ExecuteCodeError ? error.stack ?? error.message : error.message,
             isError: true,
             logs: error instanceof ExecuteCodeError ? error.logs : [],
             logSummary,
             warnings,
             ...(diagnostic ? { diagnostic } : {}),
             ...(aftermath ? { aftermath } : {}),
+            ...(error instanceof ExecuteCodeError ? {} : { setupFailed: true as const }),
           }
         },
         onSuccess: (result) => {

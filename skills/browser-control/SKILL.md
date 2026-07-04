@@ -11,25 +11,27 @@ agent.
 
 ## Workflow
 
-1. Start or reuse the relay.
+1. Run the first task directly.
 
 ```bash
-cd /Users/kit/code/open-source/browser-control
 browser-control --help
-browser-control skill
-browser-control serve
-browser-control doctor
+browser-control execute "return { url: page.url(), title: await page.title() }"
 ```
 
-Completion criterion: the terminal shows
-`browser-control relay listening at http://127.0.0.1:19989`.
+Relay-backed commands start a detached relay when needed and wait briefly for
+the extension to reconnect. Do not start `browser-control serve` first; it is
+the foreground debugging path and intentionally does not return.
 
-If `browser-control` is not on PATH, run `bun link` from the repo root first.
+If `browser-control` is not on PATH, follow the source setup in the repository
+README (`pnpm install`, `pnpm build`, `bun link`).
 
 `browser-control skill` prints this skill text from the installed package/repo.
 Use it to verify another agent has the current Browser Control instructions.
 
-2. Ensure the extension is connected.
+Completion criterion: execute returns a page result and a readable session id
+with the exact `--session` continuation command.
+
+2. Inspect health only when setup or runtime behavior is unclear.
 
 ```bash
 browser-control doctor
@@ -39,34 +41,44 @@ browser-control status --json
 browser-control session list
 ```
 
-Completion criterion: `doctor` reports the relay as reachable and the extension
-as connected. `status` also reports child target counts when OOPIF/iframe targets
-are attached.
+`status` and `doctor` are read-only and never start the relay. A stopped `status`
+prints one concise next step instead of a stack trace. When running, `status`
+reports relay build compatibility, extension connectivity, sessions, targets,
+and child target counts.
 
 Use `browser-control doctor` before deeper debugging. It is read-only and checks
 the package/bin metadata, relay HTTP endpoint, extension connection/version,
 current and stale sessions, active and relay-owned targets, whether the running
 relay matches the current CLI build, and built artifacts such as `dist/cli.js`,
-`dist/mcp.js`, and `extension/dist/manifest.json`. Restart `browser-control
-serve` when it reports a stale relay build.
+`dist/mcp.js`, and `extension/dist/manifest.json`. Relay-backed commands reject
+a stale relay build with a concise restart message.
 
 After extension shim changes, also confirm `version` matches
 `extension/manifest.json`.
 
-3. Attach a tab.
+3. Create once, then continue the named session.
 
-Click the Browser Control toolbar button on a normal web tab, or let the relay
-create an initial tab when Playwright connects.
+Bare execute always creates a fresh isolated session and prints `Continue with
+--session <id>`. Every later shell call must pass that id (or set
+`BROWSER_CONTROL_SESSION`). No toolbar attachment is required.
 
-Completion criterion: `/extension/status` reports at least one active target, or
-the execute smoke test succeeds.
+To control a tab already open in the user's browser, ask the user to click the
+Browser Control toolbar button on that tab, then select it while creating a new
+session or adopt it for sticky reuse:
+
+```bash
+browser-control execute --target-url example.com "return page.url()"
+browser-control session adopt --target-url example.com
+```
 
 4. Execute Playwright code.
 
 ```bash
+# Creates a fresh session and prints its id.
 browser-control execute "return { url: page.url(), title: await page.title() }"
-browser-control execute "page.url()"
-browser-control execute --file ./script.js
+# Continue only with that returned id.
+browser-control execute --session cosmic-otter-866 "page.url()"
+browser-control execute --session cosmic-otter-866 --file ./script.js
 browser-control session new amazon
 browser-control execute --session amazon "await page.goto('https://www.amazon.com')"
 browser-control execute --target-url example.com "return page.url()"
@@ -74,17 +86,14 @@ browser-control execute --target-index 0 "return page.url()"
 ```
 
 Use `page`, `context`, `browser`, relay-backed persistent `state`, and `fillInput`
-inside execute code. If no session is provided, the CLI creates a readable session
-id, stores it in `~/.browser-control/session.json`, and reuses it. Explicit
-session ids from `--session`, `BROWSER_CONTROL_SESSION`, or MCP `execute({ session:
-"id" })` must already exist; create them intentionally with `browser-control
-session new <id>` or MCP `session_new`. Each session gets one owned default page
-that persists across execute calls. If the stored current session no longer
-exists on the relay (for example after a relay restart), execute recreates it
-and prints a one-line stderr notice — the page and persistent `state` were
-reset, so re-establish any context you relied on.
+inside execute code. Without a session, CLI execute atomically creates a fresh
+one and returns its id without reading or writing shared current-session state.
+Explicit ids from `--session`, `BROWSER_CONTROL_SESSION`, or MCP `execute({
+session: "id" })` must already exist. Each session gets one owned default page
+that persists across named execute calls. MCP keeps its own process-local current
+session because the MCP process itself is the agent boundary.
 
-Bare execute drives the session's own page, never the user's attached tabs. To
+Bare execute drives its new session-owned page, never the user's attached tabs. To
 drive a tab the user attached with the toolbar, adopt it as the session's
 default page:
 
@@ -192,14 +201,13 @@ execution-context failure diagnostic. Use it to audit
 what an agent did to the browser or to debug a session after the fact:
 
 ```bash
-browser-control journal
 browser-control journal -s amazon --limit 50
 browser-control journal -s amazon --json
 ```
 
-For concurrent agents, create each explicit session first or let Browser Control
-create the implicit current session automatically. Use `browser-control session
-list` to see session-owned pages. `--target-url` and `--target-index` are manual
+For concurrent agents, let each agent's first bare execute create a fresh session,
+then require that agent to retain and pass its returned id. Use `browser-control
+session list` to see session-owned pages. `--target-url` and `--target-index` are manual
 recovery selectors for adopting a specific attached page for one command. The same
 selection can be supplied to scripts with `BROWSER_CONTROL_TARGET_URL` or
 `BROWSER_CONTROL_TARGET_INDEX`. `--target-url` must match exactly one attached
@@ -442,8 +450,8 @@ language changes, update `CONTEXT.md` too.
 
 ## Troubleshooting
 
-- `connected:false`: start the relay, wait for the extension reconnect loop, or
-  reload the unpacked extension if shim code changed.
+- `connected:false`: run a relay-backed command to auto-start the relay, then
+  reload the unpacked extension if its reconnect loop does not recover.
 - `Target not found`: check `/extension/status`, then attach a tab or inspect
   relay logs.
 - Extension changes not taking effect: rebuild `extension/dist` and reload the

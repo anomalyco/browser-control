@@ -7,6 +7,7 @@ import process from "node:process"
 import { fileURLToPath } from "node:url"
 import { getObject } from "./relay-helpers.ts"
 import * as RelayClient from "./relay-client.ts"
+import * as RelayLifecycle from "./relay-lifecycle.ts"
 import { startRelay } from "./relay.ts"
 import { browserControlVersion } from "./version.ts"
 
@@ -59,6 +60,7 @@ function makeToolSpecs(relay: RelayClient.Interface): readonly ToolSpec[] {
       idempotent: false,
       handle: (input) => Effect.gen(function* () {
         const args = yield* Effect.try(() => parseExecuteArguments(input))
+        yield* RelayLifecycle.ensureExtensionConnected({ relay, waitForReconnect: true })
         const sessionId = args.session ?? currentSession.id
         const result = yield* relay.execute({
           sessionId,
@@ -238,6 +240,10 @@ const relayLayer = Layer.effectDiscard(
             Effect.mapError(() =>
               new Error(`Port ${port} is in use but does not answer like a Browser Control relay; stop the other process or set BROWSER_CONTROL_PORT`)
             ),
+            Effect.flatMap((version) => {
+              const problem = RelayLifecycle.relayBuildProblem(version)
+              return problem ? Effect.fail(new Error(problem)) : Effect.void
+            }),
           )
         }
         return Effect.fail(error)
@@ -266,7 +272,7 @@ const registerTools = Effect.gen(function* () {
       handle: (payload: unknown) => {
         return spec.handle(payload).pipe(
           Effect.match({
-            onFailure: (error) => toolResult({ text: error.stack ?? error.message, isError: true }),
+            onFailure: (error) => toolResult({ text: error.message, isError: true }),
             onSuccess: (value) => toolResult({ text: stringifyResult(value), structuredContent: value, isError: false }),
           }),
         )

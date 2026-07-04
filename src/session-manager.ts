@@ -43,6 +43,8 @@ export class BrowserControlSessions {
   private readonly createSandbox: (id: string) => ExecuteSandboxLike
   private readonly hooks: SessionHooks
   private readonly executing = new Set<string>()
+  private readonly adoptSemaphore = Semaphore.makeUnsafe(1)
+  private readonly adoptedTargetOwners = new Map<string, string>()
   private userAttachedPageUrlsProvider: (() => readonly string[]) | undefined
 
   constructor(
@@ -105,6 +107,7 @@ export class BrowserControlSessions {
           return false
         }
         yield* manager.closeBrowserControlSession(session)
+        manager.releaseSessionAdoptedTarget(session)
         manager.sessions.delete(id)
         return true
       }))
@@ -123,6 +126,7 @@ export class BrowserControlSessions {
           return yield* Effect.fail(new Error(`Session is no longer active: ${id}`))
         }
         yield* manager.closeBrowserControlSession(existing)
+        manager.releaseSessionAdoptedTarget(existing)
         const session = manager.createBrowserControlSession(id, existing.readOnly)
         manager.sessions.set(id, session)
         return manager.sessionSummary(session)
@@ -134,25 +138,43 @@ export class BrowserControlSessions {
     return this.sessions.get(id)?.adoptedTargetId
   }
 
+  releaseAdoptedTarget(targetId: string): string | undefined {
+    const owner = this.adoptedTargetOwners.get(targetId)
+    if (!owner) {
+      return undefined
+    }
+    const session = this.sessions.get(owner)
+    if (session?.adoptedTargetId === targetId) {
+      delete session.adoptedTargetId
+    }
+    this.adoptedTargetOwners.delete(targetId)
+    return owner
+  }
+
   execute(options: {
-    readonly sessionId: string
+    readonly sessionId?: string
     readonly code: string
     readonly createIfMissing: boolean
     readonly targetSelection?: ExecuteTargetSelection
   }): Effect.Effect<{ readonly result: ExecuteResult; readonly session: SessionSummary & { readonly created?: boolean } }, Error> {
     const manager = this
     return Effect.gen(function* () {
-      const resolved = options.createIfMissing
+      if (options.sessionId === undefined && !options.createIfMissing) {
+        return yield* Effect.fail(new Error("sessionId is required when createIfMissing is false"))
+      }
+      const resolved = options.sessionId === undefined
+        ? { session: manager.createNew(undefined), created: true }
+        : options.createIfMissing
         ? manager.getOrCreate(options.sessionId)
         : { session: manager.sessions.get(options.sessionId), created: false }
       const session = resolved.session
       if (!session) {
         return yield* Effect.fail(new Error(`Session not found: ${options.sessionId}`))
       }
-      return yield* session.executeSemaphore.withPermit(
+      const execution = session.executeSemaphore.withPermit(
         Effect.gen(function* () {
-          if (manager.sessions.get(options.sessionId) !== session) {
-            return yield* Effect.fail(new Error(`Session is no longer active: ${options.sessionId}`))
+          if (manager.sessions.get(session.id) !== session) {
+            return yield* Effect.fail(new Error(`Session is no longer active: ${session.id}`))
           }
           session.updatedAt = new Date().toISOString()
           manager.setExecuting(session.id, true)
@@ -160,6 +182,9 @@ export class BrowserControlSessions {
           const result = yield* session.sandbox
             .execute(options.code, { ...(options.targetSelection ? { targetSelection: options.targetSelection } : {}) })
             .pipe(Effect.ensuring(Effect.sync(() => manager.setExecuting(session.id, false))))
+          if (resolved.created && result.setupFailed) {
+            return yield* Effect.fail(new Error(result.text))
+          }
           const userAttachedPageUrls = manager.userAttachedPageUrlsProvider?.() ?? []
           const resultWithHint = shouldAppendAdoptionTip({
             explicitTargetSelection: hasExplicitTargetSelection(options.targetSelection),
@@ -175,34 +200,53 @@ export class BrowserControlSessions {
           return { result: resultWithHint, session: { ...summary, ...(resolved.created ? { created: true } : {}) } }
         }),
       )
+      return yield* execution.pipe(
+        Effect.catch((error) => resolved.created
+          ? manager.delete(session.id).pipe(Effect.ignore, Effect.andThen(Effect.fail(error)))
+          : Effect.fail(error)),
+      )
     })
   }
 
   adopt(options: {
-    readonly sessionId: string
+    readonly sessionId?: string
     readonly createIfMissing: boolean
     readonly targetId: string
     readonly targetUrl: string
   }): Effect.Effect<{ readonly adoptedUrl: string; readonly session: SessionSummary & { readonly created?: boolean }; readonly releasedTargetIds: readonly string[] }, Error> {
     const manager = this
-    return Effect.gen(function* () {
-      const resolved = options.createIfMissing
+    return manager.adoptSemaphore.withPermit(Effect.gen(function* () {
+      if (options.sessionId === undefined && !options.createIfMissing) {
+        return yield* Effect.fail(new Error("sessionId is required when createIfMissing is false"))
+      }
+      const resolved = options.sessionId === undefined
+        ? { session: manager.createNew(undefined), created: true }
+        : options.createIfMissing
         ? manager.getOrCreate(options.sessionId)
         : { session: manager.sessions.get(options.sessionId), created: false }
       const session = resolved.session
       if (!session) {
         return yield* Effect.fail(new Error(`Session not found: ${options.sessionId}`))
       }
-      return yield* manager.withLifecyclePermit(session, "adopt",
-        Effect.gen(function* () {
-          if (manager.sessions.get(options.sessionId) !== session) {
-            return yield* Effect.fail(new Error(`Session is no longer active: ${options.sessionId}`))
+      const adoption = Effect.gen(function* () {
+        const targetOwner = manager.adoptedTargetOwners.get(options.targetId)
+        if (targetOwner && targetOwner !== session.id) {
+          return yield* Effect.fail(new Error(`Target is already adopted by session ${targetOwner}`))
+        }
+        return yield* manager.withLifecyclePermit(session, "adopt",
+          Effect.gen(function* () {
+          if (manager.sessions.get(session.id) !== session) {
+            return yield* Effect.fail(new Error(`Session is no longer active: ${session.id}`))
           }
           const previousAdoptedTargetId = session.adoptedTargetId
           const adoptedUrl = yield* manager.withLifecycleTimeout(
             session.sandbox.adoptPage({ targetId: options.targetId, url: options.targetUrl }),
             `Session adopt for ${session.id}`,
           )
+          if (previousAdoptedTargetId && previousAdoptedTargetId !== options.targetId) {
+            manager.adoptedTargetOwners.delete(previousAdoptedTargetId)
+          }
+          manager.adoptedTargetOwners.set(options.targetId, session.id)
           session.adoptedTargetId = options.targetId
           session.updatedAt = new Date().toISOString()
           const summary = manager.sessionSummary(session)
@@ -210,9 +254,15 @@ export class BrowserControlSessions {
             ? [previousAdoptedTargetId]
             : []
           return { adoptedUrl, releasedTargetIds, session: { ...summary, ...(resolved.created ? { created: true } : {}) } }
-        }),
+          }),
+        )
+      })
+      return yield* adoption.pipe(
+        Effect.catch((error) => resolved.created
+          ? manager.delete(session.id).pipe(Effect.ignore, Effect.andThen(Effect.fail(error)))
+          : Effect.fail(error)),
       )
-    })
+    }))
   }
 
   closeAll(): Effect.Effect<void> {
@@ -222,6 +272,7 @@ export class BrowserControlSessions {
         return manager.closeBrowserControlSession(session).pipe(Effect.ignore)
       })
       manager.sessions.clear()
+      manager.adoptedTargetOwners.clear()
     })
   }
 
@@ -281,6 +332,12 @@ export class BrowserControlSessions {
 
   private closeBrowserControlSession(session: BrowserControlSession): Effect.Effect<void> {
     return this.withLifecycleTimeout(session.sandbox.close(), `Close session ${session.id}`).pipe(Effect.ignore)
+  }
+
+  private releaseSessionAdoptedTarget(session: BrowserControlSession): void {
+    if (session.adoptedTargetId && this.adoptedTargetOwners.get(session.adoptedTargetId) === session.id) {
+      this.adoptedTargetOwners.delete(session.adoptedTargetId)
+    }
   }
 
   private withLifecyclePermit<A, E, R>(

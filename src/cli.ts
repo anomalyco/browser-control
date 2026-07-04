@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url"
 import { createDoctorReport, formatDoctorReport } from "./doctor.ts"
 import { runMcpServer } from "./mcp.ts"
 import * as RelayClient from "./relay-client.ts"
+import * as RelayLifecycle from "./relay-lifecycle.ts"
 import type { ExecuteAftermath, ExecuteLogEntry, ExecuteResponse } from "./relay-schema.ts"
 import { startRelay } from "./relay.ts"
 import { defaultJournalBaseDir, formatJournalEntry, readJournalEntries } from "./session-journal.ts"
@@ -23,22 +24,22 @@ const readExecuteFile = Effect.fnUntraced(function* (filePath: string) {
   )
 })
 
-type ResolvedDefaultSessionId = {
-  readonly sessionId: string
-  readonly existedInStore: boolean
-}
-
-const getOrCreateDefaultSessionId = Effect.gen(function* () {
+const ensureCliRelay = Effect.fnUntraced(function* () {
   const relay = yield* RelayClient.Service
-  const store = yield* SessionStore.Service
-  const current = yield* store.read
-  if (current) {
-    return { sessionId: current, existedInStore: true }
+  const readiness = yield* RelayLifecycle.ensureRelay({ relay })
+  if (readiness.started) {
+    yield* Console.error(`Started Browser Control relay at ${relay.endpoint}`)
   }
-  const session = yield* relay.sessionNew(undefined)
-  yield* store.write(session.id)
-  yield* Console.error(`Created Browser Control session: ${session.id}`)
-  return { sessionId: session.id, existedInStore: false }
+  if (readiness.buildProblem) {
+    return yield* Effect.fail(new Error(readiness.buildProblem))
+  }
+  return readiness
+})
+
+const ensureCliRelayAndExtension = Effect.fnUntraced(function* () {
+  const relay = yield* RelayClient.Service
+  const readiness = yield* ensureCliRelay()
+  yield* RelayLifecycle.ensureExtensionConnected({ relay, waitForReconnect: readiness.started })
 })
 
 const resolveExistingSessionId = Effect.fnUntraced(function* (explicitSessionId: string | undefined) {
@@ -53,6 +54,7 @@ const resolveExistingSessionId = Effect.fnUntraced(function* (explicitSessionId:
 
 const ensureSessionExists = Effect.fnUntraced(function* (id: string) {
   const relay = yield* RelayClient.Service
+  yield* ensureCliRelay()
   const sessions = yield* relay.sessions
   const exists = sessions.some((session) => {
     return session.id === id
@@ -157,22 +159,14 @@ export function executeJsonEnvelope(result: ExecuteResponse): ExecuteJsonEnvelop
   }
 }
 
+export function formatSessionContinuation(sessionId: string): string {
+  return `Session: ${sessionId}. Continue with --session ${sessionId}.`
+}
+
 function errorJsonEnvelope(error: unknown): ExecuteJsonEnvelope {
   const tag = typeof error === "object" && error !== null && "_tag" in error && typeof error._tag === "string" ? error._tag : "Error"
   const message = error instanceof Error ? error.message : String(error)
   return { ok: false, isError: true, text: message, value: null, valueUnavailable: true, error: { _tag: tag, message }, logs: [], warnings: [] }
-}
-
-export function shouldPrintRecreatedSessionNotice(options: {
-  readonly explicitSessionId: string | undefined
-  readonly sessionExistedInStoreBeforeCommand: boolean
-  readonly result: ExecuteResponse
-}): boolean {
-  return options.explicitSessionId === undefined && options.sessionExistedInStoreBeforeCommand && options.result.session.created === true
-}
-
-export function formatRecreatedSessionNotice(sessionId: string): string {
-  return `Recreated session '${sessionId}' — relay had no such session; page and state were reset.`
 }
 
 function optionString(value: Option.Option<string>): string | undefined {
@@ -204,7 +198,7 @@ const execute = Command.make(
   {
     code: Argument.string("code").pipe(Argument.variadic({ min: 0 })),
     file: Flag.string("file").pipe(Flag.optional, Flag.withDescription("Read execute code from a file")),
-    session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Use this Browser Control session id")),
+    session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Continue an existing Browser Control session; omit to create a fresh one")),
     targetUrl: Flag.string("target-url").pipe(Flag.optional, Flag.withDescription("Use the attached page whose URL contains this text")),
     targetIndex: Flag.integer("target-index").pipe(Flag.optional, Flag.withDescription("Use the attached page at this zero-based index")),
     json: Flag.boolean("json").pipe(Flag.withDescription("Print a machine-readable result envelope: { ok, isError, text, value, valueUnavailable, error?, logs, warnings, diagnostic?, aftermath, session }")),
@@ -220,15 +214,8 @@ const execute = Command.make(
         return yield* Effect.fail(new Error("Execute requires positional code or --file <path>"))
       }
       const executeCode = filePath ? yield* readExecuteFile(filePath) : code.join(" ")
+      yield* ensureCliRelayAndExtension()
       const explicitSessionId = optionString(session) ?? process.env.BROWSER_CONTROL_SESSION
-      const defaultSession = explicitSessionId ? undefined : yield* getOrCreateDefaultSessionId
-      const sessionId = explicitSessionId ?? defaultSession?.sessionId
-      if (!sessionId) {
-        return yield* Effect.fail(new Error("No session provided and no current Browser Control session exists"))
-      }
-      if (explicitSessionId) {
-        yield* ensureSessionExists(explicitSessionId)
-      }
       const targetUrlValue = optionString(targetUrl) ?? process.env.BROWSER_CONTROL_TARGET_URL
       const targetIndexValue = optionNumber(targetIndex) ?? (yield* parseOptionalTargetIndex(process.env.BROWSER_CONTROL_TARGET_INDEX))
       if (targetIndexValue !== undefined && targetIndexValue < 0) {
@@ -238,7 +225,7 @@ const execute = Command.make(
         return yield* Effect.fail(new Error("Use only one target selector: --target-url/BROWSER_CONTROL_TARGET_URL or --target-index/BROWSER_CONTROL_TARGET_INDEX"))
       }
       const result = yield* relay.execute({
-        sessionId,
+        ...(explicitSessionId ? { sessionId: explicitSessionId } : {}),
         code: executeCode,
         createIfMissing: !explicitSessionId,
         targetSelection: {
@@ -246,8 +233,8 @@ const execute = Command.make(
           ...(targetIndexValue !== undefined ? { index: targetIndexValue } : {}),
         },
       })
-      if (shouldPrintRecreatedSessionNotice({ explicitSessionId, sessionExistedInStoreBeforeCommand: defaultSession?.existedInStore ?? false, result })) {
-        yield* Console.error(formatRecreatedSessionNotice(sessionId))
+      if (!explicitSessionId) {
+        yield* Console.error(formatSessionContinuation(result.session.id))
       }
       return result
     })
@@ -264,7 +251,15 @@ const execute = Command.make(
       }
       return
     }
-    const result = yield* run
+    const outcome = yield* Effect.result(run)
+    if (outcome._tag === "Failure") {
+      yield* Console.error(outcome.failure.message)
+      yield* Effect.sync(() => {
+        process.exitCode = 1
+      })
+      return
+    }
+    const result = outcome.success
     const print = result.isError ? Console.error : Console.log
     yield* print(result.text)
     if (result.logs.length > 0) {
@@ -294,6 +289,7 @@ const sessionNew = Command.make(
   },
   Effect.fn("Cli.sessionNew")(function* ({ name, readOnly }) {
     const relay = yield* RelayClient.Service
+    yield* ensureCliRelay()
     const store = yield* SessionStore.Service
     const result = yield* relay.sessionNew(optionString(name), readOnly ? { readOnly: true } : {})
     yield* store.write(result.id)
@@ -308,6 +304,7 @@ const sessionList = Command.make(
   },
   Effect.fn("Cli.sessionList")(function* ({ json }) {
     const relay = yield* RelayClient.Service
+    yield* ensureCliRelay()
     const store = yield* SessionStore.Service
     const sessions = yield* relay.sessions
     const current = yield* store.read
@@ -368,21 +365,14 @@ const sessionReset = Command.make(
 const sessionAdopt = Command.make(
   "adopt",
   {
-    session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Use this Browser Control session id")),
+    session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Adopt into an existing Browser Control session; omit to create a fresh one")),
     targetUrl: Flag.string("target-url").pipe(Flag.optional, Flag.withDescription("Adopt the attached page whose URL contains this text")),
     targetIndex: Flag.integer("target-index").pipe(Flag.optional, Flag.withDescription("Adopt the attached page at this zero-based target index")),
   },
   Effect.fn("Cli.sessionAdopt")(function* ({ session, targetUrl, targetIndex }) {
     const relay = yield* RelayClient.Service
+    yield* ensureCliRelayAndExtension()
     const explicitSessionId = optionString(session) ?? process.env.BROWSER_CONTROL_SESSION
-    const defaultSession = explicitSessionId ? undefined : yield* getOrCreateDefaultSessionId
-    const sessionId = explicitSessionId ?? defaultSession?.sessionId
-    if (!sessionId) {
-      return yield* Effect.fail(new Error("No session provided and no current Browser Control session exists"))
-    }
-    if (explicitSessionId) {
-      yield* ensureSessionExists(explicitSessionId)
-    }
     const targetUrlValue = optionString(targetUrl)
     const targetIndexValue = optionNumber(targetIndex)
     if (!targetUrlValue && targetIndexValue === undefined) {
@@ -395,14 +385,17 @@ const sessionAdopt = Command.make(
       return yield* Effect.fail(new Error("Use only one target selector: --target-url or --target-index"))
     }
     const result = yield* relay.sessionAdopt({
-      sessionId,
+      ...(explicitSessionId ? { sessionId: explicitSessionId } : {}),
       createIfMissing: !explicitSessionId,
       targetSelection: {
         ...(targetUrlValue ? { urlIncludes: targetUrlValue } : {}),
         ...(targetIndexValue !== undefined ? { index: targetIndexValue } : {}),
       },
     })
-    yield* Console.log(`Adopted session '${result.session.id}' default page: ${result.adoptedUrl}`)
+    yield* Console.log(`${result.session.created ? "Created and adopted" : "Adopted"} session '${result.session.id}' default page: ${result.adoptedUrl}`)
+    if (result.session.created) {
+      yield* Console.error(formatSessionContinuation(result.session.id))
+    }
   }),
 ).pipe(Command.withDescription("Make an attached tab the session's default page"))
 
@@ -437,17 +430,64 @@ const status = Command.make(
   Effect.fn("Cli.status")(function* ({ json }) {
     const relay = yield* RelayClient.Service
     const store = yield* SessionStore.Service
-    const [extensionStatus, targets, sessions, current] = yield* Effect.all([
-      relay.extensionStatus,
-      relay.targets,
-      relay.sessions,
-      store.read,
-    ])
-    if (json) {
-      yield* Console.log(JSON.stringify({ endpoint: relay.endpoint, extension: extensionStatus, currentSession: current ?? null, sessions, targets }, null, 2))
+    const relayResult = yield* Effect.result(relay.version)
+    if (relayResult._tag === "Failure") {
+      if (!(relayResult.failure instanceof RelayClient.RelayUnreachable)) {
+        if (json) {
+          yield* Console.log(JSON.stringify({
+            endpoint: relay.endpoint,
+            relay: { running: false, error: relayResult.failure.message },
+            extension: null,
+            sessions: [],
+            targets: [],
+          }, null, 2))
+        } else {
+          yield* Console.error(`Relay status failed: ${relayResult.failure.message}`)
+        }
+        yield* Effect.sync(() => {
+          process.exitCode = 1
+        })
+        return
+      }
+      const stopped = RelayLifecycle.stoppedRelayStatus(relay.endpoint)
+      if (json) {
+        yield* Console.log(JSON.stringify(stopped, null, 2))
+      } else {
+        yield* Console.log(`Relay: stopped (${relay.endpoint})`)
+        yield* Console.log("Run browser-control execute to start it automatically.")
+      }
+      yield* Effect.sync(() => {
+        process.exitCode = 1
+      })
       return
     }
-    yield* Console.log(`Relay: ${relay.endpoint}`)
+    const version = relayResult.success
+    const buildProblem = RelayLifecycle.relayBuildProblem(version)
+    const [extensionStatus, current] = yield* Effect.all([relay.extensionStatus, store.read])
+    const collections = RelayLifecycle.statusCollections(extensionStatus)
+    const [sessions, targets] = collections
+      ? [collections.sessions, collections.targets]
+      : yield* Effect.all([relay.sessions, relay.targets])
+    if (json) {
+      yield* Console.log(JSON.stringify({
+        endpoint: relay.endpoint,
+        relay: { running: true, version: version.version, buildId: version.buildId ?? null, stale: buildProblem !== undefined },
+        extension: extensionStatus,
+        currentSession: current ?? null,
+        sessions,
+        targets,
+      }, null, 2))
+      if (buildProblem) {
+        yield* Effect.sync(() => {
+          process.exitCode = 1
+        })
+      }
+      return
+    }
+    yield* Console.log(`Relay: ${relay.endpoint} (${version.version})`)
+    if (buildProblem) {
+      yield* Console.log(`Warning: ${buildProblem}`)
+    }
     yield* Console.log(`Extension: ${extensionStatus.connected ? "connected" : "disconnected"}${extensionStatus.version ? ` (${extensionStatus.version})` : ""}`)
     yield* Console.log(`Active targets: ${extensionStatus.activeTargets}`)
     if (extensionStatus.childTargets !== undefined) {
@@ -468,15 +508,20 @@ const status = Command.make(
     }
     if (targets.length === 0) {
       yield* Console.log("Targets: none")
-      return
+    } else {
+      yield* Console.log("Targets:")
+      yield* Effect.forEach(targets, (target, index) => {
+        const tab = target.tabId === undefined ? "" : ` tab=${target.tabId}`
+        const browserControlSession = target.browserControlSessionId ? ` session=${target.browserControlSessionId}` : ""
+        const owner = target.owner ? ` owner=${target.owner}` : ""
+        return Console.log(`- [${index}] ${target.type} ${target.id}${tab}${browserControlSession}${owner} ${target.url || "about:blank"}`)
+      })
     }
-    yield* Console.log("Targets:")
-    yield* Effect.forEach(targets, (target, index) => {
-      const tab = target.tabId === undefined ? "" : ` tab=${target.tabId}`
-      const browserControlSession = target.browserControlSessionId ? ` session=${target.browserControlSessionId}` : ""
-      const owner = target.owner ? ` owner=${target.owner}` : ""
-      return Console.log(`- [${index}] ${target.type} ${target.id}${tab}${browserControlSession}${owner} ${target.url || "about:blank"}`)
-    })
+    if (buildProblem) {
+      yield* Effect.sync(() => {
+        process.exitCode = 1
+      })
+    }
   }),
 ).pipe(Command.withDescription("Show relay, extension, and target status"))
 
@@ -493,6 +538,7 @@ const recordingStart = Command.make(
   },
   Effect.fn("Cli.recordingStart")(function* ({ outputPath, session, tabId, mode, audio, frameRate, maxDurationMs }) {
     const relay = yield* RelayClient.Service
+    yield* ensureCliRelayAndExtension()
     const target = yield* recordingTarget({ session, tabId })
     const modeValue = yield* parseRecordingModeOption(optionString(mode))
     const resolvedOutputPath = path.resolve(outputPath)
@@ -519,6 +565,7 @@ const recordingStop = Command.make(
   },
   Effect.fn("Cli.recordingStop")(function* ({ session, tabId }) {
     const relay = yield* RelayClient.Service
+    yield* ensureCliRelay()
     const target = yield* recordingTarget({ session, tabId })
     const result = yield* relay.recordingStop(target)
     if (!result.success) {
@@ -538,6 +585,7 @@ const recordingStatus = Command.make(
   },
   Effect.fn("Cli.recordingStatus")(function* ({ session, tabId, json }) {
     const relay = yield* RelayClient.Service
+    yield* ensureCliRelay()
     const target = yield* recordingTarget({ session, tabId })
     const result = yield* relay.recordingStatus(target)
     if (json) {
@@ -561,6 +609,7 @@ const recordingCancel = Command.make(
   },
   Effect.fn("Cli.recordingCancel")(function* ({ session, tabId }) {
     const relay = yield* RelayClient.Service
+    yield* ensureCliRelay()
     const target = yield* recordingTarget({ session, tabId })
     const result = yield* relay.recordingCancel(target)
     if (!result.success) {
