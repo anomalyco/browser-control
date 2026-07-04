@@ -93,6 +93,7 @@ export type SnapshotOptions = {
   readonly within?: AriaSnapshotTarget
   readonly interactive?: boolean
   readonly compact?: boolean
+  readonly diff?: boolean
   readonly depth?: number
   readonly maxItems?: number
   readonly timeout?: number
@@ -118,7 +119,25 @@ type SnapshotRefRegistry = {
   page?: Page
   url?: string
   selectors: Map<string, { readonly selector: string; readonly role: string; readonly name?: string }>
+  previousSnapshot?: SnapshotBaseline
+  locatorScopes?: WeakMap<Locator, number>
+  nextLocatorScope?: number
   removeNavigationListener?: () => void
+}
+
+type SnapshotRenderedEntry = {
+  readonly prefix: string
+  readonly details?: string
+  readonly selector?: string
+  readonly role?: string
+  readonly identityName?: string
+}
+
+type SnapshotBaseline = {
+  readonly page: Page
+  readonly signature: string
+  readonly entries: readonly SnapshotRenderedEntry[]
+  readonly nextRef: number
 }
 
 type InputTarget = AriaSnapshotTarget
@@ -628,6 +647,52 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
 } {
   const refRoots = new WeakMap<Locator, { readonly selector: string; readonly role: string; readonly name?: string }>()
   const snapshot: SnapshotHelper = async (options = {}) => {
+    const within = options.within
+    const refRoot = typeof within === "object" ? refRoots.get(within) : undefined
+    const locator = typeof within === "object" && !refRoot ? within : undefined
+    let locatorScope: number | undefined
+    if (locator) {
+      const scopes = registry.locatorScopes ??= new WeakMap()
+      locatorScope = scopes.get(locator)
+      if (locatorScope === undefined) {
+        locatorScope = registry.nextLocatorScope ?? 1
+        registry.nextLocatorScope = locatorScope + 1
+        scopes.set(locator, locatorScope)
+      }
+    }
+    const depth = Math.max(1, Math.min(12, Math.floor(options.depth ?? 6)))
+    const maxItems = Math.max(1, Math.min(200, Math.floor(options.maxItems ?? 80)))
+    const settings = {
+      compact: options.compact ?? true,
+      depth,
+      interactive: options.interactive ?? false,
+      maxCandidates: Math.max(1_000, maxItems * 20),
+      maxItems,
+      rootSelector: typeof within === "string" ? within : refRoot?.selector,
+      rootRole: refRoot?.role,
+      rootName: refRoot?.name,
+    }
+    const signature = JSON.stringify({
+      compact: settings.compact,
+      depth: settings.depth,
+      interactive: settings.interactive,
+      maxItems: settings.maxItems,
+      scope: typeof within === "string"
+        ? { kind: "selector", selector: within }
+        : refRoot
+        ? { kind: "ref", selector: refRoot.selector, role: refRoot.role, name: refRoot.name }
+        : locator
+        ? { kind: "locator", scope: locatorScope }
+        : { kind: "page" },
+    })
+    const previousSnapshot = registry.previousSnapshot
+    if (options.diff && !previousSnapshot) {
+      throw new Error("snapshot({ diff: true }) requires a previous snapshot() baseline in this session")
+    }
+    if (options.diff && (previousSnapshot?.page !== page || previousSnapshot.signature !== signature)) {
+      throw new Error("snapshot({ diff: true }) must use the same page and snapshot options as the previous snapshot")
+    }
+
     registry.removeNavigationListener?.()
     registry.selectors.clear()
     delete registry.page
@@ -644,21 +709,6 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     page.on("framenavigated", onFrameNavigated)
     registry.removeNavigationListener = removeNavigationListener
 
-    const within = options.within
-    const refRoot = typeof within === "object" ? refRoots.get(within) : undefined
-    const locator = typeof within === "object" && !refRoot ? within : undefined
-    const depth = Math.max(1, Math.min(12, Math.floor(options.depth ?? 6)))
-    const maxItems = Math.max(1, Math.min(200, Math.floor(options.maxItems ?? 80)))
-    const settings = {
-      compact: options.compact ?? true,
-      depth,
-      interactive: options.interactive ?? false,
-      maxCandidates: Math.max(1_000, maxItems * 20),
-      maxItems,
-      rootSelector: typeof within === "string" ? within : refRoot?.selector,
-      rootRole: refRoot?.role,
-      rootName: refRoot?.name,
-    }
     const capture = (rootOrSettings: Element | typeof settings, locatorSettings?: typeof settings) => {
       type BrowserEntry = SnapshotEntry
       const settings = locatorSettings ?? rootOrSettings as typeof locatorSettings & typeof rootOrSettings
@@ -1017,18 +1067,59 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     }
     const minimumDepth = result.entries.reduce((minimum, entry) => Math.min(minimum, resolvedDepth(entry)), Number.POSITIVE_INFINITY)
     const depthOffset = Number.isFinite(minimumDepth) ? minimumDepth : 0
-    const lines = result.entries.map((entry) => {
-      const id = entry.selector ? `e${nextRef++}` : undefined
-      if (id && entry.selector) registry.selectors.set(id, {
+    const entries: SnapshotRenderedEntry[] = result.entries.map((entry) => {
+      const name = entry.name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
+      return {
+        prefix: `${"  ".repeat(Math.max(0, resolvedDepth(entry) - depthOffset))}- ${entry.role} "${name}"`,
+        ...(entry.details ? { details: entry.details } : {}),
+        ...(entry.selector ? { selector: entry.selector, role: entry.role } : {}),
+        ...(entry.identityName ? { identityName: entry.identityName } : {}),
+      }
+    })
+    if (result.truncated) entries.push({ prefix: `- ... truncated after ${maxItems} items` })
+
+    const registerRef = (entry: SnapshotRenderedEntry, id: string): void => {
+      if (!entry.selector || !entry.role) return
+      registry.selectors.set(id, {
         selector: entry.selector,
         role: entry.role,
         ...(entry.identityName ? { name: entry.identityName } : {}),
       })
-      const name = entry.name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
-      const suffix = [id ? `ref=${id}` : undefined, entry.details].filter(Boolean).join(" ")
-      return `${"  ".repeat(Math.max(0, resolvedDepth(entry) - depthOffset))}- ${entry.role} "${name}"${suffix ? ` [${suffix}]` : ""}`
-    })
-    if (result.truncated) lines.push(`- ... truncated after ${maxItems} items`)
+    }
+
+    if (!options.diff) {
+      const lines = entries.map((entry) => {
+        const id = entry.selector ? `e${nextRef++}` : undefined
+        if (id) registerRef(entry, id)
+        return formatSnapshotLine(entry, id)
+      })
+      registry.previousSnapshot = { page, signature, entries, nextRef }
+      return lines.join("\n")
+    }
+
+    nextRef = previousSnapshot?.nextRef ?? 1
+    const operations = diffSnapshotEntries(previousSnapshot?.entries ?? [], entries)
+    const lines: string[] = []
+    let additions = 0
+    let removals = 0
+    let unchanged = 0
+    for (const operation of operations) {
+      if (operation.kind === "unchanged") {
+        unchanged++
+        continue
+      }
+      if (operation.kind === "removed") {
+        removals++
+        lines.push(formatSnapshotDiffLine("-", operation.entry))
+        continue
+      }
+      additions++
+      const id = operation.entry.selector ? `e${nextRef++}` : undefined
+      if (id) registerRef(operation.entry, id)
+      lines.push(formatSnapshotDiffLine("+", operation.entry, id))
+    }
+    lines.push(`${additions} ${additions === 1 ? "addition" : "additions"}, ${removals} ${removals === 1 ? "removal" : "removals"}, ${unchanged} unchanged`)
+    registry.previousSnapshot = { page, signature, entries, nextRef }
     return lines.join("\n")
   }
 
@@ -1051,6 +1142,68 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
   }
 
   return { snapshot, ref }
+}
+
+function formatSnapshotLine(entry: SnapshotRenderedEntry, id?: string): string {
+  const suffix = [id ? `ref=${id}` : undefined, entry.details].filter(Boolean).join(" ")
+  return `${entry.prefix}${suffix ? ` [${suffix}]` : ""}`
+}
+
+function formatSnapshotDiffLine(marker: "+" | "-", entry: SnapshotRenderedEntry, id?: string): string {
+  const line = formatSnapshotLine(entry, id)
+  const bullet = /^(\s*)- (.*)$/.exec(line)
+  return bullet ? `${marker} ${bullet[1]}${bullet[2]}` : `${marker} ${line}`
+}
+
+function diffSnapshotEntries(
+  previous: readonly SnapshotRenderedEntry[],
+  current: readonly SnapshotRenderedEntry[],
+): readonly (
+  | { readonly kind: "unchanged"; readonly entry: SnapshotRenderedEntry }
+  | { readonly kind: "removed"; readonly entry: SnapshotRenderedEntry }
+  | { readonly kind: "added"; readonly entry: SnapshotRenderedEntry }
+)[] {
+  const previousLines = previous.map((entry) => formatSnapshotLine(entry))
+  const currentLines = current.map((entry) => formatSnapshotLine(entry))
+  const lengths = Array.from({ length: previous.length + 1 }, () => Array<number>(current.length + 1).fill(0))
+  for (let previousIndex = previous.length - 1; previousIndex >= 0; previousIndex--) {
+    for (let currentIndex = current.length - 1; currentIndex >= 0; currentIndex--) {
+      lengths[previousIndex]![currentIndex] = previousLines[previousIndex] === currentLines[currentIndex]
+        ? lengths[previousIndex + 1]![currentIndex + 1]! + 1
+        : Math.max(lengths[previousIndex + 1]![currentIndex]!, lengths[previousIndex]![currentIndex + 1]!)
+    }
+  }
+
+  const operations: Array<
+    | { readonly kind: "unchanged"; readonly entry: SnapshotRenderedEntry }
+    | { readonly kind: "removed"; readonly entry: SnapshotRenderedEntry }
+    | { readonly kind: "added"; readonly entry: SnapshotRenderedEntry }
+  > = []
+  let previousIndex = 0
+  let currentIndex = 0
+  while (previousIndex < previous.length || currentIndex < current.length) {
+    if (
+      previousIndex < previous.length &&
+      currentIndex < current.length &&
+      previousLines[previousIndex] === currentLines[currentIndex]
+    ) {
+      operations.push({ kind: "unchanged", entry: current[currentIndex]! })
+      previousIndex++
+      currentIndex++
+      continue
+    }
+    if (
+      previousIndex < previous.length &&
+      (currentIndex >= current.length || lengths[previousIndex + 1]![currentIndex]! >= lengths[previousIndex]![currentIndex + 1]!)
+    ) {
+      operations.push({ kind: "removed", entry: previous[previousIndex]! })
+      previousIndex++
+      continue
+    }
+    operations.push({ kind: "added", entry: current[currentIndex]! })
+    currentIndex++
+  }
+  return operations
 }
 
 function snapshotRefAriaRole(role: string): Parameters<Page["getByRole"]>[0] | undefined {

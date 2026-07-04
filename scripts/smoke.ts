@@ -563,6 +563,57 @@ return await snapshot()
         ) {
           return yield* Effect.fail(new Error(`compact snapshot output was incomplete: ${snapshotOutput}`))
         }
+        const diffOutput = yield* runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          `
+await page.evaluate(() => {
+  const privateInput = document.querySelector('#private')
+  if (privateInput instanceof HTMLInputElement) privateInput.value = 'private-value-after-diff-must-not-leak'
+  const status = document.createElement('div')
+  status.id = 'saved-status'
+  status.setAttribute('role', 'status')
+  status.textContent = 'Saved fixture'
+  const undo = document.createElement('button')
+  undo.id = 'undo'
+  undo.textContent = 'Undo fixture'
+  document.querySelector('main:not([hidden])')?.append(status, undo)
+})
+return await snapshot({ diff: true })
+          `,
+        ])
+        if (
+          !diffOutput.includes('status "Saved fixture"') ||
+          !diffOutput.includes('button "Undo fixture" [ref=e7]') ||
+          diffOutput.includes("private-value-after-diff-must-not-leak") ||
+          !diffOutput.includes("2 additions, 0 removals")
+        ) {
+          return yield* Effect.fail(new Error(`snapshot diff did not isolate additions: ${diffOutput}`))
+        }
+        const diffRefOutput = yield* runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          `
+let previousRefError
+try { ref('e1') } catch (error) { previousRefError = error instanceof Error ? error.message : String(error) }
+const addedRefCount = await ref('e7').count()
+await page.evaluate(() => {
+  document.querySelector('#saved-status')?.remove()
+  document.querySelector('#undo')?.remove()
+})
+const restored = await snapshot()
+return { previousRefError, addedRefCount, restored }
+          `,
+        ])
+        if (
+          !diffRefOutput.includes("Unknown snapshot ref: e1") ||
+          !diffRefOutput.includes("addedRefCount: 1") ||
+          !diffRefOutput.includes('button "Continue" [ref=e6]')
+        ) {
+          return yield* Effect.fail(new Error(`snapshot diff refs were unsafe or unusable: ${diffRefOutput}`))
+        }
         const duplicateOutput = yield* runBrowserControl([
           "execute",
           "--session",
@@ -676,6 +727,8 @@ return await snapshot({ interactive: true })
         }
         return {
           snapshotOutput: snapshotOutput.trim(),
+          diffOutput: diffOutput.trim(),
+          diffRefOutput: diffRefOutput.trim(),
           duplicateOutput: duplicateOutput.trim(),
           driftOutput: driftOutput.trim(),
           scopedOutput: scopedOutput.trim(),

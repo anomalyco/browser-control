@@ -167,6 +167,17 @@ accessible identity so DOM drift fails closed rather than silently retargeting
 a different named control. Use `snapshot({ within, interactive, compact, depth,
 maxItems, timeout })` to drill into omitted context.
 
+After a full snapshot establishes a baseline, use `snapshot({ diff: true })` with
+the same page and shape options to return only semantic additions and removals
+plus an unchanged count. Each successful diff becomes the next baseline. A diff
+invalidates earlier refs and assigns current refs only to added or changed lines;
+take another full snapshot before acting on an unchanged element:
+
+```js
+await ref("e12").click()
+return await snapshot({ diff: true })
+```
+
 Use `ariaSnapshot(target?, { timeout })` for a cheap YAML accessibility-tree
 read of a selector, locator, or the default `body`. It defaults to a bounded
 5-second timeout; override it for deliberately slow regions:

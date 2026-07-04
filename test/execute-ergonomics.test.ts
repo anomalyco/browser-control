@@ -124,6 +124,93 @@ describe("snapshot helpers", () => {
     expect(saveLocator.and).toHaveBeenCalledWith(saveRoleLocator)
   })
 
+  it("diffs against the previous full snapshot and exposes only current changed refs", async () => {
+    const evaluate = vi.fn()
+      .mockResolvedValueOnce({
+        entries: [
+          { depth: 0, role: "heading", name: "Settings", details: "level=1" },
+          { depth: 1, role: "button", name: "Save", identityName: "Save", selector: "#save" },
+        ],
+        truncated: false,
+      })
+      .mockResolvedValueOnce({
+        entries: [
+          { depth: 0, role: "heading", name: "Settings", details: "level=1" },
+          { depth: 1, role: "button", name: "Save", identityName: "Save", selector: "#save", details: "disabled" },
+          { depth: 1, role: "status", name: "Saved" },
+        ],
+        truncated: false,
+      })
+      .mockResolvedValueOnce({
+        entries: [
+          { depth: 0, role: "heading", name: "Settings", details: "level=1" },
+          { depth: 1, role: "button", name: "Save", identityName: "Save", selector: "#save", details: "disabled" },
+          { depth: 1, role: "status", name: "Saved" },
+        ],
+        truncated: false,
+      })
+    const resolvedLocator = {} as Locator
+    const saveLocator = { and: vi.fn(() => resolvedLocator) } as unknown as Locator
+    const page = {
+      evaluate,
+      locator: vi.fn(() => saveLocator),
+      getByRole: vi.fn(() => ({} as Locator)),
+      url: vi.fn(() => "https://example.com/settings"),
+      mainFrame: vi.fn(() => ({})),
+      on: vi.fn(),
+      off: vi.fn(),
+    } as unknown as Page
+    const helpers = createSnapshotHelpers(page, { selectors: new Map() })
+
+    await helpers.snapshot()
+    await expect(helpers.snapshot({ diff: true })).resolves.toBe([
+      '-   button "Save"',
+      '+   button "Save" [ref=e2 disabled]',
+      '+   status "Saved"',
+      '2 additions, 1 removal, 1 unchanged',
+    ].join("\n"))
+    expect(() => helpers.ref("e1")).toThrow("Unknown snapshot ref")
+    expect(helpers.ref("e2")).toBe(resolvedLocator)
+
+    await expect(helpers.snapshot({ diff: true })).resolves.toBe("0 additions, 0 removals, 3 unchanged")
+    expect(() => helpers.ref("e2")).toThrow("Unknown snapshot ref")
+  })
+
+  it("requires a compatible full snapshot before diffing", async () => {
+    const page = {
+      evaluate: vi.fn().mockResolvedValue({ entries: [], truncated: false }),
+      locator: vi.fn(),
+      url: vi.fn(() => "https://example.com/settings"),
+      mainFrame: vi.fn(() => ({})),
+      on: vi.fn(),
+      off: vi.fn(),
+    } as unknown as Page
+    const helpers = createSnapshotHelpers(page, { selectors: new Map() })
+
+    await expect(helpers.snapshot({ diff: true })).rejects.toThrow("requires a previous snapshot() baseline")
+    await helpers.snapshot({ interactive: true })
+    await expect(helpers.snapshot({ diff: true })).rejects.toThrow("must use the same page and snapshot options")
+  })
+
+  it("does not compare snapshots from different arbitrary locator scopes", async () => {
+    const locatorA = { evaluate: vi.fn().mockResolvedValue({ entries: [], truncated: false }) } as unknown as Locator
+    const locatorB = { evaluate: vi.fn().mockResolvedValue({ entries: [], truncated: false }) } as unknown as Locator
+    const page = {
+      evaluate: vi.fn(),
+      locator: vi.fn(),
+      url: vi.fn(() => "https://example.com/settings"),
+      mainFrame: vi.fn(() => ({})),
+      on: vi.fn(),
+      off: vi.fn(),
+    } as unknown as Page
+    const helpers = createSnapshotHelpers(page, { selectors: new Map() })
+
+    await helpers.snapshot({ within: locatorA })
+    await expect(helpers.snapshot({ within: locatorA, diff: true })).resolves.toBe("0 additions, 0 removals, 0 unchanged")
+    await expect(helpers.snapshot({ within: locatorB, diff: true })).rejects.toThrow("must use the same page and snapshot options")
+    expect(locatorB.evaluate).not.toHaveBeenCalled()
+  })
+
   it("rejects unknown and navigation-stale refs, including same-URL reloads", async () => {
     let currentUrl = "https://example.com/settings"
     let onFrameNavigated: ((frame: unknown) => void) | undefined

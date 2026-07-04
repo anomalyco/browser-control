@@ -72,9 +72,11 @@ local Node relay.
   rejected after main-frame navigation. Their locators combine structural and
   accessible identity so sibling drift fails closed. Snapshot budgets reserve
   semantic groups, lists, tables, block code, alerts, and primary links before
-  repeated metadata; text input and textarea values are omitted. Keep
-  `ariaSnapshot()` and raw Playwright as deeper inspection layers; do not replace
-  the code-first execute interface with many action commands.
+  repeated metadata; text input and textarea values are omitted. Snapshot diffs
+  are explicit, require a compatible prior baseline, invalidate earlier refs,
+  and expose refs only for added or changed current lines. Keep `ariaSnapshot()`
+  and raw Playwright as deeper inspection layers; do not replace the code-first
+  execute interface with many action commands.
 - With `BROWSER_CONTROL_DEBUG=1`, `[bc:ctx]` lines trace bounded metadata for
   target ownership/browser-context identity, main-frame loaders, Runtime context
   lifecycle/reset attempts, and failed evaluates. Never add expressions,

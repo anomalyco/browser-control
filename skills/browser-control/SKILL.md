@@ -320,6 +320,19 @@ DOM drift fails closed instead of silently retargeting a different named control
 Drill into omitted context with `snapshot({ within, interactive, compact, depth,
 maxItems, timeout })`.
 
+After a full snapshot establishes a baseline, use `snapshot({ diff: true })`
+with the same page and shape options to return only semantic additions and
+removals plus an unchanged count:
+
+```js
+await ref("e12").click()
+return await snapshot({ diff: true })
+```
+
+Each successful diff becomes the next baseline. A diff invalidates earlier refs
+and assigns current refs only to added or changed lines. Take another full
+snapshot before acting on an unchanged element.
+
 Use `ariaSnapshot(target?, { timeout })` when the compact view omitted needed
 structure. It defaults to a 5-second timeout and
 returns Playwright's YAML aria snapshot for a selector, locator, or the whole

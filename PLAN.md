@@ -245,8 +245,11 @@ Current status:
   `main`, collapses navigation, reserves its bounded budget for safety text and
   semantic structures, prioritizes primary links and controls over repeated
   metadata, summarizes selects, and omits form values. Refs combine structural
-  selectors with accessible identity so DOM drift fails closed. Full
-  `ariaSnapshot` and Playwright code remain progressively deeper escape hatches.
+  selectors with accessible identity so DOM drift fails closed. Explicit
+  `snapshot({ diff: true })` captures compare semantic lines against the previous
+  compatible snapshot, expose refs only for current additions or changes, and
+  advance the baseline. Full `ariaSnapshot` and Playwright code remain
+  progressively deeper escape hatches.
 - The relay control path is Effect-first at the Node boundary; websocket and
   Chrome extension APIs remain callback adapters.
 
