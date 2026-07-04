@@ -7,6 +7,7 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const dist = path.join(root, "dist")
 
 const packageJson = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8")) as { readonly version: string }
+const buildId = new Date().toISOString()
 
 await fs.rm(dist, { recursive: true, force: true })
 await fs.mkdir(dist, { recursive: true })
@@ -22,6 +23,7 @@ await build({
   packages: "external",
   define: {
     "globalThis.__BROWSER_CONTROL_VERSION__": JSON.stringify(packageJson.version),
+    "globalThis.__BROWSER_CONTROL_BUILD_ID__": JSON.stringify(buildId),
   },
   outdir: dist,
 })

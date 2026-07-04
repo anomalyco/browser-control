@@ -19,7 +19,7 @@ import { SessionAdoptRequest } from "./relay-schema.ts"
 import type { BrowserControlSessions } from "./session-manager.ts"
 import type { RecordingMode, RecordingRelay, RecordingStartOptions, RecordingTargetOptions } from "./recording-relay.ts"
 import type { TargetRegistry } from "./target-registry.ts"
-import { browserControlVersion } from "./version.ts"
+import { browserControlBuildId, browserControlVersion } from "./version.ts"
 
 export function createHttpRequestHandler(options: {
   readonly host: string
@@ -29,6 +29,7 @@ export function createHttpRequestHandler(options: {
   readonly recordingRelay: RecordingRelay
   readonly registry: TargetRegistry
   readonly sessions: BrowserControlSessions
+  readonly refreshPageStatuses?: (tabIds: readonly number[]) => void
 }): (request: http.IncomingMessage, response: http.ServerResponse) => void {
   options.sessions.setUserAttachedPageUrlsProvider(() =>
     options.registry.listRootTargets()
@@ -49,7 +50,7 @@ export function createHttpRequestHandler(options: {
     const requestUrl = new URL(request.url ?? "/", `http://${formatHostForUrl(options.host)}:${options.port}`)
     const pathname = requestUrl.pathname.replace(/\/$/, "") || "/"
     if (pathname === "/" || pathname === "/version") {
-      sendJson(response, { version: browserControlVersion })
+      sendJson(response, { version: browserControlVersion, buildId: browserControlBuildId })
       return
     }
     if (pathname === "/json/version") {
@@ -91,7 +92,14 @@ export function createHttpRequestHandler(options: {
       return
     }
     if (pathname.startsWith("/cli/")) {
-      Effect.runPromise(handleCliRequest({ request, response, pathname, sessions: options.sessions, registry: options.registry })).catch((error: unknown) => {
+      Effect.runPromise(handleCliRequest({
+        request,
+        response,
+        pathname,
+        sessions: options.sessions,
+        registry: options.registry,
+        ...(options.refreshPageStatuses ? { refreshPageStatuses: options.refreshPageStatuses } : {}),
+      })).catch((error: unknown) => {
         sendJson(response, {
           error: error instanceof Error ? error.message : String(error),
         }, error instanceof HttpRouteError ? error.status : 500)
@@ -190,6 +198,7 @@ function handleCliRequest(options: {
   readonly pathname: string
   readonly sessions: BrowserControlSessions
   readonly registry: TargetRegistry
+  readonly refreshPageStatuses?: (tabIds: readonly number[]) => void
 }): Effect.Effect<void, Error> {
   return Effect.gen(function* () {
     if (options.pathname === "/cli/sessions" && options.request.method === "GET") {
@@ -211,7 +220,7 @@ function handleCliRequest(options: {
         sendJson(options.response, { error: `Session not found: ${id}` }, 404)
         return
       }
-      releaseSessionTargets(options.registry, id, adoptedTargetId ? [adoptedTargetId] : [])
+      options.refreshPageStatuses?.(releaseSessionTargets(options.registry, id, adoptedTargetId ? [adoptedTargetId] : []))
       sendJson(options.response, { deleted: true, id })
       return
     }
@@ -224,7 +233,7 @@ function handleCliRequest(options: {
         sendJson(options.response, { error: `Session not found: ${id}` }, 404)
         return
       }
-      releaseSessionTargets(options.registry, id, adoptedTargetId ? [adoptedTargetId] : [])
+      options.refreshPageStatuses?.(releaseSessionTargets(options.registry, id, adoptedTargetId ? [adoptedTargetId] : []))
       sendJson(options.response, { session })
       return
     }
@@ -252,7 +261,9 @@ function handleCliRequest(options: {
         targetId: adoptedTargetId,
         targetUrl: selectedTarget.targetInfo.url,
       })
-      releaseSessionTargets(options.registry, request.sessionId, releasedTargetIds)
+      const releasedTabIds = releaseSessionTargets(options.registry, request.sessionId, releasedTargetIds)
+      const adoptedTabId = options.registry.targetsByTargetId.get(adoptedTargetId)?.tabId
+      options.refreshPageStatuses?.(uniqueTabIds(releasedTabIds, adoptedTabId))
       sendJson(options.response, { session, adoptedUrl, adoptedTargetId })
       return
     }
@@ -286,21 +297,28 @@ function targetSummaries(registry: TargetRegistry) {
   })
 }
 
-export function releaseSessionTargets(registry: TargetRegistry, browserControlSessionId: string, targetIds: readonly string[]): void {
+export function releaseSessionTargets(registry: TargetRegistry, browserControlSessionId: string, targetIds: readonly string[]): number[] {
   const releaseTargetIds = new Set(targetIds)
   if (releaseTargetIds.size === 0) {
-    return
+    return []
   }
+  const affectedTabIds: number[] = []
   for (const target of registry.listRootTargets()) {
-    if (target.browserControlSessionId !== browserControlSessionId) {
+    if (!releaseTargetIds.has(target.targetInfo.targetId)) {
       continue
     }
-    if (!releaseTargetIds.has(target.targetInfo.targetId)) {
+    affectedTabIds.push(target.tabId)
+    if (target.browserControlSessionId !== browserControlSessionId) {
       continue
     }
     const { browserControlSessionId: _released, ...releasedTarget } = target
     registry.addRootTarget(releasedTarget)
   }
+  return affectedTabIds
+}
+
+function uniqueTabIds(tabIds: readonly number[], additionalTabId: number | undefined): number[] {
+  return Array.from(new Set(additionalTabId === undefined ? tabIds : [...tabIds, additionalTabId]))
 }
 
 function resolveAttachedRecordingTarget(options: {

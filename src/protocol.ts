@@ -38,6 +38,15 @@ export type TargetInfo = {
   readonly parentFrameId?: string
 }
 
+export type PageStatus = {
+  readonly state: "attached" | "running" | "waiting"
+  readonly owner: "session" | "user"
+  readonly sessionId?: string
+  readonly readOnly?: boolean
+  readonly message?: string
+  readonly handoffId?: string
+}
+
 export type ExtensionCommand = {
   readonly id: number
   readonly method:
@@ -50,6 +59,8 @@ export type ExtensionCommand = {
     | "tabs.group"
     | "action.setAttached"
     | "action.setBadge"
+    | "pageStatus.set"
+    | "pageStatus.clear"
     | "runtime.reload"
     | "recording.start"
     | "recording.stop"
@@ -68,6 +79,7 @@ export type ExtensionEvent = {
   readonly method:
     | "hello"
     | "toolbar.clicked"
+    | "handoff.completed"
     | "debugger.event"
     | "debugger.attached"
     | "debugger.detached"
@@ -76,6 +88,7 @@ export type ExtensionEvent = {
     | "log"
     | "recording.data"
     | "recording.cancelled"
+    | "pageStatus.requested"
   readonly params?: JsonObject
 }
 

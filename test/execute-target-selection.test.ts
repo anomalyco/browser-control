@@ -76,8 +76,9 @@ describe("target selection", () => {
       },
     })
 
-    releaseSessionTargets(registry, "adopted-session", ["target-1"])
+    const affectedTabIds = releaseSessionTargets(registry, "adopted-session", ["target-1"])
 
+    expect(affectedTabIds).toEqual([1])
     expect(registry.listRootTargets()[0]?.browserControlSessionId).toBeUndefined()
     expect(registry.getRootTargetBySessionId("adopted-session")?.targetInfo.targetId).toBeUndefined()
   })
@@ -103,5 +104,25 @@ describe("target selection", () => {
 
     expect(registry.listRootTargets()[0]?.browserControlSessionId).toBe("relay-session")
     expect(registry.getRootTargetBySessionId("relay-session")?.targetInfo.targetId).toBe("relay-created-target")
+  })
+
+  it("returns a user-owned adopted tab for immediate status refresh", () => {
+    const registry = new TargetRegistry()
+    registry.addRootTarget({
+      tabId: 9,
+      sessionId: "bc-tab-9",
+      owner: "user",
+      targetInfo: {
+        targetId: "user-target",
+        type: "page",
+        title: "User tab",
+        url: "https://example.com/user",
+        attached: true,
+        canAccessOpener: false,
+      },
+    })
+
+    expect(releaseSessionTargets(registry, "adopted-session", ["user-target"])).toEqual([9])
+    expect(registry.targetsByTargetId.get("user-target")?.owner).toBe("user")
   })
 })

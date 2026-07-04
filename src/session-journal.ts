@@ -22,6 +22,7 @@ export const JournalEntry = Schema.Struct({
   endUrl: Schema.optionalKey(Schema.NullOr(Schema.String)),
   navigations: Schema.optionalKey(Schema.Array(Schema.String)),
   warnings: Schema.optionalKey(Schema.Array(Schema.String)),
+  diagnostic: Schema.optionalKey(Schema.String),
   handoffs: Schema.optionalKey(Schema.Number),
 })
 
@@ -39,6 +40,7 @@ export function journalPathForSession(baseDir: string, sessionId: string): strin
 
 const maxJournalCodeLength = 2_000
 const maxJournalPreviewLength = 400
+const maxJournalDiagnosticLength = 240
 
 export function truncateForJournal(text: string, maxLength: number): string {
   if (text.length <= maxLength) {
@@ -58,6 +60,7 @@ export function makeJournalEntry(options: {
   readonly endUrl?: string | null | undefined
   readonly navigations?: readonly string[] | undefined
   readonly warnings?: readonly string[] | undefined
+  readonly diagnostic?: string | undefined
   readonly handoffs?: number | undefined
 }): JournalEntry {
   return {
@@ -72,6 +75,7 @@ export function makeJournalEntry(options: {
     ...(options.endUrl === undefined ? {} : { endUrl: options.endUrl }),
     ...(options.navigations && options.navigations.length > 0 ? { navigations: options.navigations } : {}),
     ...(options.warnings && options.warnings.length > 0 ? { warnings: options.warnings } : {}),
+    ...(options.diagnostic ? { diagnostic: truncateForJournal(options.diagnostic, maxJournalDiagnosticLength) } : {}),
     ...(options.handoffs ? { handoffs: options.handoffs } : {}),
   }
 }
@@ -161,5 +165,6 @@ export function formatJournalEntry(entry: JournalEntry): string {
   const navPart = entry.navigations && entry.navigations.length > 0 ? ` nav=${entry.navigations.length}` : ""
   const handoffPart = entry.handoffs ? ` handoffs=${entry.handoffs}` : ""
   const warningPart = entry.warnings && entry.warnings.length > 0 ? ` warnings=${entry.warnings.length}` : ""
-  return `${time} ${status} ${String(entry.durationMs).padStart(5)}ms${urlPart}${navPart}${handoffPart}${warningPart}  ${codePreview}`
+  const diagnosticPart = entry.diagnostic ? ` diagnostic=${entry.diagnostic}` : ""
+  return `${time} ${status} ${String(entry.durationMs).padStart(5)}ms${urlPart}${navPart}${handoffPart}${warningPart}${diagnosticPart}  ${codePreview}`
 }

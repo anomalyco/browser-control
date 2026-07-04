@@ -15,7 +15,7 @@ What you get:
 - **Guardrails**: the relay blocks CDP commands that would nuke your browser
   state (clear cookies/cache, close browser) no matter what a script asks for.
 - **Human handoff**: scripts can pause for you to complete 2FA/CAPTCHA/payment
-  steps, then resume when you click the toolbar button.
+  steps, then resume from an explicit in-page completion control.
 - **Audit journal**: every execute is journaled per session, so you can see
   exactly what an agent did to your browser.
 - **Recording**: capture attached tabs to WebM or CDP frame directories.
@@ -42,6 +42,9 @@ browser-control doctor
 2. Enable **Developer mode**.
 3. Click **Load unpacked** and select the repo's `extension/dist` directory.
 4. Pin the Browser Control toolbar button.
+
+The current extension shim version is `0.0.10`; reload the unpacked extension
+after rebuilding when its source changes.
 
 ### 3. Start the relay
 
@@ -110,8 +113,10 @@ executes, and `WAIT` when a script is paused for human handoff.
 
 Execute code receives `browser`, `context`, `page`, persistent session `state`,
 selected Node built-ins, `fillInput(selectorOrLocator, value)`,
-`fillInputs(page, fields)`, `screenshotWithLabels({ page, path })`, and
-`handoff(message, { timeoutMs })`. If no session is provided, the CLI creates a
+`fillInputs(page, fields)`, `snapshot(options?)`, `ref(id)`,
+`screenshotWithLabels({ page, path })`, `ariaSnapshot(target?, { timeout })`, and
+`handoff(message, { timeoutMs })`, plus opt-in `showGhostCursor()` /
+`hideGhostCursor()` helpers. If no session is provided, the CLI creates a
 readable session id, stores it at `~/.browser-control/session.json`, and reuses
 that session on later commands. Explicit session ids from `--session` or
 `BROWSER_CONTROL_SESSION` must already exist; create them intentionally with
@@ -144,15 +149,71 @@ browser-control execute "return await screenshotWithLabels({ page, path: path.re
 
 The result includes `path`, screenshot `size`, `labelCount`, `labels`, and `refs`.
 
+Use `snapshot()` as the compact read-before-act default. It prefers the page's
+single `main` region, collapses navigation, and spends its bounded item budget
+on alerts, semantic groups, lists, tables, block code, headings, primary links,
+and controls before repeated metadata. Select values and option counts are
+summarized; text input and textarea values are omitted. Its timeout defaults to
+10 seconds to accommodate a cold first browser evaluation:
+
+```js
+return await snapshot()
+```
+
+On the next execute call, resolve a current ref to a Playwright locator with
+`ref("e12")`. Refs belong to the latest snapshot and become stale after
+main-frame navigation. Ref locators combine structural position with captured
+accessible identity so DOM drift fails closed rather than silently retargeting
+a different named control. Use `snapshot({ within, interactive, compact, depth,
+maxItems, timeout })` to drill into omitted context.
+
+Use `ariaSnapshot(target?, { timeout })` for a cheap YAML accessibility-tree
+read of a selector, locator, or the default `body`. It defaults to a bounded
+5-second timeout; override it for deliberately slow regions:
+
+```js
+return await ariaSnapshot("main", { timeout: 10_000 })
+```
+
+For a human-only step, `handoff` shows the message and an accessible **I'm done,
+continue** button in the selected page. The same WAIT UI is restored after a
+top-level navigation. Toolbar clicks do not complete a handoff or detach its tab
+while the execute call is active. The default timeout is 10 minutes and remains
+an explicit script failure.
+
+Human acknowledgment is not proof that the requested step succeeded. Assert the
+expected URL or element immediately after every handoff:
+
+```js
+await handoff("Complete 2FA, then use the in-page continue control")
+if (!page.url().startsWith("https://app.example.com/")) {
+  throw new Error(`2FA did not reach the app: ${page.url()}`)
+}
+await page.getByRole("heading", { name: "Dashboard" }).waitFor()
+```
+
+The ghost cursor is off by default. For a visible demo, call
+`showGhostCursor()` after navigation and before visible mouse actions, then call
+`hideGhostCursor()` during cleanup if desired. Starting a recording never
+enables the ghost cursor.
+
 Use `browser-control doctor` for a read-only install/runtime diagnosis,
 including relay reachability, extension connection/version, sessions, active
-targets, and built artifacts. Use `browser-control session list` and
+targets, built artifacts, and whether the long-running relay matches the current
+CLI build. Restart `browser-control serve` when the relay build is stale. Use `browser-control session list` and
 `browser-control status` to inspect session-owned pages and attached targets.
 `--target-url` and `--target-index` are manual recovery selectors; normal
 `execute` calls use the current session page. Scripts can use
 `BROWSER_CONTROL_SESSION`, `BROWSER_CONTROL_TARGET_URL`, or
 `BROWSER_CONTROL_TARGET_INDEX`. URL selection must match exactly one page, and
 URL/index selectors cannot be combined.
+
+For an authenticated flow that is already open in the user browser, prefer a
+one-command `execute --target-url <unique-url-part>` or make that tab sticky with
+`browser-control session adopt --target-url <unique-url-part>` instead of
+recreating authentication in a fresh relay-owned tab. After every navigation or
+human handoff, verify the expected URL or a stable page element before entering
+data or continuing the workflow.
 
 Relay-created tabs stay attached after a short-lived `browser-control execute`
 command exits, so repeated shell commands reuse the same visible tab. Close the
@@ -163,6 +224,8 @@ Use `browser-control recording start <output-path>` to record an attached tab.
 directories for relay-owned tabs. The `--session` flag accepts either the
 Browser Control session id used with `execute` or the lower-level `bc-tab-*`
 session id from `browser-control status --json`.
+Recording and the ghost cursor are independent; recording does not enable the
+cursor overlay.
 
 ```bash
 browser-control recording start ./tmp/demo-frames --session amazon --mode cdp
@@ -187,14 +250,19 @@ SMOKE_CASE=oopif-reconnect pnpm smoke
 ```
 
 The current smoke set covers local action/form fixtures, local cart and
-checkout flows, reconnect/evaluate, explicit target URL selection, execute fill
-helpers, OOPIF reconnect, session isolation, and concurrent multi-client
-sessions. Run the full set with:
+checkout flows, reconnect/evaluate, a local HTTP redirect followed by reconnect
+and evaluate, explicit target URL selection, execute fill helpers, OOPIF
+reconnect, session isolation, and concurrent multi-client sessions. Run the
+focused redirect/context regression with:
 
 ```bash
-SMOKE_CASE=local-forms,local-cart,local-checkout,reconnect-evaluate,execute-target-url,execute-fill-helpers,oopif-reconnect,session-isolation,multi-client pnpm smoke
+SMOKE_CASE=redirect-reconnect-evaluate pnpm smoke
 ```
 
-Run the relay with `BROWSER_CONTROL_DEBUG=1` to log per-client CDP traffic when
-diagnosing protocol issues. See `AGENTS.md` for contributor conventions and
+Run the relay with `BROWSER_CONTROL_DEBUG=1` to log per-client CDP traffic and
+metadata-only `[bc:ctx]` diagnostics for target ownership/browser-context IDs,
+main-frame loaders, Runtime context lifecycle, Runtime reset attempts, and
+failed evaluates. Diagnostic lines never include expressions, arguments,
+results, headers, cookies, or form values; URLs are reduced to origin, shape,
+and a short fingerprint. See `AGENTS.md` for contributor conventions and
 `PLAN.md` for architecture decisions and roadmap.

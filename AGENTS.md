@@ -56,21 +56,38 @@ local Node relay.
 - CDP guardrails are pure logic in `src/cdp-guardrails.ts`, enforced at the top
   of `routeCdpCommand`. Destructive browser-state methods are always blocked;
   read-only sessions additionally reject `Input.*`.
-- Human handoff waiters live in `src/handoff.ts`; the relay resolves them from
-  `toolbar.clicked` before considering attach/detach toggles, and never
-  detaches a tab whose session is mid-execute.
+- Human handoff waiters live in `src/handoff.ts`; derive their stable CDP target
+  id from the actual Playwright `Page`, then bind the exact registry
+  target/tab/session. The relay resolves only a matching handoff id from that
+  tab's in-page completion control. Toolbar clicks never resolve handoffs or
+  detach a tab whose session is mid-execute.
+- Session adopt/reset/delete HTTP handlers immediately refresh page status for
+  both selected and released target ids; do not rely on navigation or a later
+  content-script ready event to clear stale session context.
 - Execute results carry per-call `warnings` and an `aftermath` summary
   (URL movement, navigations, error counts, handoffs). Do not add a passive
   `page.on("dialog")` listener for aftermath: it would suppress Playwright's
   dialog auto-dismiss and hang pages.
+- Compact `snapshot()` refs are scoped to the session's latest snapshot and
+  rejected after main-frame navigation. Their locators combine structural and
+  accessible identity so sibling drift fails closed. Snapshot budgets reserve
+  semantic groups, lists, tables, block code, alerts, and primary links before
+  repeated metadata; text input and textarea values are omitted. Keep
+  `ariaSnapshot()` and raw Playwright as deeper inspection layers; do not replace
+  the code-first execute interface with many action commands.
+- With `BROWSER_CONTROL_DEBUG=1`, `[bc:ctx]` lines trace bounded metadata for
+  target ownership/browser-context identity, main-frame loaders, Runtime context
+  lifecycle/reset attempts, and failed evaluates. Never add expressions,
+  arguments/results, headers, cookies, or form values to this trace.
 - The session journal (`src/session-journal.ts`) appends one JSON line per
   execute under `~/.browser-control/sessions/<id>/journal.jsonl`; writes are
   best-effort and must never fail the execute call.
 - Session delete/reset must acquire the session's execute permit before closing
   the sandbox, so running scripts are never yanked mid-flight.
-- The version string is injected at build time by `scripts/build-cli.ts`
-  (`src/version.ts`, `0.0.0-dev` when running from source); never hardcode
-  version literals.
+- The version string and build id are injected by `scripts/build-cli.ts`
+  (`src/version.ts`, `0.0.0-dev` / `dev` when running from source). The relay
+  reports both so `doctor` can detect a long-running relay left stale by a CLI
+  rebuild; never hardcode version literals.
 - `dist/mcp.js` self-runs via the dedicated `src/mcp-main.ts` entrypoint. Do not
   add `process.argv[1] === import.meta.url` self-run guards to modules that get
   bundled into `dist/cli.js`; esbuild inlining makes the guard fire inside the
@@ -109,7 +126,7 @@ local Node relay.
 - Extension shim changes require reloading the unpacked extension once in Brave.
 - Relay-only changes should not require reloading the extension.
 - Use `termctrl` for long-running relay sessions during testing.
-- Run `SMOKE_CASE=local-forms,local-cart,local-checkout,reconnect-evaluate,execute-target-url,execute-fill-helpers,oopif-reconnect,session-isolation,multi-client,stale-client-checkout,raw-first-checkout pnpm smoke`
+- Run `SMOKE_CASE=local-forms,local-cart,local-checkout,reconnect-evaluate,redirect-reconnect-evaluate,execute-target-url,execute-fill-helpers,execute-snapshot-refs,handoff-navigation,handoff-cross-tab,oopif-reconnect,session-isolation,multi-client,stale-client-checkout,raw-first-checkout pnpm smoke`
   before claiming the current smoke set is green.
 - CDP target visibility is scoped per client (`src/cdp-visibility.ts`):
   session-owned tabs are announced and their events delivered only to that
@@ -142,7 +159,7 @@ browser-control skill
 
 - Load `extension/dist` as the unpacked extension.
 - The relay listens on `127.0.0.1:19989` by default.
-- Current shim version is `0.0.8`.
+- Current shim version is `0.0.10`.
 - On socket open the shim sends `hello` and then re-announces every tab it still
   has `chrome.debugger` attached to (`debugger.attached` events), so a restarted
   relay rebuilds its target registry without the user re-clicking the toolbar.

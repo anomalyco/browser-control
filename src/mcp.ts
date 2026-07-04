@@ -47,9 +47,9 @@ function makeToolSpecs(relay: RelayClient.Interface): readonly ToolSpec[] {
   return [
     {
       name: "execute",
-      description: "Execute trusted Playwright JavaScript against the Browser Control session. The result includes console logs, warnings, and an aftermath summary (URL movement, navigations, error counts, handoffs).",
+      description: "Execute trusted Playwright JavaScript against the Browser Control session. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs).",
       inputSchema: objectSchema({
-        code: { type: "string", description: "JavaScript code to execute. It receives browser, context, page, state, modules, fillInput, fillInputs, screenshotWithLabels, ghostCursor (show/hide), and handoff(message, { timeoutMs }) which pauses until the user clicks the Browser Control toolbar button." },
+        code: { type: "string", description: "JavaScript code to execute. It receives browser, context, page, state, modules, fillInput, fillInputs, snapshot(options?) for a compact semantic outline (10-second default), ref(id) for the latest snapshot's locator, screenshotWithLabels, ariaSnapshot(target?, { timeout }) (5-second default), ghostCursor (show/hide), and handoff(message, { timeoutMs })." },
         session: { type: "string", description: "Optional existing Browser Control session id. Defaults to this MCP server's current session, which may be created if missing." },
         targetUrl: { type: "string", description: "Optional attached page URL substring selector." },
         targetIndex: { type: "integer", minimum: 0, description: "Optional zero-based attached page index selector." },

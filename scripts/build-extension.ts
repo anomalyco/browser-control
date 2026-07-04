@@ -16,5 +16,13 @@ await build({
   target: "chrome120",
   outdir: dist,
 })
+await build({
+  entryPoints: [path.join(root, "extension", "src", "content-script.ts")],
+  bundle: true,
+  format: "iife",
+  platform: "browser",
+  target: "chrome120",
+  outdir: dist,
+})
 await fs.copyFile(path.join(root, "extension", "manifest.json"), path.join(dist, "manifest.json"))
 await fs.copyFile(path.join(root, "extension", "src", "offscreen.html"), path.join(dist, "offscreen.html"))

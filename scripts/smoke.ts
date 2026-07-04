@@ -1,9 +1,10 @@
 #!/usr/bin/env tsx
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
-import { Clock, Console, Effect } from "effect"
+import { Clock, Console, Effect, Fiber, Option } from "effect"
 import { chromium, type Browser, type BrowserContext, type Frame, type Page } from "playwright-core"
 import cp from "node:child_process"
 import fs from "node:fs/promises"
+import http from "node:http"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import util from "node:util"
@@ -368,6 +369,44 @@ const cases: SmokeCase[] = [
     }),
   },
   {
+    name: "redirect-reconnect-evaluate",
+    run: Effect.fnUntraced(function* (page) {
+      const marker = `bc-redirect-${Date.now()}`
+      return yield* Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* scopedRedirectFixture(marker)
+          yield* goto(page, fixture.startUrl)
+          const beforeReconnect = yield* playwright("evaluate redirected page", () =>
+            page.evaluate(() => ({ href: location.href, marker: document.querySelector("#marker")?.textContent })),
+          )
+          if (beforeReconnect.href !== fixture.finalUrl || beforeReconnect.marker !== marker) {
+            return yield* Effect.fail(new Error(`redirect fixture did not reach final document: ${formatValue(beforeReconnect)}`))
+          }
+
+          yield* closeOwningBrowser(page, "close first redirect client")
+          return yield* Effect.scoped(
+            Effect.gen(function* () {
+              const secondBrowser = yield* scopedBrowser()
+              const secondContext = yield* playwright("get redirect replay context", () => getBrowserContext(secondBrowser))
+              const replayedPage = yield* findPageByTitle({ context: secondContext, title: marker })
+              if (!replayedPage) {
+                return yield* Effect.fail(new Error(`redirect replayed page not found for ${marker}`))
+              }
+              const afterReconnect = yield* playwright("evaluate redirected page after reconnect", () =>
+                replayedPage.evaluate(() => ({ href: location.href, marker: document.querySelector("#marker")?.textContent })),
+              )
+              yield* boundedCleanup("close redirect replay page", () => replayedPage.close())
+              if (afterReconnect.href !== fixture.finalUrl || afterReconnect.marker !== marker) {
+                return yield* Effect.fail(new Error(`evaluate after redirect reconnect returned the wrong document: ${formatValue(afterReconnect)}`))
+              }
+              return { beforeReconnect, afterReconnect }
+            }),
+          )
+        }),
+      )
+    }),
+  },
+  {
     name: "oopif-reconnect",
     run: Effect.fnUntraced(function* (page) {
       const marker = `bc-oopif-${Date.now()}`
@@ -467,6 +506,302 @@ return values
         }
         return output.trim()
       }).pipe(Effect.ensuring(runBrowserControl(["session", "delete", smokeSession]).pipe(Effect.ignore)))
+    }),
+  },
+  {
+    name: "execute-snapshot-refs",
+    run: Effect.fnUntraced(function* () {
+      const marker = `bc-snapshot-${Date.now()}`
+      const smokeSession = `${marker}-session`
+      return yield* Effect.gen(function* () {
+        yield* runBrowserControl(["session", "new", smokeSession])
+        const snapshotOutput = yield* runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          `
+await page.setContent(\`
+  <main hidden><button>Hidden template action</button></main>
+  <main>
+    <nav aria-label="Fixture navigation"><a href="#elsewhere">Elsewhere</a></nav>
+    <h1>Snapshot fixture</h1>
+    <p>Important fixture notice.</p>
+    <button id="hidden-child">Visible action<span hidden>hidden-value-must-not-leak</span><span aria-hidden="true">aria-hidden-value-must-not-leak</span></button>
+    <label for="private">Private field</label>
+    <input id="private" value="private-value-must-not-leak">
+    <label for="choice">Choice</label>
+    <select id="choice"><option>Alpha</option><option selected>Beta</option></select>
+    <button id="duplicate">First duplicate</button>
+    <button id="duplicate">Second duplicate</button>
+    <button id="continue">Continue</button>
+    <p id="duplicate-result"></p>
+    <p id="result" hidden>Continued</p>
+    <script>
+      const duplicates = document.querySelectorAll('#duplicate')
+      duplicates[0].addEventListener('click', () => { document.querySelector('#duplicate-result').textContent = 'first' })
+      duplicates[1].addEventListener('click', () => { document.querySelector('#duplicate-result').textContent = 'second' })
+      document.querySelector('#continue').addEventListener('click', () => { document.querySelector('#result').hidden = false })
+    </script>
+  </main>
+\`)
+return await snapshot()
+          `,
+        ])
+        if (
+          !snapshotOutput.includes('navigation "Fixture navigation" [1 controls]') ||
+          !snapshotOutput.includes('p "Important fixture notice."') ||
+          !snapshotOutput.includes('button "Visible action" [ref=e1]') ||
+          snapshotOutput.includes("hidden-value-must-not-leak") ||
+          snapshotOutput.includes("aria-hidden-value-must-not-leak") ||
+          !snapshotOutput.includes('textbox "Private field" [ref=e2]') ||
+          snapshotOutput.includes("private-value-must-not-leak") ||
+          snapshotOutput.includes("Hidden template action") ||
+          !snapshotOutput.includes('combobox "Choice" [ref=e3 selected="Beta" 2 options]') ||
+          !snapshotOutput.includes('button "First duplicate" [ref=e4]') ||
+          !snapshotOutput.includes('button "Second duplicate" [ref=e5]') ||
+          !snapshotOutput.includes('button "Continue" [ref=e6]')
+        ) {
+          return yield* Effect.fail(new Error(`compact snapshot output was incomplete: ${snapshotOutput}`))
+        }
+        const duplicateOutput = yield* runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          `await ref('e5').click(); return { duplicate: await page.locator('#duplicate-result').textContent() }`,
+        ])
+        if (!duplicateOutput.includes("duplicate: 'second'")) {
+          return yield* Effect.fail(new Error(`duplicate-id snapshot ref resolved incorrectly: ${duplicateOutput}`))
+        }
+        const driftOutput = yield* runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          `
+await page.evaluate(() => {
+  const duplicate = document.querySelectorAll('#duplicate')[1]
+  const inserted = document.createElement('button')
+  inserted.id = 'inserted-before-duplicate'
+  inserted.textContent = 'Inserted sibling'
+  duplicate?.before(inserted)
+})
+const driftedCount = await ref('e5').count()
+await page.evaluate(() => document.querySelector('#inserted-before-duplicate')?.remove())
+return { driftedCount }
+          `,
+        ])
+        if (!driftOutput.includes("driftedCount: 0")) {
+          return yield* Effect.fail(new Error(`snapshot ref did not fail closed after DOM drift: ${driftOutput}`))
+        }
+        const scopedOutput = yield* runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          `return await snapshot({ within: '#continue' })`,
+        ])
+        if (!scopedOutput.includes('button "Continue" [ref=e1]')) {
+          return yield* Effect.fail(new Error(`snapshot omitted the within root: ${scopedOutput}`))
+        }
+        const actionOutput = yield* runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          `await ref('e1').click(); return { continued: await page.locator('#result').isVisible() }`,
+        ])
+        if (!actionOutput.includes("continued: true")) {
+          return yield* Effect.fail(new Error(`snapshot ref did not resolve across execute calls: ${actionOutput}`))
+        }
+        const denseOutput = yield* runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          `
+const cards = Array.from({ length: 30 }, (_, index) => {
+  const number = index + 1
+  return '<li><a href="#story-' + number + '">Story ' + number + ' primary destination</a><a href="#author-' + number + '">author' + number + '</a><button>Save story ' + number + '</button><p>Summary ' + number + '</p></li>'
+}).join('')
+await page.setContent('<main><h1>Dense feed</h1><ul>' + cards + '</ul></main>')
+return await snapshot()
+          `,
+        ])
+        if (!denseOutput.includes('link "Story 30 primary destination"') || denseOutput.includes('link "author30"')) {
+          return yield* Effect.fail(new Error(`snapshot budget did not prioritize primary items across the dense feed: ${denseOutput}`))
+        }
+        const structureOutput = yield* runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          `
+const inlineCode = Array.from({ length: 100 }, (_, index) => '<code>inline-' + index + '</code>').join('')
+await page.setContent(
+  '<main><h1>Semantic fixture</h1>' +
+  '<div role="alert">Review before continuing</div><div role="status">Draft ready</div>' +
+  '<fieldset><legend>Sign-in policy</legend><label>Secret<textarea>must-not-leak</textarea></label><input type="checkbox" checked aria-label="Require MFA"></fieldset>' +
+  '<div role="tablist" aria-label="Settings sections"><button role="tab" aria-selected="true">Security</button><button role="tab" aria-selected="false">Billing</button></div>' +
+  '<details open><summary>Recovery settings</summary><p>Recovery detail</p></details>' +
+  inlineCode +
+  '<table><caption>Team access</caption><tr><th>Member</th><th>Role</th></tr><tr><td>Ada</td><td>Owner</td></tr></table>' +
+  '<pre><code>const safe = true</code></pre>' +
+  '<input name="q">' +
+  '<dialog open aria-modal="true" aria-label="Confirmation"><button>Cancel</button></dialog></main>'
+)
+return await snapshot({ interactive: true })
+          `,
+        ])
+        if (
+          !structureOutput.includes('alert "Review before continuing"') ||
+          !structureOutput.includes('status "Draft ready"') ||
+          !structureOutput.includes('group "Sign-in policy" [2 controls]') ||
+          !structureOutput.includes('tablist "Settings sections"') ||
+          !structureOutput.includes('tab "Security"') ||
+          !structureOutput.includes('selected=true') ||
+          !structureOutput.includes('group "Recovery settings" [expanded=true]') ||
+          !structureOutput.includes('table "Team access" [2 rows]') ||
+          !structureOutput.includes('row "Ada Owner"') ||
+          !structureOutput.includes('code "const safe = true"') ||
+          !structureOutput.includes('textbox "q"') ||
+          !structureOutput.includes('dialog "Confirmation" [open=true modal=true]') ||
+          structureOutput.includes('inline-99') ||
+          structureOutput.includes('must-not-leak')
+        ) {
+          return yield* Effect.fail(new Error(`snapshot omitted semantic structure or leaked a form value: ${structureOutput}`))
+        }
+        const unnamedRefOutput = yield* runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          `const captured = await snapshot({ within: 'input[name="q"]' }); return { captured, count: await ref('e1').count() }`,
+        ])
+        if (!unnamedRefOutput.includes('textbox "q"') || !unnamedRefOutput.includes("count: 1")) {
+          return yield* Effect.fail(new Error(`snapshot ref for an unnamed control did not preserve structural identity: ${unnamedRefOutput}`))
+        }
+        return {
+          snapshotOutput: snapshotOutput.trim(),
+          duplicateOutput: duplicateOutput.trim(),
+          driftOutput: driftOutput.trim(),
+          scopedOutput: scopedOutput.trim(),
+          actionOutput: actionOutput.trim(),
+          denseOutput: denseOutput.trim(),
+          structureOutput: structureOutput.trim(),
+          unnamedRefOutput: unnamedRefOutput.trim(),
+        }
+      }).pipe(Effect.ensuring(runBrowserControl(["session", "delete", smokeSession]).pipe(Effect.ignore)))
+    }),
+  },
+  {
+    name: "handoff-navigation",
+    run: Effect.fnUntraced(function* (page) {
+      const extension = yield* fetchStatus()
+      if (extension.version !== "0.0.10") {
+        return yield* Effect.fail(new Error(`handoff-navigation requires the built 0.0.10 shim; connected extension is ${extension.version ?? "unknown"}`))
+      }
+      const marker = `bc-handoff-${Date.now()}`
+      const smokeSession = `${marker}-session`
+      return yield* Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* scopedHandoffFixture(marker)
+          yield* goto(page, fixture.beforeUrl)
+          yield* runBrowserControl(["session", "new", smokeSession])
+          yield* runBrowserControl(["session", "adopt", "--session", smokeSession, "--target-url", marker])
+
+          const executeFiber = yield* runBrowserControl([
+            "execute",
+            "--session",
+            smokeSession,
+            `await handoff('Navigate and resume ${marker}', { timeoutMs: 30000 }); return { resumed: true, url: page.url() }`,
+          ]).pipe(Effect.forkChild)
+
+          const completion = page.locator("#__browser_control_page_status__ button")
+          yield* playwright("wait for initial handoff completion control", () => completion.waitFor({ timeout: 10_000 }))
+          yield* goto(page, fixture.afterUrl)
+          yield* playwright("wait for restored handoff completion control", () => completion.waitFor({ timeout: 10_000 }))
+          yield* click(page.locator("#decoy"), "handoff decoy")
+
+          const premature = yield* Fiber.join(executeFiber).pipe(Effect.timeoutOption("200 millis"))
+          if (Option.isSome(premature)) {
+            return yield* Effect.fail(new Error(`handoff resumed from a non-matching page control: ${premature.value}`))
+          }
+
+          yield* click(completion, "matching handoff completion control")
+          const output = yield* Fiber.join(executeFiber)
+          if (!output.includes("resumed: true") || !output.includes(fixture.afterUrl)) {
+            return yield* Effect.fail(new Error(`handoff did not resume on the navigated page: ${output}`))
+          }
+          return output.trim()
+        }).pipe(Effect.ensuring(runBrowserControl(["session", "delete", smokeSession]).pipe(Effect.ignore))),
+      )
+    }),
+  },
+  {
+    name: "handoff-cross-tab",
+    run: Effect.fnUntraced(function* (page) {
+      const extension = yield* fetchStatus()
+      if (extension.version !== "0.0.10") {
+        return yield* Effect.fail(new Error(`handoff-cross-tab requires the built 0.0.10 shim; connected extension is ${extension.version ?? "unknown"}`))
+      }
+      const marker = `bc-handoff-a-${Date.now()}`
+      const peerMarker = `bc-handoff-b-${Date.now()}`
+      const waitingSession = `${marker}-session`
+      const peerSession = `${peerMarker}-session`
+      const peerPage = yield* playwright("create peer handoff page", () => page.context().newPage())
+      return yield* Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* scopedHandoffFixture(marker)
+          const peerUrl = fixture.afterUrl.replace(marker, peerMarker)
+          yield* goto(page, fixture.beforeUrl)
+          yield* goto(peerPage, peerUrl)
+          yield* runBrowserControl(["session", "new", waitingSession])
+          yield* runBrowserControl(["session", "new", peerSession])
+          yield* runBrowserControl(["session", "adopt", "--session", waitingSession, "--target-url", marker])
+          yield* runBrowserControl(["session", "adopt", "--session", peerSession, "--target-url", peerMarker])
+
+          const executeFiber = yield* runBrowserControl([
+            "execute",
+            "--session",
+            waitingSession,
+            `await handoff('Resume only from tab A ${marker}', { timeoutMs: 30000 }); return { resumed: true, url: page.url() }`,
+          ]).pipe(Effect.forkChild)
+
+          const completion = page.locator("#__browser_control_page_status__ button")
+          yield* playwright("wait for tab A handoff completion control", () => completion.waitFor({ timeout: 10_000 }))
+          const peerCompletionCount = yield* playwright("inspect tab B handoff completion control", () =>
+            peerPage.locator("#__browser_control_page_status__ button").count(),
+          )
+          if (peerCompletionCount !== 0) {
+            return yield* Effect.fail(new Error(`peer tab exposed ${peerCompletionCount} handoff completion control(s)`))
+          }
+
+          const peerOutput = yield* runBrowserControl([
+            "execute",
+            "--session",
+            peerSession,
+            `await page.evaluate((title) => { document.title = title }, 'peer-active-${peerMarker}'); return { active: true, url: page.url() }`,
+          ])
+          if (!peerOutput.includes("active: true") || !peerOutput.includes(peerMarker)) {
+            return yield* Effect.fail(new Error(`peer tab execute failed: ${peerOutput}`))
+          }
+
+          yield* click(peerPage.locator("#decoy"), "peer tab decoy")
+          const premature = yield* Fiber.join(executeFiber).pipe(Effect.timeoutOption("200 millis"))
+          if (Option.isSome(premature)) {
+            return yield* Effect.fail(new Error(`handoff resumed from peer tab activity: ${premature.value}`))
+          }
+
+          yield* click(completion, "tab A handoff completion control")
+          const output = yield* Fiber.join(executeFiber)
+          if (!output.includes("resumed: true") || !output.includes(marker)) {
+            return yield* Effect.fail(new Error(`handoff did not resume from tab A: ${output}`))
+          }
+          return output.trim()
+        }).pipe(
+          Effect.ensuring(
+            Effect.all([
+              boundedCleanup("close peer handoff page", () => peerPage.close()),
+              runBrowserControl(["session", "delete", waitingSession]).pipe(Effect.ignore),
+              runBrowserControl(["session", "delete", peerSession]).pipe(Effect.ignore),
+            ]).pipe(Effect.ignore),
+          ),
+        ),
+      )
     }),
   },
   {
@@ -769,6 +1104,82 @@ const scopedBrowser = Effect.fnUntraced(function* () {
   return yield* Effect.acquireRelease(
     playwright("connect over CDP", () => chromium.connectOverCDP(endpointUrl)),
     (browser) => boundedCleanup("close browser", () => browser.close()),
+  )
+})
+
+const scopedRedirectFixture = Effect.fnUntraced(function* (marker: string) {
+  return yield* Effect.acquireRelease(
+    Effect.tryPromise({
+      try: () => new Promise<{ readonly server: http.Server; readonly startUrl: string; readonly finalUrl: string }>((resolve, reject) => {
+        const server = http.createServer((request, response) => {
+          if (request.url === "/start") {
+            response.writeHead(302, { location: "/final" })
+            response.end()
+            return
+          }
+          if (request.url === "/final") {
+            response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
+            response.end(`<!doctype html><title>${marker}</title><main id="marker">${marker}</main>`)
+            return
+          }
+          response.writeHead(404)
+          response.end("Not found")
+        })
+        server.once("error", reject)
+        server.listen(0, "127.0.0.1", () => {
+          server.off("error", reject)
+          const address = server.address()
+          if (!address || typeof address === "string") {
+            server.close()
+            reject(new Error("redirect fixture did not receive a TCP address"))
+            return
+          }
+          const origin = `http://127.0.0.1:${address.port}`
+          resolve({ server, startUrl: `${origin}/start`, finalUrl: `${origin}/final` })
+        })
+      }),
+      catch: (cause) => new Error("start redirect fixture", { cause }),
+    }),
+    (fixture) => boundedCleanup("close redirect fixture", () => new Promise<void>((resolve) => fixture.server.close(() => resolve()))),
+  )
+})
+
+const scopedHandoffFixture = Effect.fnUntraced(function* (marker: string) {
+  return yield* Effect.acquireRelease(
+    Effect.tryPromise({
+      try: () => new Promise<{ readonly server: http.Server; readonly beforeUrl: string; readonly afterUrl: string }>((resolve, reject) => {
+        const server = http.createServer((request, response) => {
+          response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
+          if (request.url?.startsWith("/before")) {
+            response.end(`<!doctype html><title>${marker} before</title><main>${marker} before</main>`)
+            return
+          }
+          if (request.url?.startsWith("/after")) {
+            response.end(`<!doctype html><title>${marker} after</title><main>${marker} after<button id="decoy">Unrelated page button</button></main>`)
+            return
+          }
+          response.end("<!doctype html><title>not found</title>")
+        })
+        server.once("error", reject)
+        server.listen(0, "127.0.0.1", () => {
+          server.off("error", reject)
+          const address = server.address()
+          if (!address || typeof address === "string") {
+            server.close()
+            reject(new Error("handoff fixture did not receive a TCP address"))
+            return
+          }
+          const origin = `http://127.0.0.1:${address.port}`
+          resolve({
+            server,
+            beforeUrl: `${origin}/before?${marker}`,
+            afterUrl: `${origin}/after?${marker}`,
+          })
+        })
+      }),
+      catch: (cause) => new Error("start handoff fixture", { cause }),
+    }),
+    (fixture) => boundedCleanup("close handoff fixture", () => new Promise<void>((resolve) => fixture.server.close(() => resolve()))),
   )
 })
 

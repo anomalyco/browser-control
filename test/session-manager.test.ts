@@ -16,7 +16,13 @@ const makeFakeSandbox = (options?: {
   return {
     execute: () =>
       (options?.onExecute ?? Effect.void).pipe(
-        Effect.as({ text: "ok", isError: false, logs: [], warnings: [] }),
+        Effect.as({
+          text: "ok",
+          isError: false,
+          logs: [],
+          logSummary: { totalCount: 0, returnedCount: 0, repeatedCount: 0, omittedCount: 0 },
+          warnings: [],
+        }),
       ),
     close: () =>
       Effect.sync(() => {
@@ -88,7 +94,7 @@ describe("BrowserControlSessions", () => {
     )
   })
 
-  it("delete force-closes the sandbox when an execute is wedged past the permit timeout", async () => {
+  it("delete times out without closing when an execute still owns the permit", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {
         const started = yield* Deferred.make<void>()
@@ -99,18 +105,33 @@ describe("BrowserControlSessions", () => {
           ),
         })
         const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox, {
-          deletePermitTimeoutMs: 50,
+          lifecycleTimeoutMs: 20,
         })
         sessions.createNew("alpha")
 
         yield* Effect.forkChild(sessions.execute({ sessionId: "alpha", code: "wedged", createIfMissing: false }))
         yield* Deferred.await(started)
 
-        expect(yield* sessions.delete("alpha")).toBe(true)
-        expect(sandbox.closes()).toBe(1)
-        expect(sessions.listSummaries()).toEqual([])
+        const error = yield* sessions.delete("alpha").pipe(Effect.flip)
+        expect(error.message).toContain("timed out waiting for active execute")
+        expect(sandbox.closes()).toBe(0)
+        expect(sessions.listSummaries().map((session) => session.id)).toEqual(["alpha"])
       }),
     )
+  })
+
+  it("delete completes when sandbox close never settles", async () => {
+    const sandbox = makeFakeSandbox()
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => ({
+      ...sandbox,
+      close: () => Effect.never,
+    }), {
+      lifecycleTimeoutMs: 20,
+    })
+    sessions.createNew("alpha")
+
+    expect(await Effect.runPromise(sessions.delete("alpha"))).toBe(true)
+    expect(sessions.listSummaries()).toEqual([])
   })
 
   it("reset waits for a running execute and replaces the sandbox", async () => {
@@ -272,6 +293,27 @@ describe("BrowserControlSessions", () => {
     )
     expect(result.session.id).toBe("ghost")
     expect(result.session.created).toBe(true)
+  })
+
+  it("adopt fails within the lifecycle timeout when Playwright never settles", async () => {
+    const sandbox = makeFakeSandbox()
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => ({
+      ...sandbox,
+      adoptPage: () => Effect.never,
+    }), {
+      lifecycleTimeoutMs: 20,
+    })
+    sessions.createNew("alpha")
+
+    const error = await Effect.runPromise(sessions.adopt({
+      sessionId: "alpha",
+      createIfMissing: false,
+      targetId: "target-1",
+      targetUrl: "https://example.com/adopted",
+    }).pipe(Effect.flip))
+
+    expect(error.message).toBe("Session adopt for alpha timed out after 20ms")
+    expect(sessions.adoptedTargetId("alpha")).toBeUndefined()
   })
 
   it("appends the adoption tip only for bare fresh-page executes with user-attached tabs", async () => {

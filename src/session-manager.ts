@@ -15,8 +15,8 @@ export type SessionHooks = {
   readonly onExecuteStateChange?: (sessionId: string, executing: boolean) => void
   /** Called after each execute completes, for journaling. Must not throw. */
   readonly onExecuteRecord?: (record: SessionExecuteRecord) => void
-  /** How long delete waits for an in-flight execute before force-closing. */
-  readonly deletePermitTimeoutMs?: number
+  /** How long lifecycle commands wait for a permit or sandbox operation. */
+  readonly lifecycleTimeoutMs?: number
   /** Current user-owned attached page URLs, used for relay-side adoption hints. */
   readonly getUserAttachedPageUrls?: () => readonly string[]
 }
@@ -93,42 +93,40 @@ export class BrowserControlSessions {
     return this.executing.has(id)
   }
 
-  delete(id: string): Effect.Effect<boolean> {
+  delete(id: string): Effect.Effect<boolean, Error> {
     const manager = this
     return Effect.gen(function* () {
       const session = manager.sessions.get(id)
       if (!session) {
         return false
       }
-      // Remove from the map first so concurrent executes with createIfMissing
-      // build a fresh session instead of racing the close.
-      manager.sessions.delete(id)
-      // Serialize with any in-flight execute so a running script is never
-      // yanked mid-flight. If the execute is wedged (for example a hung CDP
-      // wait), stop waiting after a bound and force-close the sandbox anyway:
-      // closing the sandbox browser rejects the hung Playwright calls, so the
-      // wedged execute fails out instead of pinning the session forever.
-      const closed = yield* session.executeSemaphore
-        .withPermit(manager.closeBrowserControlSession(session))
-        .pipe(Effect.timeoutOption(manager.hooks.deletePermitTimeoutMs ?? 15_000))
-      if (Option.isNone(closed)) {
+      return yield* manager.withLifecyclePermit(session, "delete", Effect.gen(function* () {
+        if (manager.sessions.get(id) !== session) {
+          return false
+        }
         yield* manager.closeBrowserControlSession(session)
-      }
-      return true
+        manager.sessions.delete(id)
+        return true
+      }))
     })
   }
 
-  reset(id: string): Effect.Effect<SessionSummary | undefined> {
+  reset(id: string): Effect.Effect<SessionSummary | undefined, Error> {
     const manager = this
     return Effect.gen(function* () {
       const existing = manager.sessions.get(id)
       if (!existing) {
         return undefined
       }
-      yield* existing.executeSemaphore.withPermit(manager.closeBrowserControlSession(existing))
-      const session = manager.createBrowserControlSession(id, existing.readOnly)
-      manager.sessions.set(id, session)
-      return manager.sessionSummary(session)
+      return yield* manager.withLifecyclePermit(existing, "reset", Effect.gen(function* () {
+        if (manager.sessions.get(id) !== existing) {
+          return yield* Effect.fail(new Error(`Session is no longer active: ${id}`))
+        }
+        yield* manager.closeBrowserControlSession(existing)
+        const session = manager.createBrowserControlSession(id, existing.readOnly)
+        manager.sessions.set(id, session)
+        return manager.sessionSummary(session)
+      }))
     })
   }
 
@@ -153,6 +151,9 @@ export class BrowserControlSessions {
       }
       return yield* session.executeSemaphore.withPermit(
         Effect.gen(function* () {
+          if (manager.sessions.get(options.sessionId) !== session) {
+            return yield* Effect.fail(new Error(`Session is no longer active: ${options.sessionId}`))
+          }
           session.updatedAt = new Date().toISOString()
           manager.setExecuting(session.id, true)
           const startedAt = Date.now()
@@ -192,10 +193,16 @@ export class BrowserControlSessions {
       if (!session) {
         return yield* Effect.fail(new Error(`Session not found: ${options.sessionId}`))
       }
-      return yield* session.executeSemaphore.withPermit(
+      return yield* manager.withLifecyclePermit(session, "adopt",
         Effect.gen(function* () {
+          if (manager.sessions.get(options.sessionId) !== session) {
+            return yield* Effect.fail(new Error(`Session is no longer active: ${options.sessionId}`))
+          }
           const previousAdoptedTargetId = session.adoptedTargetId
-          const adoptedUrl = yield* session.sandbox.adoptPage({ targetId: options.targetId, url: options.targetUrl })
+          const adoptedUrl = yield* manager.withLifecycleTimeout(
+            session.sandbox.adoptPage({ targetId: options.targetId, url: options.targetUrl }),
+            `Session adopt for ${session.id}`,
+          )
           session.adoptedTargetId = options.targetId
           session.updatedAt = new Date().toISOString()
           const summary = manager.sessionSummary(session)
@@ -273,7 +280,36 @@ export class BrowserControlSessions {
   }
 
   private closeBrowserControlSession(session: BrowserControlSession): Effect.Effect<void> {
-    return session.sandbox.close().pipe(Effect.ignore)
+    return this.withLifecycleTimeout(session.sandbox.close(), `Close session ${session.id}`).pipe(Effect.ignore)
+  }
+
+  private withLifecyclePermit<A, E, R>(
+    session: BrowserControlSession,
+    operation: string,
+    effect: Effect.Effect<A, E, R>,
+  ): Effect.Effect<A, E | Error, R> {
+    const acquire = session.executeSemaphore.take(1).pipe(
+      Effect.timeoutOption(this.hooks.lifecycleTimeoutMs ?? 10_000),
+      Effect.flatMap(Option.match({
+        onNone: () => Effect.fail(new Error(`Session ${operation} timed out waiting for active execute in ${session.id}`)),
+        onSome: () => Effect.void,
+      })),
+    )
+    return Effect.acquireUseRelease(
+      acquire,
+      () => effect,
+      () => session.executeSemaphore.release(1).pipe(Effect.asVoid),
+    )
+  }
+
+  private withLifecycleTimeout<A, E, R>(effect: Effect.Effect<A, E, R>, label: string): Effect.Effect<A, E | Error, R> {
+    const timeoutMs = this.hooks.lifecycleTimeoutMs ?? 10_000
+    return effect.pipe(
+      Effect.timeoutOrElse({
+        duration: timeoutMs,
+        orElse: () => Effect.fail(new Error(`${label} timed out after ${timeoutMs}ms`)),
+      }),
+    )
   }
 }
 

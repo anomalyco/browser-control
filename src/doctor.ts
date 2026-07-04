@@ -2,7 +2,7 @@ import { Effect, FileSystem, Path, Schema } from "effect"
 import * as RelayClient from "./relay-client.ts"
 import type { ExtensionStatus, RelayVersion, SessionSummary, TargetSummary } from "./relay-schema.ts"
 import * as SessionStore from "./session-store.ts"
-import { browserControlVersion } from "./version.ts"
+import { browserControlBuildId, browserControlVersion } from "./version.ts"
 
 /**
  * Read-only local install and runtime diagnostics. Pure report construction
@@ -53,6 +53,7 @@ export type DoctorReport = {
   readonly endpoint: string
   readonly cli: {
     readonly version: string
+    readonly buildId: string
   }
   readonly package: {
     readonly path: string
@@ -67,6 +68,8 @@ export type DoctorReport = {
   readonly relay: {
     readonly reachable: boolean
     readonly version: string | null
+    readonly buildId: string | null
+    readonly buildMatches: boolean | null
     readonly error: string | null
   }
   readonly extension: {
@@ -163,6 +166,9 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
     probe(store.read),
   ])
   const relayResult = yield* probe(relay.version)
+  const relayBuildMatches = relayResult.ok && relayResult.value.buildId
+    ? relayResult.value.buildId === browserControlBuildId
+    : null
   const [extensionResult, targetsResult, sessionsResult] = relayResult.ok
     ? yield* Effect.all([
       probe(relay.extensionStatus),
@@ -215,7 +221,7 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
   const report: DoctorReport = {
     status: summarizeCheckStatus(checks),
     endpoint: relay.endpoint,
-    cli: { version: browserControlVersion },
+    cli: { version: browserControlVersion, buildId: browserControlBuildId },
     package: {
       path: path.join(options.packageRoot, "package.json"),
       name: packageResult.ok ? packageResult.value.name : null,
@@ -229,6 +235,8 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
     relay: {
       reachable: relayResult.ok,
       version: relayResult.ok ? relayResult.value.version : null,
+      buildId: relayResult.ok ? relayResult.value.buildId ?? null : null,
+      buildMatches: relayBuildMatches,
       error: relayResult.ok ? null : relayResult.error,
     },
     extension: {
@@ -256,6 +264,7 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
     checks,
     recommendations: buildDoctorRecommendations({
       relayResult,
+      relayBuildMatches,
       extensionResult,
       artifacts,
       staleCurrent,
@@ -319,6 +328,7 @@ function buildDoctorChecks(options: {
       status: options.relayResult.ok ? "ok" : "fail",
       message: options.relayResult.ok ? `reachable (${options.relayResult.value.version})` : options.relayResult.error,
     },
+    relayBuildCheck({ relayResult: options.relayResult, cliBuildId: browserControlBuildId }),
     {
       id: "extension-connected",
       label: "extension connection",
@@ -371,6 +381,38 @@ function buildDoctorChecks(options: {
   ]
 }
 
+export function relayBuildCheck(options: {
+  readonly relayResult: ProbeResult<RelayVersion>
+  readonly cliBuildId: string
+}): DoctorCheck {
+  if (!options.relayResult.ok) {
+    return {
+      id: "relay-build",
+      label: "relay build",
+      status: "warn",
+      message: "relay unreachable; cannot compare builds",
+    }
+  }
+  const relayBuildId = options.relayResult.value.buildId
+  if (!relayBuildId) {
+    return {
+      id: "relay-build",
+      label: "relay build",
+      status: "warn",
+      message: "running relay does not report a build id",
+    }
+  }
+  const matches = relayBuildId === options.cliBuildId
+  return {
+    id: "relay-build",
+    label: "relay build",
+    status: matches ? "ok" : "warn",
+    message: matches
+      ? `matches CLI build (${options.cliBuildId})`
+      : `runtime ${relayBuildId} does not match CLI ${options.cliBuildId}`,
+  }
+}
+
 function extensionVersionCheckStatus(options: {
   readonly extensionResult: ProbeResult<ExtensionStatus>
   readonly sourceManifestVersion: ProbeResult<string>
@@ -409,6 +451,7 @@ function extensionVersionCheckMessage(options: {
 
 function buildDoctorRecommendations(options: {
   readonly relayResult: ProbeResult<RelayVersion>
+  readonly relayBuildMatches: boolean | null
   readonly extensionResult: ProbeResult<ExtensionStatus>
   readonly artifacts: readonly DoctorArtifact[]
   readonly staleCurrent: boolean
@@ -419,6 +462,9 @@ function buildDoctorRecommendations(options: {
   const relayRecommendations = options.relayResult.ok ? [] : [
     "Start the relay with `browser-control serve`, then reload or click the Browser Control extension toolbar button.",
   ]
+  const relayBuildRecommendations = options.relayResult.ok && options.relayBuildMatches !== true ? [
+    "Restart the relay with `browser-control serve` so it uses the current CLI build.",
+  ] : []
   const extensionRecommendations = options.relayResult.ok && options.extensionResult.ok && !options.extensionResult.value.connected ? [
     "Load or reload `extension/dist` as an unpacked extension, then click the Browser Control toolbar button on a normal web tab.",
   ] : []
@@ -436,6 +482,7 @@ function buildDoctorRecommendations(options: {
   ] : []
   return [
     ...relayRecommendations,
+    ...relayBuildRecommendations,
     ...extensionRecommendations,
     ...artifactRecommendations,
     ...staleSessionRecommendations,
@@ -463,9 +510,9 @@ export function formatDoctorReport(report: DoctorReport): string {
     "Browser Control doctor",
     `Status: ${report.status}`,
     `Endpoint: ${report.endpoint}`,
-    `CLI: ${report.cli.version}`,
+    `CLI: ${report.cli.version} (${report.cli.buildId})`,
     `Package: ${report.package.name && report.package.version ? `${report.package.name} ${report.package.version}` : report.package.error ?? "unknown"}`,
-    `Relay: ${report.relay.reachable ? `reachable (${report.relay.version ?? "unknown"})` : `unreachable (${report.relay.error ?? "unknown error"})`}`,
+    `Relay: ${report.relay.reachable ? `reachable (${report.relay.version ?? "unknown"}, ${report.relay.buildId ?? "unknown build"})` : `unreachable (${report.relay.error ?? "unknown error"})`}`,
     `Extension: ${formatExtensionSummary(report)}`,
     `Targets: active=${formatNullableNumber(report.targets.active)} child=${formatNullableNumber(report.targets.child)} relay-owned=${report.targets.relayOwned.length}`,
     `Sessions: current=${report.sessions.current ?? "none"} total=${report.sessions.all.length} connected=${report.sessions.all.filter((session) => {

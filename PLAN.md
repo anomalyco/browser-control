@@ -57,8 +57,9 @@ Agent / MCP client / CLI
   capability, not a secure untrusted-code boundary.
 - **Trusted local sandbox**: v1 exposes browser objects plus selected Node
   built-ins; the sandbox trusts the agent, not arbitrary web code.
-- **Toolbar-only extension**: v1 uses the extension toolbar action for
-  attach/detach/status and does not include a side panel.
+- **Minimal extension UI**: v1 uses the extension toolbar action for
+  attach/detach plus a subtle in-page status and handoff control. It does not
+  include a side panel.
 - **Visible attached-tab group**: attached tabs are grouped in the browser so
   the user can see which tabs agents may control.
 - **Purple tab group**: v1 uses a purple `browser-control` tab group so
@@ -165,12 +166,14 @@ Expected v1 support:
 - Provide status and setup errors when no extension is connected.
 - Provide `browser-control doctor` for read-only local install and runtime
   diagnostics, including relay reachability, extension connection/version,
-  sessions, active targets, and built artifacts.
+  sessions, active targets, built artifacts, and stale running relays after a
+  CLI rebuild.
 - Show target indexes, tab IDs, session IDs, and ownership in status output so
   agents can pick a page explicitly.
 - Show child target counts in status so OOPIF/iframe relay state is visible while
   debugging replay issues.
-- Show active-tab attach/detach/status through the extension toolbar action.
+- Show active-tab attach/detach through the extension toolbar action and keep a
+  subtle in-page indicator for attached/running/waiting state.
 - Add attached tabs to a visible `browser-control` tab group and remove tabs
   from it when they detach.
 
@@ -191,7 +194,7 @@ Prove the smallest end-to-end path before adding product polish:
 Current status:
 
 - Relay starts at `http://127.0.0.1:19989`.
-- Extension shim `0.0.8` connects without websocket reconnect storms, reports
+- Extension shim `0.0.10` connects without websocket reconnect storms, reports
   its version in relay status, and re-announces attached tabs after reconnect so
   a restarted relay recovers the attached-tab pool. It removes tabs from purple
   groups when their debugger attachment ends and reconciles stale groups on
@@ -237,6 +240,13 @@ Current status:
 - Execute exposes `screenshotWithLabels({ page, path })`, a small DOM-based
   labeled screenshot helper that writes to an absolute path, removes its overlay
   after capture, and returns label/ref metadata.
+- Execute exposes `snapshot(options?)` as the compact semantic happy path and
+  `ref(id)` for controls from the latest snapshot. The default prefers one
+  `main`, collapses navigation, reserves its bounded budget for safety text and
+  semantic structures, prioritizes primary links and controls over repeated
+  metadata, summarizes selects, and omits form values. Refs combine structural
+  selectors with accessible identity so DOM drift fails closed. Full
+  `ariaSnapshot` and Playwright code remain progressively deeper escape hatches.
 - The relay control path is Effect-first at the Node boundary; websocket and
   Chrome extension APIs remain callback adapters.
 
@@ -295,6 +305,12 @@ V1 intentionally avoids capabilities that would require forking
   `textarea` fields.
 - Broader OOPIF scenarios beyond the current reconnect smoke canary are not yet
   guaranteed.
+- Exact URL A/B parity across third-party authentication is a deliberate manual
+  diagnostic step, not an automated smoke: use the same browser profile and
+  exact starting URL in a fresh relay-owned tab and an already-authenticated
+  adopted tab, verify the post-redirect URL/element, and capture
+  `BROWSER_CONTROL_DEBUG=1` metadata. Do not automate credentials, auth tokens,
+  or production account state to manufacture parity.
 
 ## Architecture Debt Queue
 
@@ -327,8 +343,15 @@ implemented. Each item should land with smoke evidence.
    arriving during the round trip no longer eat the full 3s wait), and when no
    default `Runtime.executionContextCreated` arrives the relay kicks a
    `Runtime.disable`/`Runtime.enable` cycle to force Chrome to re-emit
-   contexts. Verified live: the kick immediately unsticks a `page.evaluate`
-   that would otherwise wait forever after Chrome swallowed a re-enable.
+    contexts. Verified live: the kick immediately unsticks a `page.evaluate`
+    that would otherwise wait forever after Chrome swallowed a re-enable.
+   `BROWSER_CONTROL_DEBUG=1` now emits bounded `[bc:ctx]` metadata for target
+   ownership/browser-context identity, main-frame loaders, context lifecycle,
+   reset outcomes, and failed evaluate shape/error class. Expressions,
+   arguments/results, headers, cookies, and form values are excluded; URLs are
+   origin/shape/fingerprint summaries. The deterministic
+   `redirect-reconnect-evaluate` smoke covers a local 302, cross-document context
+   replacement, client reconnect, and successful `page.evaluate`.
 5. **Emit child `Target.detachedFromTarget`** when a root target detaches so
    clients do not hold orphaned child sessions.
 6. **Recording chunk framing**: prefix tabId + sequence number into the binary
@@ -357,7 +380,7 @@ Shipped:
    timeouts. `page.evaluate` can still mutate the page; read-only guards
    trusted mistakes, not malicious code.
 2. **Structured execute output** (shipped): `execute --json` prints
-   `{ ok, value | error: { _tag, message }, logs, warnings, aftermath,
+   `{ ok, value | error: { _tag, message }, logs, warnings, diagnostic?, aftermath,
    session }`. `aftermath` reports startUrl/endUrl, main-frame navigations,
    console/page error counts, and handoffs for that one call. Warnings (page
    recreated, relay reconnect) are delivered with the call that caused them.
@@ -367,18 +390,25 @@ Shipped:
    `bc:<session-id>` (shim `0.0.6` accepts a `title` param on `tabs.group`);
    the badge shows `RUN` (amber) while executing and `WAIT` (blue) while a
    handoff is pending via the new `action.setBadge` shim command. A toolbar
-   click during execution never detaches the tab. True mid-script interruption
-   (cancelling the running effect) is future work.
+   click during execution never detaches the tab, including a user-owned tab
+   bound to an active handoff. True mid-script interruption (cancelling the
+   running effect) is future work.
 4. **Human-in-the-loop handoff** (shipped): `await handoff(message, {
-   timeoutMs })` in execute code shows an in-page banner, blocks, and resumes
-   when the user clicks the toolbar button on the session's tab
-   (`src/handoff.ts` + toolbar routing in the relay). Timeouts (default 10
-   minutes) throw. A right-click "send element to Browser Control" pin is a
-   later maybe.
+   timeoutMs })` in execute code shows an in-page message and explicit
+   completion control, blocks, and resumes only when that control returns the
+   matching handoff id from the bound tab (`src/handoff.ts` + content-script
+   routing in the relay). Binding uses the actual Playwright page's stable CDP
+   target id, then retains the exact registry target/tab/session identity, so
+   top-level navigation cannot change which page owns the waiter. The relay
+   reinjects pending WAIT state after navigation. Timeouts (default 10 minutes) throw. Human acknowledgment is not
+   proof of success, so scripts must assert the expected URL or element after
+   resuming. A right-click "send element to Browser Control" pin is a later
+   maybe.
 5. **Session journal** (shipped): every execute is appended to
    `~/.browser-control/sessions/<id>/journal.jsonl` (`src/session-journal.ts`)
    with timestamp, truncated code, status, duration, URL movement, warnings,
-   and handoffs. `browser-control journal [-s id] [--limit n] [--json]` renders
+   handoffs, and a bounded fixed diagnostic for execution-context failures.
+   `browser-control journal [-s id] [--limit n] [--json]` renders
    the timeline. Journal writes are best-effort and never fail the execute.
 
 Remaining:

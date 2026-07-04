@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Browser Control",
-  "version": "0.0.8",
+  "version": "0.0.10",
   "description": "Attach visible browser tabs to the local browser-control relay.",
   "permissions": ["activeTab", "alarms", "debugger", "offscreen", "tabs", "tabCapture", "tabGroups"],
   "host_permissions": ["<all_urls>"],
@@ -9,6 +9,13 @@
     "service_worker": "background.js",
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content-script.js"],
+      "run_at": "document_start"
+    }
+  ],
   "action": {
     "default_title": "Attach tab to Browser Control"
   }

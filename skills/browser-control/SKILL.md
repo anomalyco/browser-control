@@ -45,8 +45,10 @@ are attached.
 
 Use `browser-control doctor` before deeper debugging. It is read-only and checks
 the package/bin metadata, relay HTTP endpoint, extension connection/version,
-current and stale sessions, active and relay-owned targets, and built artifacts
-such as `dist/cli.js`, `dist/mcp.js`, and `extension/dist/manifest.json`.
+current and stale sessions, active and relay-owned targets, whether the running
+relay matches the current CLI build, and built artifacts such as `dist/cli.js`,
+`dist/mcp.js`, and `extension/dist/manifest.json`. Restart `browser-control
+serve` when it reports a stale relay build.
 
 After extension shim changes, also confirm `version` matches
 `extension/manifest.json`.
@@ -101,6 +103,12 @@ on execute itself remain one-command selections, not sticky adoption. For multi-
 locator-level DOM evaluation, use `fillInputs(page, fields)` to fill several
 selectors in one page execution.
 
+For authentication already established in a user-attached tab, prefer
+`execute --target-url <unique-url-part>` for one command or `session adopt
+--target-url <unique-url-part>` for sticky reuse rather than reproducing login in
+a fresh relay-owned tab. After navigation or `handoff`, verify the expected URL
+or a stable element before entering data or continuing.
+
 Single-expression snippets such as `page.url()` and `await page.title()` return
 their value automatically; multi-statement scripts still require `return` for a
 value. Use `browser-control execute --file <path>` for longer scripts instead of
@@ -112,7 +120,7 @@ navigated, hit page errors, or paused for handoffs.
 
 Use `browser-control execute --json` when you want to branch on the result: it
 prints `{ ok, isError, text, value, valueUnavailable, error?: { _tag, message },
-logs, warnings, aftermath, session }`. `value` is the structured JSON result of
+logs, warnings, diagnostic?, aftermath, session }`. `value` is the structured JSON result of
 the script (jq-able: `execute --json "({a: 1})" | jq .value.a` prints `1`);
 `text` is the human-formatted rendering. `value` carries plain data only: objects,
 arrays, and primitives round-trip; `Map` becomes a plain object, `Set` an
@@ -122,7 +130,9 @@ and results whose JSON exceeds 32KB are withheld: `value` is `null` and
 `aftermath` reports `startUrl`, `endUrl`, main-frame `navigations`,
 `consoleErrorCount`, `pageErrorCount`, and `handoffs` for that one call.
 Warnings are delivered with the call that caused them, for example when the
-session default page was closed and recreated.
+session default page was closed and recreated. Failed execution-context calls
+also carry a short fixed diagnostic classification with page/navigation counts;
+it never includes evaluation arguments or results.
 
 ## Guardrails And Read-Only Sessions
 
@@ -150,28 +160,35 @@ the page via JavaScript; read-only guards trusted mistakes, not malicious code.
 
 When a flow hits 2FA, CAPTCHAs, payment confirmation, or anything the user must
 do personally, call `handoff(message, { timeoutMs })` inside execute code. It
-shows a banner in the page, blocks the script, and resumes when the user clicks
-the Browser Control toolbar button on the attached tab. Default timeout is 10
-minutes; a timeout throws so the failure is explicit.
+shows the message and an accessible **I'm done, continue** control in the page,
+blocks the script, and resumes only when the user activates that control. The
+WAIT UI survives top-level navigation. Default timeout is 10 minutes; a timeout
+throws so the failure is explicit.
 
 ```js
 await page.goto("https://accounts.example.com/login")
 await fillInput("#email", "me@example.com")
 await page.getByRole("button", { name: "Continue" }).click()
-await handoff("Complete the 2FA prompt, then click the Browser Control toolbar button")
+await handoff("Complete the 2FA prompt, then use the in-page continue control")
+if (!page.url().startsWith("https://app.example.com/")) {
+  throw new Error(`2FA did not reach the app: ${page.url()}`)
+}
+await page.getByRole("heading", { name: "Dashboard" }).waitFor()
 return await page.title()
 ```
 
 Tell the user what you need before or while the handoff is pending. Handoffs are
-counted in the result aftermath and recorded in the session journal. While a
-script is executing, a toolbar click never detaches the tab; it resumes a
-pending handoff instead.
+counted in the result aftermath and recorded in the session journal. Human
+acknowledgment is not proof that the task succeeded: always assert the expected
+URL or element after `handoff` before continuing. A toolbar click never resumes
+a handoff and does not detach its tab while the execute call is active.
 
 ## Session Journal
 
 Every execute call is journaled to
 `~/.browser-control/sessions/<id>/journal.jsonl` with a timestamp, the code, the
-result status, duration, URL movement, warnings, and handoffs. Use it to audit
+result status, duration, URL movement, warnings, handoffs, and any bounded
+execution-context failure diagnostic. Use it to audit
 what an agent did to the browser or to debug a session after the fact:
 
 ```bash
@@ -211,19 +228,21 @@ This is useful when installed browser extensions, such as password managers,
 interfere with Playwright's focus/fill machinery. It sets the value and dispatches
 `input` and `change` events; it is only for `input` and `textarea` locators.
 
-To show a small cosmetic cursor overlay during visible actions, use the ghost
-cursor helpers. The relay injects the overlay into attached pages and mirrors
-`Input.dispatchMouseEvent` move/press/release commands into it while shown:
+The ghost cursor is off by default. To show the small cosmetic overlay during
+visible actions, call it after navigation and before those actions. The relay
+mirrors `Input.dispatchMouseEvent` move/press/release commands while it is shown:
 
 ```js
+await page.goto("https://example.com")
 await showGhostCursor()
 await page.mouse.move(100, 120)
 await page.getByRole("button", { name: "Submit" }).click()
 await ghostCursor.hide()
 ```
 
-Use `hideGhostCursor()` or `ghostCursor.hide()` to remove it. This does not start
-recording or edit demo videos.
+Use `hideGhostCursor()` or `ghostCursor.hide()` during cleanup if desired.
+Recording does not enable the ghost cursor, and the cursor does not start or
+edit recordings.
 
 ## Recording
 
@@ -277,18 +296,45 @@ five integration rows) are distinguishable without another round-trip.
 
 ## Accessibility Snapshot
 
-Prefer `ariaSnapshot(target?)` for cheap read-before-act structure checks. It
+Prefer `snapshot()` for the compact read-before-act happy path. It uses the
+page's single `main` region when available, collapses navigation, and spends its
+bounded item budget on alerts, semantic groups, lists, tables, block code,
+headings, primary links, and controls before repeated metadata. It summarizes
+select option counts and assigns refs to controls. Its timeout defaults to 10
+seconds to accommodate a cold first browser evaluation. Text input and textarea
+values are omitted:
+
+```js
+return await snapshot()
+```
+
+Use a returned ref on the next execute call as a Playwright locator:
+
+```js
+await ref("e12").click()
+```
+
+Refs belong to the latest snapshot and are rejected after main-frame navigation.
+They combine structural position with captured accessible identity, so sibling
+DOM drift fails closed instead of silently retargeting a different named control.
+Drill into omitted context with `snapshot({ within, interactive, compact, depth,
+maxItems, timeout })`.
+
+Use `ariaSnapshot(target?, { timeout })` when the compact view omitted needed
+structure. It defaults to a 5-second timeout and
 returns Playwright's YAML aria snapshot for a selector, locator, or the whole
 page (default `body`), so one call shows you whether a "tab bar" is really a
 `<select>`, what a control's accessible name is, and which roles exist —
 without burning a 30s locator timeout on a wrong `getByRole` guess:
 
 ```js
-return await ariaSnapshot("main")
+return await ariaSnapshot("main", { timeout: 10_000 })
 ```
 
-Use it before interacting with unfamiliar UI regions; use
-`screenshotWithLabels` when you need visual layout rather than structure.
+Omit the options for the 5-second default, or override `timeout` in milliseconds
+for a deliberately slow region. Use `screenshotWithLabels` when you need visual
+layout rather than structure, and raw Playwright when neither snapshot shape is
+specific enough.
 
 ## Destructive UI Recipe
 
@@ -390,7 +436,7 @@ language changes, update `CONTEXT.md` too.
 - Extension changes not taking effect: rebuild `extension/dist` and reload the
   unpacked extension once.
 - Repeated `hello` messages or in-flight RPC timeouts: check for duplicate shim
-  websocket reconnects. The current shim version is `0.0.8`.
+  websocket reconnects. The current shim version is `0.0.10`.
 - Relay restarted while tabs were attached: shim `0.0.7`+ re-announces attached
   tabs after reconnecting, so the relay rebuilds its target registry without
   re-clicking the toolbar. If `activeTargets` stays 0 with an older shim,
@@ -407,7 +453,8 @@ language changes, update `CONTEXT.md` too.
   session-owned tabs (plain `browser-control` for user-attached tabs). The
   toolbar badge shows `ON` when attached, `RUN` while a script is executing, and
   `WAIT` while a handoff is pending. Badges beyond `ON` require shim `0.0.6`
-  or newer; older shims still work but skip them.
+  or newer. The explicit in-page handoff completion control and navigation
+  reinjection require shim `0.0.10`.
 - Active targets after an execute run are expected: relay-created tabs persist
   across short-lived CLI calls. Close the visible tab, call `await page.close()`,
   or detach it with the toolbar if you want `/extension/status` to return to zero.
@@ -419,8 +466,9 @@ language changes, update `CONTEXT.md` too.
   confirming the locator resolves.
 - Ghost cursor overlay: use `showGhostCursor()`, `hideGhostCursor()`, or
   `ghostCursor.show/hide` inside execute code. It mirrors visible
-  `Input.dispatchMouseEvent` move/press/release commands while shown and is
-  overlay-only, not recording.
+  `Input.dispatchMouseEvent` move/press/release commands while shown. It is off
+  by default; show it after navigation and before visible actions. Recording
+  does not enable it, and it can be hidden during cleanup.
 - Closed page during input on real-world React apps: suspect CDP session detach
   handling around `Target.detachFromTarget` / `Input.dispatchKeyEvent`. Reproduce
   with local smoke fixtures before changing unrelated locator code, then compare
@@ -428,6 +476,17 @@ language changes, update `CONTEXT.md` too.
 - Missing iframe after reconnect: run `SMOKE_CASE=oopif-reconnect pnpm smoke`.
   Browser Control should replay stored child target attaches and current child
   frame navigation for the current OOPIF canary.
+- Repeated `Execution context was destroyed` failures: use an already-authenticated
+  attached tab with `--target-url` or `session adopt`, verify the expected URL or
+  element after navigation/handoff, and restart the relay with
+  `BROWSER_CONTROL_DEBUG=1` before reproducing. `[bc:ctx]` lines contain bounded
+  metadata only: target/context IDs, ownership, loader changes, URL origin/shape
+  plus fingerprint, reset outcomes, and evaluate shape/failure class. They never
+  include expressions, arguments, results, headers, cookies, or form values.
 - Long-running relay testing: use `termctrl start browser-control-relay --cwd
   "/Users/kit/code/open-source/browser-control" --cols 120 --rows 24 --
   browser-control serve`.
+- Bursty navigation to the same heavyweight origin: if several fresh sessions
+  all stall before commit while other origins work, serialize those navigations
+  or give `page.goto` a deliberate longer timeout. Browser Control preserves raw
+  Playwright navigation semantics rather than adding hidden retries.

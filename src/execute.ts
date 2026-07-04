@@ -14,9 +14,29 @@ import http from "node:http"
 import https from "node:https"
 import zlib from "node:zlib"
 import { hideGhostCursor as hideGhostCursorOnPage, showGhostCursor as showGhostCursorOnPage, type GhostCursorClientOptions } from "./ghost-cursor.ts"
-import type { ExecuteAftermath } from "./relay-schema.ts"
+import type { ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary } from "./relay-schema.ts"
+import { executionContextFailureDiagnostic } from "./runtime-diagnostics.ts"
 
 const nodeModules = { fs, path, os, crypto, url, util, events, stream, buffer, http, https, zlib }
+
+const playwrightCloseTimeoutMs = 2_000
+const playwrightConnectTimeoutMs = 15_000
+
+export const runPlaywrightOperation = <A>(options: {
+  readonly label: string
+  readonly timeoutMs: number
+  readonly run: () => Promise<A>
+}): Effect.Effect<A, Error> => {
+  return Effect.tryPromise({
+    try: options.run,
+    catch: (cause) => cause instanceof Error ? cause : new Error(options.label, { cause }),
+  }).pipe(
+    Effect.timeoutOrElse({
+      duration: options.timeoutMs,
+      orElse: () => Effect.fail(new Error(`${options.label} timed out after ${options.timeoutMs}ms`)),
+    }),
+  )
+}
 
 type SandboxGlobals = {
   readonly browser: Browser
@@ -27,7 +47,9 @@ type SandboxGlobals = {
   readonly fillInput: (target: InputTarget, value: string) => Promise<void>
   readonly fillInputs: (page: Page, fields: ReadonlyArray<InputField>) => Promise<void>
   readonly screenshotWithLabels: (options: ScreenshotWithLabelsOptions) => Promise<ScreenshotWithLabelsResult>
-  readonly ariaSnapshot: (target?: InputTarget) => Promise<string>
+  readonly ariaSnapshot: AriaSnapshotHelper
+  readonly snapshot: SnapshotHelper
+  readonly ref: SnapshotRefHelper
   readonly showGhostCursor: (options?: ShowGhostCursorOptions) => Promise<void>
   readonly hideGhostCursor: (options?: HideGhostCursorOptions) => Promise<void>
   readonly ghostCursor: {
@@ -45,13 +67,64 @@ type HandoffCallOptions = {
 
 export type HandoffOutcome = "resolved" | "timeout"
 
-export type RequestHandoff = (options: { readonly message: string; readonly timeoutMs: number }) => Promise<HandoffOutcome>
+export type HandoffPageTarget = {
+  readonly targetId: string
+}
+
+export type RequestHandoff = (options: {
+  readonly message: string
+  readonly timeoutMs: number
+  readonly target: HandoffPageTarget
+}) => Promise<HandoffOutcome>
 
 const defaultHandoffTimeoutMs = 10 * 60 * 1_000
 
-const defaultHandoffMessage = "Waiting for you — click the Browser Control toolbar button to continue."
+const defaultHandoffMessage = "Complete the requested task, then use the in-page continue control."
 
-type InputTarget = Locator | string
+export type AriaSnapshotTarget = Locator | string
+
+export type AriaSnapshotOptions = {
+  readonly timeout?: number
+}
+
+export type AriaSnapshotHelper = (target?: AriaSnapshotTarget, options?: AriaSnapshotOptions) => Promise<string>
+
+export type SnapshotOptions = {
+  readonly within?: AriaSnapshotTarget
+  readonly interactive?: boolean
+  readonly compact?: boolean
+  readonly depth?: number
+  readonly maxItems?: number
+  readonly timeout?: number
+}
+
+export type SnapshotHelper = (options?: SnapshotOptions) => Promise<string>
+export type SnapshotRefHelper = (id: string) => Locator
+
+type SnapshotEntry = {
+  readonly depth: number
+  readonly baseDepth?: number
+  readonly key?: string
+  readonly parentKeys?: readonly string[]
+  readonly role: string
+  readonly name: string
+  readonly identityName?: string
+  readonly details?: string
+  readonly selector?: string
+  readonly priority: number
+}
+
+type SnapshotRefRegistry = {
+  page?: Page
+  url?: string
+  selectors: Map<string, { readonly selector: string; readonly role: string; readonly name?: string }>
+  removeNavigationListener?: () => void
+}
+
+type InputTarget = AriaSnapshotTarget
+
+export const defaultAriaSnapshotTimeoutMs = 5_000
+export const defaultSnapshotTimeoutMs = 10_000
 
 type InputField = {
   readonly selector: string
@@ -127,7 +200,9 @@ export type ExecuteResult = {
   readonly value?: unknown
   readonly isError: boolean
   readonly logs: readonly ExecuteLogEntry[]
+  readonly logSummary: ExecuteLogSummary
   readonly warnings: readonly string[]
+  readonly diagnostic?: string
   readonly aftermath?: ExecuteAftermath
 }
 
@@ -135,6 +210,7 @@ class ExecuteCodeError extends Error {
   constructor(
     readonly originalError: Error,
     readonly logs: readonly ExecuteLogEntry[],
+    readonly logSummary: ExecuteLogSummary,
     readonly aftermath?: ExecuteAftermath,
   ) {
     super(originalError.message, { cause: originalError })
@@ -142,17 +218,6 @@ class ExecuteCodeError extends Error {
     if (originalError.stack) {
       this.stack = originalError.stack
     }
-  }
-}
-
-export type ExecuteLogEntry = {
-  readonly source: "script" | "page"
-  readonly type: string
-  readonly text: string
-  readonly location?: {
-    readonly url: string
-    readonly lineNumber: number
-    readonly columnNumber: number
   }
 }
 
@@ -165,6 +230,7 @@ export class ExecuteSandbox {
   private page: Page | undefined
   private ownsPage = false
   private readonly state: Record<string, unknown> = {}
+  private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private pendingWarnings: string[] = []
 
   constructor(readonly options: ExecuteSandboxOptions) {}
@@ -180,9 +246,13 @@ export class ExecuteSandbox {
     return Effect.tryPromise({
       try: async () => {
         const globals = await this.getGlobals(options)
-        const { result, logs, aftermath } = await runUserCode({ code, globals })
+        const { result, logs, logSummary, aftermath } = await runUserCode({ code, globals })
         const jsonSafeResult = toJsonSafeValue(result)
         const warnings = this.drainWarnings()
+        const logCompactionWarning = formatLogCompactionWarning(logSummary)
+        if (logCompactionWarning) {
+          warnings.push(logCompactionWarning)
+        }
         if (!jsonSafeResult.serializable) {
           warnings.push(`Execute result could not be represented as JSON value: ${jsonSafeResult.reason}`)
         }
@@ -191,6 +261,7 @@ export class ExecuteSandbox {
           ...(jsonSafeResult.serializable ? { value: jsonSafeResult.value } : {}),
           isError: false,
           logs,
+          logSummary,
           warnings,
           aftermath,
         }
@@ -204,12 +275,22 @@ export class ExecuteSandbox {
     }).pipe(
       Effect.match({
         onFailure: (error): ExecuteResult => {
+          const logSummary = error instanceof ExecuteCodeError ? error.logSummary : emptyExecuteLogSummary()
+          const aftermath = error instanceof ExecuteCodeError ? error.aftermath : undefined
+          const diagnostic = executionContextFailureDiagnostic(error, aftermath)
+          const warnings = this.drainWarnings()
+          const logCompactionWarning = formatLogCompactionWarning(logSummary)
+          if (logCompactionWarning) {
+            warnings.push(logCompactionWarning)
+          }
           return {
             text: error.stack ?? error.message,
             isError: true,
             logs: error instanceof ExecuteCodeError ? error.logs : [],
-            warnings: this.drainWarnings(),
-            ...(error instanceof ExecuteCodeError && error.aftermath ? { aftermath: error.aftermath } : {}),
+            logSummary,
+            warnings,
+            ...(diagnostic ? { diagnostic } : {}),
+            ...(aftermath ? { aftermath } : {}),
           }
         },
         onSuccess: (result) => {
@@ -226,60 +307,105 @@ export class ExecuteSandbox {
   }
 
   close(): Effect.Effect<void, Error> {
-    return Effect.tryPromise({
-      try: async () => {
-        if (this.page && this.ownsPage && !this.page.isClosed()) {
-          await this.page.close().catch(() => {})
-        }
-        await this.browser?.close()
-        this.browser = undefined
-        this.page = undefined
-        this.ownsPage = false
-      },
-      catch: (cause) => {
-        return new Error("close sandbox browser", { cause })
-      },
+    const sandbox = this
+    return Effect.gen(function* () {
+      const page = sandbox.page
+      const browser = sandbox.browser
+      const ownsOpenPage = page !== undefined && sandbox.ownsPage && !page.isClosed()
+      sandbox.browser = undefined
+      sandbox.page = undefined
+      sandbox.ownsPage = false
+
+      if (ownsOpenPage) {
+        yield* runPlaywrightOperation({
+          label: "Close sandbox page",
+          timeoutMs: playwrightCloseTimeoutMs,
+          run: () => page.close(),
+        }).pipe(Effect.ignore)
+      }
+      if (browser) {
+        yield* runPlaywrightOperation({
+          label: "Close sandbox browser connection",
+          timeoutMs: playwrightCloseTimeoutMs,
+          run: () => browser.close(),
+        }).pipe(Effect.ignore)
+      }
     })
   }
 
   adoptPage(target: AdoptTarget): Effect.Effect<string, Error> {
-    return Effect.tryPromise({
-      try: async () => {
-        if (!this.browser?.isConnected()) {
-          await this.browser?.close().catch(() => {})
-          this.browser = await chromium.connectOverCDP(this.options.endpointUrl, {
-            ...(this.options.sessionId ? { headers: { "Browser-Control-Session-Id": this.options.sessionId } } : {}),
-          })
-          this.page = undefined
-          this.ownsPage = false
+    const sandbox = this
+    return Effect.gen(function* () {
+      if (!sandbox.browser?.isConnected()) {
+        const staleBrowser = sandbox.browser
+        if (staleBrowser) {
+          yield* runPlaywrightOperation({
+            label: "Close stale browser connection before adoption",
+            timeoutMs: playwrightCloseTimeoutMs,
+            run: () => staleBrowser.close(),
+          }).pipe(Effect.ignore)
         }
-        const context = this.browser.contexts()[0] ?? (await this.browser.newContext())
-        const selected = selectPageForAdopt({ pages: context.pages(), target })
-        if (!selected) {
-          throw new Error(`No attached page found for target ${target.targetId} (${target.url})`)
-        }
-        const currentPage = this.page
-        if (shouldCloseCurrentPageOnAdopt({
-          hasCurrentPage: currentPage !== undefined,
-          ownsCurrentPage: this.ownsPage,
-          currentPageIsSelected: currentPage === selected,
-          currentPageIsClosed: currentPage?.isClosed() ?? true,
-        })) {
-          await currentPage?.close().catch(() => {})
-        }
-        this.page = selected
-        this.ownsPage = false
-        return selected.url()
-      },
-      catch: (cause) => cause instanceof Error ? cause : new Error("adopt session page", { cause }),
+        const browser = yield* runPlaywrightOperation({
+          label: "Connect to the relay for session adoption",
+          timeoutMs: playwrightConnectTimeoutMs,
+          run: () => chromium.connectOverCDP(sandbox.options.endpointUrl, {
+            timeout: playwrightConnectTimeoutMs,
+            ...(sandbox.options.sessionId ? { headers: { "Browser-Control-Session-Id": sandbox.options.sessionId } } : {}),
+          }),
+        })
+        sandbox.browser = browser
+        sandbox.page = undefined
+        sandbox.ownsPage = false
+      }
+      const browser = sandbox.browser
+      if (!browser) {
+        return yield* Effect.fail(new Error("Browser connection unavailable for session adoption"))
+      }
+      const existingContext = browser.contexts()[0]
+      const context = existingContext ?? (yield* runPlaywrightOperation({
+        label: "Create a browser context for session adoption",
+        timeoutMs: playwrightConnectTimeoutMs,
+        run: () => browser.newContext(),
+      }))
+      const selected = yield* Effect.try({
+        try: () => selectPageForAdopt({ pages: context.pages(), target }),
+        catch: (cause) => cause instanceof Error ? cause : new Error("Select page for session adoption", { cause }),
+      })
+      if (!selected) {
+        return yield* Effect.fail(new Error(`No attached page found for target ${target.targetId} (${target.url})`))
+      }
+      const currentPage = sandbox.page
+      if (shouldCloseCurrentPageOnAdopt({
+        hasCurrentPage: currentPage !== undefined,
+        ownsCurrentPage: sandbox.ownsPage,
+        currentPageIsSelected: currentPage === selected,
+        currentPageIsClosed: currentPage?.isClosed() ?? true,
+      }) && currentPage) {
+        yield* runPlaywrightOperation({
+          label: "Close the previous session page during adoption",
+          timeoutMs: playwrightCloseTimeoutMs,
+          run: () => currentPage.close(),
+        }).pipe(Effect.ignore)
+      }
+      sandbox.page = selected
+      sandbox.ownsPage = false
+      return selected.url()
     })
   }
 
   private async getGlobals(options: ExecuteOptions): Promise<SandboxGlobals> {
     if (!this.browser?.isConnected()) {
       const hadBrowser = this.browser !== undefined
-      await this.browser?.close().catch(() => {})
+      const staleBrowser = this.browser
+      if (staleBrowser) {
+        await Effect.runPromise(runPlaywrightOperation({
+          label: "Close stale browser connection before reconnecting",
+          timeoutMs: playwrightCloseTimeoutMs,
+          run: () => staleBrowser.close(),
+        }).pipe(Effect.ignore))
+      }
       this.browser = await chromium.connectOverCDP(this.options.endpointUrl, {
+        timeout: playwrightConnectTimeoutMs,
         ...(this.options.sessionId ? { headers: { "Browser-Control-Session-Id": this.options.sessionId } } : {}),
       })
       this.page = undefined
@@ -298,10 +424,8 @@ export class ExecuteSandbox {
     const hideGhostCursor = async (options?: HideGhostCursorOptions) => {
       await hideGhostCursorOnPage({ page: options?.page ?? page })
     }
-    const ariaSnapshot = async (target?: InputTarget): Promise<string> => {
-      const locator = target === undefined ? page.locator("body") : typeof target === "string" ? page.locator(target) : target
-      return await locator.ariaSnapshot()
-    }
+    const ariaSnapshot = createAriaSnapshotHelper(page)
+    const { snapshot, ref } = createSnapshotHelpers(page, this.snapshotRefs)
     const handoffTracker = { count: 0 }
     const requestHandoff = this.options.requestHandoff
     const handoff = async (message?: string, options?: HandoffCallOptions) => {
@@ -310,17 +434,20 @@ export class ExecuteSandbox {
       }
       const handoffMessage = message?.trim() || defaultHandoffMessage
       const timeoutMs = options?.timeoutMs ?? defaultHandoffTimeoutMs
-      const bannerPage = options?.page ?? page
-      await showHandoffBanner(bannerPage, handoffMessage).catch(() => {})
-      try {
-        const outcome = await requestHandoff({ message: handoffMessage, timeoutMs })
-        if (outcome === "timeout") {
-          throw new Error(`Handoff timed out after ${timeoutMs}ms waiting for the user: ${handoffMessage}`)
-        }
-        handoffTracker.count += 1
-      } finally {
-        await hideHandoffBanner(bannerPage).catch(() => {})
+      const handoffPage = options?.page ?? page
+      if (handoffPage.isClosed() || handoffPage.context() !== context) {
+        throw new Error("handoff requires an open page in the current browser context")
       }
+      const targetId = await pageTargetId(handoffPage)
+      const outcome = await requestHandoff({
+        message: handoffMessage,
+        timeoutMs,
+        target: { targetId },
+      })
+      if (outcome === "timeout") {
+        throw new Error(`Handoff timed out after ${timeoutMs}ms waiting for the user: ${handoffMessage}`)
+      }
+      handoffTracker.count += 1
     }
     return {
       browser: this.browser,
@@ -332,6 +459,8 @@ export class ExecuteSandbox {
       fillInputs,
       screenshotWithLabels,
       ariaSnapshot,
+      snapshot,
+      ref,
       showGhostCursor,
       hideGhostCursor,
       ghostCursor: {
@@ -372,37 +501,6 @@ export class ExecuteSandbox {
     this.ownsPage = true
     return this.page
   }
-}
-
-async function showHandoffBanner(page: Page, message: string): Promise<void> {
-  await page.evaluate((bannerMessage) => {
-    const bannerId = "__browser_control_handoff__"
-    document.getElementById(bannerId)?.remove()
-    const banner = document.createElement("div")
-    banner.id = bannerId
-    banner.style.cssText = [
-      "position:fixed",
-      "top:0",
-      "left:0",
-      "right:0",
-      "z-index:2147483647",
-      "padding:10px 16px",
-      "background:#7c3aed",
-      "color:#ffffff",
-      "font:600 14px/1.4 system-ui,-apple-system,sans-serif",
-      "text-align:center",
-      "box-shadow:0 2px 8px rgba(17,24,39,0.35)",
-      "pointer-events:none",
-    ].join(";")
-    banner.textContent = `Browser Control: ${bannerMessage} (click the Browser Control toolbar button to continue)`
-    document.documentElement.appendChild(banner)
-  }, message)
-}
-
-async function hideHandoffBanner(page: Page): Promise<void> {
-  await page.evaluate(() => {
-    document.getElementById("__browser_control_handoff__")?.remove()
-  })
 }
 
 export function hasExplicitTargetSelection(selection: ExecuteTargetSelection | undefined): boolean {
@@ -465,6 +563,23 @@ export function selectTargetById<T>({
   return targets.find((target) => getTargetId(target) === targetId)
 }
 
+export async function pageTargetId(page: Page): Promise<string> {
+  if (page.isClosed()) {
+    throw new Error("Cannot identify the CDP target for a closed page")
+  }
+  const session = await page.context().newCDPSession(page)
+  try {
+    const result = await session.send("Target.getTargetInfo")
+    const targetId = result.targetInfo?.targetId
+    if (!targetId) {
+      throw new Error("Target.getTargetInfo did not return a target id for the handoff page")
+    }
+    return targetId
+  } finally {
+    await session.detach()
+  }
+}
+
 export function selectAdoptCandidateByUrl<T>({
   candidates,
   targetUrl,
@@ -497,6 +612,460 @@ function ghostCursorOptions(options: ShowGhostCursorOptions | undefined): GhostC
     ...(options.color ? { color: options.color } : {}),
     ...(options.size !== undefined ? { size: options.size } : {}),
     ...(options.zIndex !== undefined ? { zIndex: options.zIndex } : {}),
+  }
+}
+
+export function createAriaSnapshotHelper(page: Pick<Page, "locator">): AriaSnapshotHelper {
+  return async (target, options) => {
+    const locator = target === undefined ? page.locator("body") : typeof target === "string" ? page.locator(target) : target
+    return await locator.ariaSnapshot({ timeout: options?.timeout ?? defaultAriaSnapshotTimeoutMs })
+  }
+}
+
+export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry): {
+  readonly snapshot: SnapshotHelper
+  readonly ref: SnapshotRefHelper
+} {
+  const refRoots = new WeakMap<Locator, { readonly selector: string; readonly role: string; readonly name?: string }>()
+  const snapshot: SnapshotHelper = async (options = {}) => {
+    registry.removeNavigationListener?.()
+    registry.selectors.clear()
+    delete registry.page
+    delete registry.url
+    let navigatedDuringCapture = false
+    const onFrameNavigated = (frame: Frame) => {
+      if (frame !== page.mainFrame()) return
+      navigatedDuringCapture = true
+      registry.selectors.clear()
+      delete registry.page
+      delete registry.url
+    }
+    const removeNavigationListener = () => page.off("framenavigated", onFrameNavigated)
+    page.on("framenavigated", onFrameNavigated)
+    registry.removeNavigationListener = removeNavigationListener
+
+    const within = options.within
+    const refRoot = typeof within === "object" ? refRoots.get(within) : undefined
+    const locator = typeof within === "object" && !refRoot ? within : undefined
+    const depth = Math.max(1, Math.min(12, Math.floor(options.depth ?? 6)))
+    const maxItems = Math.max(1, Math.min(200, Math.floor(options.maxItems ?? 80)))
+    const settings = {
+      compact: options.compact ?? true,
+      depth,
+      interactive: options.interactive ?? false,
+      maxCandidates: Math.max(1_000, maxItems * 20),
+      maxItems,
+      rootSelector: typeof within === "string" ? within : refRoot?.selector,
+      rootRole: refRoot?.role,
+      rootName: refRoot?.name,
+    }
+    const capture = (rootOrSettings: Element | typeof settings, locatorSettings?: typeof settings) => {
+      type BrowserEntry = SnapshotEntry
+      const settings = locatorSettings ?? rootOrSettings as typeof locatorSettings & typeof rootOrSettings
+
+      const normalize = (value: string): string => value.replace(/\s+/g, " ").trim()
+      const truncate = (value: string, maxLength: number): string => {
+        if (value.length <= maxLength) return value
+        const prefix = value.slice(0, maxLength + 1)
+        const boundary = prefix.lastIndexOf(" ")
+        return `${prefix.slice(0, boundary >= Math.floor(maxLength * 0.6) ? boundary : maxLength).trimEnd()}...`
+      }
+      const quote = (value: string): string => value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
+      const isVisible = (element: Element): boolean => {
+        const rect = element.getBoundingClientRect()
+        const style = window.getComputedStyle(element)
+        return rect.width >= 1 && rect.height >= 1 && style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0"
+      }
+      const labelledName = (element: Element): string => {
+        const ariaLabel = element.getAttribute("aria-label")
+        if (ariaLabel) return normalize(ariaLabel)
+        const labelledBy = element.getAttribute("aria-labelledby")
+        if (labelledBy) {
+          const labelled = normalize(labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.textContent ?? "").join(" "))
+          if (labelled) return labelled
+        }
+        return normalize(element.getAttribute("title") ?? "")
+      }
+      const safeText = (element: Element): string => {
+        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT)
+        const parts: string[] = []
+        let node = walker.nextNode()
+        while (node) {
+          const parent = node.parentElement
+          let hidden = false
+          let ancestor = parent
+          while (ancestor && element.contains(ancestor)) {
+            const style = window.getComputedStyle(ancestor)
+            if (ancestor.hasAttribute("hidden") || ancestor.getAttribute("aria-hidden") === "true" || style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+              hidden = true
+              break
+            }
+            if (ancestor === element) break
+            ancestor = ancestor.parentElement
+          }
+          if (!hidden && !parent?.closest("input, textarea, select, script, style")) {
+            parts.push(node.textContent ?? "")
+          }
+          node = walker.nextNode()
+        }
+        return normalize(parts.join(" "))
+      }
+      const accessibleName = (element: Element): string => {
+        const labelled = labelledName(element)
+        if (labelled) return labelled
+        if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+          const label = element.labels?.[0]
+          if (label) return safeText(label)
+          const placeholder = element.getAttribute("placeholder")
+          if (placeholder) return normalize(placeholder)
+          return ""
+        }
+        const alt = element.getAttribute("alt")
+        return normalize(alt || safeText(element))
+      }
+      const roleFor = (element: Element): string => {
+        const explicit = element.getAttribute("role")
+        if (explicit) return explicit
+        if (/^H[1-6]$/.test(element.tagName)) return "heading"
+        if (element instanceof HTMLAnchorElement) return "link"
+        if (element instanceof HTMLButtonElement || element.tagName === "SUMMARY") return "button"
+        if (element instanceof HTMLTextAreaElement) return "textbox"
+        if (element instanceof HTMLSelectElement) return "combobox"
+        if (element instanceof HTMLInputElement) {
+          if (element.type === "checkbox") return "checkbox"
+          if (element.type === "radio") return "radio"
+          if (element.type === "button" || element.type === "submit" || element.type === "reset") return "button"
+          return "textbox"
+        }
+        if (element instanceof HTMLDialogElement) return "dialog"
+        if (element instanceof HTMLFieldSetElement || element.tagName === "DETAILS") return "group"
+        if (element instanceof HTMLTableElement) return "table"
+        if (element instanceof HTMLTableRowElement) return "row"
+        if (element instanceof HTMLUListElement || element instanceof HTMLOListElement) return "list"
+        if (element instanceof HTMLLIElement) return "listitem"
+        if (element.tagName === "PRE" || element.tagName === "CODE") return "code"
+        if (element.tagName === "NAV") return "navigation"
+        return element.tagName.toLowerCase()
+      }
+      const structuralName = (element: Element, role: string): string => {
+        const labelled = labelledName(element)
+        if (labelled) return labelled
+        if (element instanceof HTMLFieldSetElement) return normalize(element.querySelector(":scope > legend")?.textContent ?? "")
+        if (element instanceof HTMLTableElement) return normalize(element.caption?.textContent ?? "")
+        if (element instanceof HTMLDetailsElement) return normalize(element.querySelector(":scope > summary")?.textContent ?? "")
+        if (role === "dialog" || role === "group") {
+          return normalize(element.querySelector("h1, h2, h3, h4, h5, h6, [role='heading']")?.textContent ?? "")
+        }
+        if (role === "code") return normalize(element.textContent ?? "")
+        if (role === "row" || role === "listitem") return safeText(element)
+        return ""
+      }
+      const root = rootOrSettings instanceof Element
+        ? rootOrSettings
+        : (() => {
+            if (settings.rootSelector) {
+              const matches = document.querySelectorAll(settings.rootSelector)
+              if (matches.length !== 1) {
+                throw new Error(`snapshot within expects exactly one match for selector: ${settings.rootSelector}; got ${matches.length}`)
+              }
+              return matches[0] as Element
+            }
+            const mains = Array.from(document.querySelectorAll("main")).filter(isVisible)
+            return mains.length === 1 ? mains[0] as Element : document.body
+          })()
+      if ((settings.rootRole && roleFor(root) !== settings.rootRole) || (settings.rootName && accessibleName(root) !== settings.rootName)) {
+        throw new Error("Snapshot ref no longer identifies the captured element; call snapshot() again")
+      }
+      const detailsFor = (element: Element): string | undefined => {
+        const details: string[] = []
+        if (element instanceof HTMLInputElement) {
+          if (element.type === "checkbox" || element.type === "radio") details.push(element.checked ? "checked" : "unchecked")
+        }
+        if (element instanceof HTMLSelectElement) {
+          const selected = element.selectedOptions[0]?.textContent
+          if (selected) details.push(`selected="${quote(normalize(selected).slice(0, 80))}"`)
+          details.push(`${element.options.length} options`)
+        }
+        if (element instanceof HTMLButtonElement || element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement) {
+          if (element.disabled) details.push("disabled")
+        }
+        const expanded = element.getAttribute("aria-expanded")
+        if (expanded) details.push(`expanded=${expanded}`)
+        if (element instanceof HTMLDetailsElement) details.push(`expanded=${element.open}`)
+        if (element instanceof HTMLDialogElement) {
+          details.push(`open=${element.open}`)
+          const modal = element.getAttribute("aria-modal")
+          if (modal) details.push(`modal=${modal}`)
+        }
+        if (element.tagName === "SUMMARY" && element.parentElement instanceof HTMLDetailsElement) details.push(`expanded=${element.parentElement.open}`)
+        const selected = element.getAttribute("aria-selected")
+        if (selected) details.push(`selected=${selected}`)
+        const current = element.getAttribute("aria-current")
+        if (current) details.push(`current=${current}`)
+        if (element instanceof HTMLTableElement) details.push(`${element.rows.length} rows`)
+        if (element instanceof HTMLUListElement || element instanceof HTMLOListElement) details.push(`${element.children.length} items`)
+        if (element instanceof HTMLFieldSetElement) details.push(`${element.elements.length} controls`)
+        return details.length ? details.join(" ") : undefined
+      }
+      const cssPath = (element: Element): string => {
+        const id = element.getAttribute("id")
+        if (id) {
+          const candidate = `#${CSS.escape(id)}`
+          if (document.querySelectorAll(candidate).length === 1) return candidate
+        }
+        for (const attribute of ["data-testid", "data-test", "name", "aria-label", "placeholder"]) {
+          const value = element.getAttribute(attribute)
+          if (value) {
+            const candidate = `[${attribute}="${quote(value)}"]`
+            if (document.querySelectorAll(candidate).length === 1) return candidate
+          }
+        }
+        const parent = element.parentElement
+        if (!parent) return element.tagName.toLowerCase()
+        const siblings = Array.from(parent.children).filter((sibling) => sibling.tagName === element.tagName)
+        return `${cssPath(parent)} > ${element.tagName.toLowerCase()}:nth-of-type(${siblings.indexOf(element) + 1})`
+      }
+      const headingDepth = (element: Element): number => {
+        const ownLevel = /^H([1-6])$/.exec(element.tagName)?.[1]
+        if (ownLevel) return Number(ownLevel) - 1
+        const headings = Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6, [role='heading']"))
+        let level = 0
+        for (const heading of headings) {
+          if (heading === element || (heading.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING) === 0) continue
+          const candidate = /^H([1-6])$/.exec(heading.tagName)?.[1]
+          level = candidate ? Number(candidate) : Number(heading.getAttribute("aria-level") ?? 1)
+        }
+        return level
+      }
+
+      const structuralSelector = "fieldset, [role='group'], dialog, [role='dialog'], [role='tablist'], details, table, [role='table'], tr, [role='row'], ul, ol, [role='list'], li, [role='listitem'], pre"
+      const structuralKeys = new WeakMap<Element, string>()
+      let nextStructuralKey = 1
+      const structuralKey = (element: Element): string => {
+        const existing = structuralKeys.get(element)
+        if (existing) return existing
+        const key = `s${nextStructuralKey++}`
+        structuralKeys.set(element, key)
+        return key
+      }
+      const structuralParentKeys = (element: Element): string[] => {
+        const keys: string[] = []
+        let parent = element.parentElement
+        while (parent && parent !== root) {
+          if (parent.matches(structuralSelector)) keys.push(structuralKey(parent))
+          parent = parent.parentElement
+        }
+        return keys
+      }
+      const primaryLinks = new WeakMap<Element, Element | null>()
+      const isPrimaryLink = (element: Element): boolean => {
+        const group = element.closest("article, li, tr, [role='listitem'], [role='row']")
+        if (!group || !root.contains(group)) return false
+        if (!primaryLinks.has(group)) {
+          const links = Array.from(group.querySelectorAll("a[href]")).filter(isVisible)
+          let primary: Element | null = null
+          let primaryScore = -1
+          for (const link of links) {
+            const name = accessibleName(link)
+            const score = name.length + (link.closest("h1, h2, h3, h4, h5, h6, [role='heading']") ? 1_000 : 0)
+            if (score > primaryScore) {
+              primary = link
+              primaryScore = score
+            }
+          }
+          primaryLinks.set(group, primary)
+        }
+        if (primaryLinks.get(group) !== element) return false
+        if (group.matches("tr, [role='row']")) {
+          const groupTextLength = safeText(group).length
+          return groupTextLength > 0 && accessibleName(element).length / groupTextLength >= 0.32
+        }
+        return true
+      }
+      const priorityFor = (options: { readonly role: string; readonly interactive: boolean; readonly primaryLink: boolean; readonly structuralEssential: boolean }): number => {
+        if (options.role === "alert" || options.role === "status" || options.role === "navigation" || options.structuralEssential) return -1
+        if (options.role === "heading") return 0
+        if (options.role === "link" && options.primaryLink) return 0
+        if (options.interactive && (options.role !== "link" || options.primaryLink)) return 1
+        if (options.role === "link") return 3
+        return 2
+      }
+
+      const entries: BrowserEntry[] = []
+      let truncated = false
+      const add = (entry: BrowserEntry): void => {
+        if (entry.depth > settings.depth) return
+        if (entries.length >= settings.maxCandidates) {
+          truncated = true
+          return
+        }
+        entries.push(entry)
+      }
+      const candidateSelector = [
+        "h1", "h2", "h3", "h4", "h5", "h6", "[role='heading']",
+        "nav", "[role='navigation']", "[role='alert']", "[role='status']", "p",
+        structuralSelector,
+        "a[href]", "button", "input", "textarea", "select", "summary",
+        "[role='button']", "[role='link']", "[role='tab']", "[role='menuitem']", "[contenteditable]",
+      ].join(",")
+      const candidates = [
+        ...(root.matches(candidateSelector) ? [root] : []),
+        ...Array.from(root.querySelectorAll(candidateSelector)),
+      ]
+      const collapsedNavigation = new Set<Element>()
+
+      for (const element of candidates) {
+        if (entries.length >= settings.maxCandidates) {
+          truncated = true
+          break
+        }
+        if (!isVisible(element)) continue
+        const navigation = element.closest("nav, [role='navigation']")
+        if (settings.compact && navigation && navigation !== root) {
+          if (!collapsedNavigation.has(navigation)) {
+            collapsedNavigation.add(navigation)
+            const count = navigation.querySelectorAll("a[href], button").length
+            add({ depth: headingDepth(navigation), role: "navigation", name: truncate(labelledName(navigation), 100) || "Navigation", details: `${count} controls`, priority: 0 })
+          }
+          continue
+        }
+        const role = roleFor(element)
+        const isHeading = role === "heading"
+        const isInteractive = element.matches("a[href], button, input, textarea, select, summary, [role='button'], [role='link'], [role='tab'], [role='menuitem'], [contenteditable]")
+        const isSafetyText = role === "alert" || role === "status"
+        const isParagraph = element.matches("p")
+        const isStructural = element.matches(structuralSelector)
+        if (!isHeading && !isInteractive && !isSafetyText && !isStructural && (settings.interactive || !isParagraph)) continue
+        if (settings.interactive && isParagraph && !isSafetyText) continue
+        const identityName = isStructural ? structuralName(element, role) : accessibleName(element)
+        const fallbackName = role === "group" ? "Group"
+          : role === "dialog" ? "Dialog"
+          : role === "table" ? "Table"
+          : role === "list" ? "List"
+          : role === "tablist" ? "Tab list"
+          : isInteractive ? element.getAttribute("name") || role
+          : ""
+        const name = truncate(identityName || fallbackName, isParagraph || isSafetyText || isStructural ? 180 : 120)
+        if (!name) continue
+        const details = isHeading ? `level=${headingDepth(element) + 1}` : detailsFor(element)
+        const primaryLink = role === "link" && isPrimaryLink(element)
+        const baseDepth = headingDepth(element)
+        const parentKeys = structuralParentKeys(element)
+        add({
+          depth: baseDepth + parentKeys.length,
+          baseDepth,
+          ...(isStructural ? { key: structuralKey(element) } : {}),
+          ...(parentKeys.length > 0 ? { parentKeys } : {}),
+          role,
+          name,
+          ...(isInteractive ? { identityName } : {}),
+          ...(isInteractive ? { selector: cssPath(element) } : {}),
+          ...(details ? { details } : {}),
+          priority: priorityFor({
+            role,
+            interactive: isInteractive,
+            primaryLink,
+            structuralEssential: isStructural && role !== "row" && role !== "listitem",
+          }),
+        })
+      }
+      const selected = entries
+        .map((entry, index) => ({ entry, index }))
+        .sort((left, right) => left.entry.priority - right.entry.priority || left.index - right.index)
+        .slice(0, settings.maxItems)
+        .sort((left, right) => left.index - right.index)
+        .map(({ entry }) => entry)
+      return { entries: selected, truncated: truncated || selected.length < entries.length }
+    }
+    const timeoutMs = options.timeout ?? defaultSnapshotTimeoutMs
+    let result: Awaited<ReturnType<typeof capture>>
+    if (locator) {
+      result = await locator.evaluate(capture, settings, { timeout: timeoutMs })
+    } else {
+      try {
+        result = await Effect.runPromise(runPlaywrightOperation({
+          label: "Compact snapshot",
+          timeoutMs,
+          run: () => page.evaluate(capture, settings),
+        }))
+      } catch (error) {
+        if (typeof within !== "string" || !/not a valid selector|querySelectorAll/i.test(error instanceof Error ? error.message : String(error))) {
+          throw error
+        }
+        result = await page.locator(within).evaluate(capture, { ...settings, rootSelector: undefined }, { timeout: timeoutMs })
+      }
+    }
+
+    if (navigatedDuringCapture) {
+      removeNavigationListener()
+      delete registry.removeNavigationListener
+      throw new Error("Page navigated while snapshot() was capturing; call snapshot() again")
+    }
+    registry.page = page
+    registry.url = page.url()
+    registry.selectors.clear()
+    let nextRef = 1
+    const structuralEntries = new Map(result.entries.flatMap((entry) => entry.key ? [[entry.key, entry] as const] : []))
+    const resolvedDepths = new Map<SnapshotEntry, number>()
+    const resolvedDepth = (entry: SnapshotEntry): number => {
+      const cached = resolvedDepths.get(entry)
+      if (cached !== undefined) return cached
+      const parent = entry.parentKeys?.map((key) => structuralEntries.get(key)).find((candidate) => candidate !== undefined)
+      const depth = parent ? resolvedDepth(parent) + 1 : entry.baseDepth ?? entry.depth
+      resolvedDepths.set(entry, depth)
+      return depth
+    }
+    const minimumDepth = result.entries.reduce((minimum, entry) => Math.min(minimum, resolvedDepth(entry)), Number.POSITIVE_INFINITY)
+    const depthOffset = Number.isFinite(minimumDepth) ? minimumDepth : 0
+    const lines = result.entries.map((entry) => {
+      const id = entry.selector ? `e${nextRef++}` : undefined
+      if (id && entry.selector) registry.selectors.set(id, {
+        selector: entry.selector,
+        role: entry.role,
+        ...(entry.identityName ? { name: entry.identityName } : {}),
+      })
+      const name = entry.name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
+      const suffix = [id ? `ref=${id}` : undefined, entry.details].filter(Boolean).join(" ")
+      return `${"  ".repeat(Math.max(0, resolvedDepth(entry) - depthOffset))}- ${entry.role} "${name}"${suffix ? ` [${suffix}]` : ""}`
+    })
+    if (result.truncated) lines.push(`- ... truncated after ${maxItems} items`)
+    return lines.join("\n")
+  }
+
+  const ref: SnapshotRefHelper = (id) => {
+    const normalized = id.startsWith("@") ? id.slice(1) : id
+    if (registry.page !== page || registry.url !== page.url()) {
+      throw new Error("Snapshot refs are stale after a page change; call snapshot() again")
+    }
+    const snapshotRef = registry.selectors.get(normalized)
+    if (!snapshotRef) {
+      throw new Error(`Unknown snapshot ref: ${id}; call snapshot() to get current refs`)
+    }
+    const locator = page.locator(snapshotRef.selector)
+    const role = snapshotRefAriaRole(snapshotRef.role)
+    const resolved = role
+      ? locator.and(page.getByRole(role, snapshotRef.name ? { name: snapshotRef.name, exact: true } : undefined))
+      : locator
+    refRoots.set(resolved, snapshotRef)
+    return resolved
+  }
+
+  return { snapshot, ref }
+}
+
+function snapshotRefAriaRole(role: string): Parameters<Page["getByRole"]>[0] | undefined {
+  switch (role) {
+    case "button":
+    case "checkbox":
+    case "combobox":
+    case "link":
+    case "menuitem":
+    case "radio":
+    case "tab":
+    case "textbox":
+      return role
+    default:
+      return undefined
   }
 }
 
@@ -840,16 +1409,124 @@ async function hideScreenshotLabels(page: Page): Promise<void> {
 }
 
 const maxTrackedNavigations = 25
+export const maxCapturedPageLogs = 50
+export const maxCapturedScriptLogs = 100
+
+type ExecuteLogCaptureSnapshot = {
+  readonly logs: readonly ExecuteLogEntry[]
+  readonly summary: ExecuteLogSummary
+  readonly consoleErrorCount: number
+  readonly pageErrorCount: number
+}
+
+export function createExecuteLogCapture(limits: {
+  readonly page?: number
+  readonly script?: number
+} = {}): {
+  readonly add: (entry: ExecuteLogEntry) => void
+  readonly snapshot: () => ExecuteLogCaptureSnapshot
+} {
+  const pageLimit = limits.page ?? maxCapturedPageLogs
+  const scriptLimit = limits.script ?? maxCapturedScriptLogs
+  const logs: ExecuteLogEntry[] = []
+  const pageEntryIndexes = new Map<string, number>()
+  let pageEntries = 0
+  let scriptEntries = 0
+  let totalCount = 0
+  let repeatedCount = 0
+  let omittedCount = 0
+  let consoleErrorCount = 0
+  let pageErrorCount = 0
+
+  const add = (entry: ExecuteLogEntry): void => {
+    totalCount += 1
+    if (entry.type === "error") {
+      consoleErrorCount += 1
+    } else if (entry.type === "pageerror") {
+      pageErrorCount += 1
+    }
+
+    if (entry.source === "page") {
+      const key = pageLogKey(entry)
+      const existingIndex = pageEntryIndexes.get(key)
+      if (existingIndex !== undefined) {
+        const existing = logs[existingIndex]
+        if (existing) {
+          logs[existingIndex] = { ...existing, repeatCount: (existing.repeatCount ?? 0) + 1 }
+          repeatedCount += 1
+          return
+        }
+      }
+      if (pageEntries >= pageLimit) {
+        omittedCount += 1
+        return
+      }
+      pageEntryIndexes.set(key, logs.length)
+      pageEntries += 1
+      logs.push(entry)
+      return
+    }
+
+    if (scriptEntries >= scriptLimit) {
+      omittedCount += 1
+      return
+    }
+    scriptEntries += 1
+    logs.push(entry)
+  }
+
+  return {
+    add,
+    snapshot: () => ({
+      logs: [...logs],
+      summary: {
+        totalCount,
+        returnedCount: logs.length,
+        repeatedCount,
+        omittedCount,
+      },
+      consoleErrorCount,
+      pageErrorCount,
+    }),
+  }
+}
+
+function pageLogKey(entry: ExecuteLogEntry): string {
+  return JSON.stringify([
+    entry.type,
+    entry.text,
+    entry.location?.url ?? null,
+    entry.location?.lineNumber ?? null,
+    entry.location?.columnNumber ?? null,
+  ])
+}
+
+function emptyExecuteLogSummary(): ExecuteLogSummary {
+  return {
+    totalCount: 0,
+    returnedCount: 0,
+    repeatedCount: 0,
+    omittedCount: 0,
+  }
+}
+
+function formatLogCompactionWarning(summary: ExecuteLogSummary): string | undefined {
+  if (summary.repeatedCount === 0 && summary.omittedCount === 0) {
+    return undefined
+  }
+  return `Captured ${summary.totalCount} console/page events: returned ${summary.returnedCount}, folded ${summary.repeatedCount} repeated page entries, and omitted ${summary.omittedCount} after limits (page=${maxCapturedPageLogs}, script=${maxCapturedScriptLogs}). Aftermath error counts include all events.`
+}
 
 async function runUserCode({ code, globals }: { readonly code: string; readonly globals: SandboxGlobals }): Promise<{
   readonly result: unknown
   readonly logs: readonly ExecuteLogEntry[]
+  readonly logSummary: ExecuteLogSummary
   readonly aftermath: ExecuteAftermath
 }> {
-  const logs: ExecuteLogEntry[] = []
+  const logCapture = createExecuteLogCapture()
   const navigations: string[] = []
   const onConsole = (message: ConsoleMessage) => {
-    logs.push({
+    logCapture.add({
       source: "page",
       type: message.type(),
       text: message.text(),
@@ -857,7 +1534,7 @@ async function runUserCode({ code, globals }: { readonly code: string; readonly 
     })
   }
   const onPageError = (error: Error) => {
-    logs.push({
+    logCapture.add({
       source: "page",
       type: "pageerror",
       text: error.stack ?? error.message,
@@ -869,20 +1546,25 @@ async function runUserCode({ code, globals }: { readonly code: string; readonly 
     }
     navigations.push(frame.url())
   }
-  const sandboxConsole = createSandboxConsole({ logs })
+  const sandboxConsole = createSandboxConsole({ addLog: logCapture.add })
   const startUrl = safePageUrl(globals.page)
   globals.page.on("console", onConsole)
   globals.page.on("pageerror", onPageError)
   globals.page.on("framenavigated", onFrameNavigated)
-  const buildAftermath = (): ExecuteAftermath => {
+  const buildResultMetadata = () => {
+    const captured = logCapture.snapshot()
     return {
-      startUrl,
-      endUrl: safePageUrl(globals.page),
-      navigations,
-      consoleErrorCount: logs.filter((log) => log.type === "error").length,
-      pageErrorCount: logs.filter((log) => log.type === "pageerror").length,
-      handoffs: globals.handoffTracker.count,
-    }
+      logs: captured.logs,
+      logSummary: captured.summary,
+      aftermath: {
+        startUrl,
+        endUrl: safePageUrl(globals.page),
+        navigations,
+        consoleErrorCount: captured.consoleErrorCount,
+        pageErrorCount: captured.pageErrorCount,
+        handoffs: globals.handoffTracker.count,
+      },
+    } satisfies { readonly logs: readonly ExecuteLogEntry[]; readonly logSummary: ExecuteLogSummary; readonly aftermath: ExecuteAftermath }
   }
   const AsyncFunction = async function () {}.constructor as new (...args: string[]) => (...args: unknown[]) => Promise<unknown>
   const fn = new AsyncFunction(
@@ -896,6 +1578,8 @@ async function runUserCode({ code, globals }: { readonly code: string; readonly 
     "fillInputs",
     "screenshotWithLabels",
     "ariaSnapshot",
+    "snapshot",
+    "ref",
     "showGhostCursor",
     "hideGhostCursor",
     "ghostCursor",
@@ -914,15 +1598,18 @@ async function runUserCode({ code, globals }: { readonly code: string; readonly 
       globals.fillInputs,
       globals.screenshotWithLabels,
       globals.ariaSnapshot,
+      globals.snapshot,
+      globals.ref,
       globals.showGhostCursor,
       globals.hideGhostCursor,
       globals.ghostCursor,
       globals.handoff,
     )
-    return { result, logs, aftermath: buildAftermath() }
+    return { result, ...buildResultMetadata() }
   } catch (cause) {
     const error = cause instanceof Error ? cause : new Error("execute sandbox code", { cause })
-    throw new ExecuteCodeError(error, logs, buildAftermath())
+    const metadata = buildResultMetadata()
+    throw new ExecuteCodeError(error, metadata.logs, metadata.logSummary, metadata.aftermath)
   } finally {
     globals.page.off("console", onConsole)
     globals.page.off("pageerror", onPageError)
@@ -938,9 +1625,9 @@ function safePageUrl(page: Page): string | null {
   }
 }
 
-function createSandboxConsole(options: { readonly logs: ExecuteLogEntry[] }): Pick<Console, "debug" | "error" | "info" | "log" | "warn"> {
+function createSandboxConsole(options: { readonly addLog: (entry: ExecuteLogEntry) => void }): Pick<Console, "debug" | "error" | "info" | "log" | "warn"> {
   const capture = (type: ExecuteLogEntry["type"], values: readonly unknown[]) => {
-    options.logs.push({
+    options.addLog({
       source: "script",
       type,
       text: values.map(formatLogValue).join(" "),

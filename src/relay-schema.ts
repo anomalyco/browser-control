@@ -76,9 +76,19 @@ export const ExecuteLogEntry = Schema.Struct({
   type: Schema.String,
   text: Schema.String,
   location: Schema.optionalKey(ExecuteLogLocation),
+  repeatCount: Schema.optionalKey(Schema.Number),
 })
 
 export interface ExecuteLogEntry extends Schema.Schema.Type<typeof ExecuteLogEntry> {}
+
+export const ExecuteLogSummary = Schema.Struct({
+  totalCount: Schema.Number,
+  returnedCount: Schema.Number,
+  repeatedCount: Schema.Number,
+  omittedCount: Schema.Number,
+})
+
+export interface ExecuteLogSummary extends Schema.Schema.Type<typeof ExecuteLogSummary> {}
 
 /**
  * What changed in the browser during one execute call: URL movement, main
@@ -107,7 +117,9 @@ export const ExecuteResponse = Schema.Struct({
   value: Schema.optionalKey(Schema.Unknown),
   isError: Schema.Boolean,
   logs: Schema.Array(ExecuteLogEntry),
+  logSummary: Schema.optionalKey(ExecuteLogSummary),
   warnings: Schema.optionalKey(Schema.Array(Schema.String)),
+  diagnostic: Schema.optionalKey(Schema.String),
   aftermath: Schema.optionalKey(ExecuteAftermath),
   session: ExecuteSessionSummary,
 })
@@ -143,6 +155,7 @@ export interface ExtensionStatus extends Schema.Schema.Type<typeof ExtensionStat
 
 export const RelayVersion = Schema.Struct({
   version: Schema.String,
+  buildId: Schema.optionalKey(Schema.String),
 })
 
 export interface RelayVersion extends Schema.Schema.Type<typeof RelayVersion> {}

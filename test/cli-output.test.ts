@@ -59,6 +59,15 @@ describe("executeJsonEnvelope", () => {
     expect(envelope.value).toBeNull()
     expect(envelope.valueUnavailable).toBe(false)
   })
+
+  it("preserves a bounded execution-context diagnostic", () => {
+    const envelope = executeJsonEnvelope(executeResponse({
+      isError: true,
+      diagnostic: "execution-context/context-destroyed; pageClosed=false; urlChanged=true; mainFrameNavigations=1",
+    }))
+
+    expect(envelope.diagnostic).toContain("context-destroyed")
+  })
 })
 
 describe("recreated session notice", () => {

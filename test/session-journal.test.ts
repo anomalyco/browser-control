@@ -78,11 +78,13 @@ describe("session-journal", () => {
       endUrl: "https://b.test/",
       navigations: ["https://b.test/"],
       warnings: ["page recreated"],
+      diagnostic: "execution-context/context-destroyed; pageClosed=false; urlChanged=true; mainFrameNavigations=1",
       handoffs: 1,
     })
     expect(full.navigations).toEqual(["https://b.test/"])
     expect(full.handoffs).toBe(1)
     expect(full.warnings).toEqual(["page recreated"])
+    expect(full.diagnostic).toContain("context-destroyed")
   })
 
   it("truncates long code and result previews", () => {
@@ -94,10 +96,12 @@ describe("session-journal", () => {
       durationMs: 1,
       resultText: long,
       logCount: 0,
+      diagnostic: long,
     })
     expect(entry.code.length).toBeLessThan(2_100)
     expect(entry.code).toContain("[truncated")
     expect(entry.resultPreview.length).toBeLessThan(500)
+    expect(entry.diagnostic?.length).toBeLessThan(300)
     expect(truncateForJournal("short", 100)).toBe("short")
   })
 
@@ -113,12 +117,14 @@ describe("session-journal", () => {
       endUrl: "https://example.com/",
       navigations: ["https://example.com/"],
       handoffs: 1,
+      diagnostic: "execution-context/context-missing; pageClosed=false; urlChanged=false; mainFrameNavigations=0",
     })
     const line = formatJournalEntry(entry)
     expect(line).toContain("ok")
     expect(line).toContain("1234ms")
     expect(line).toContain("https://example.com/")
     expect(line).toContain("handoffs=1")
+    expect(line).toContain("diagnostic=execution-context/context-missing")
     expect(line).toContain("await page.goto")
   })
 

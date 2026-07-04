@@ -1,61 +1,109 @@
 import { describe, expect, it } from "vitest"
-import { HandoffRegistry } from "../src/handoff.ts"
+import { HandoffRegistry, resolveExactHandoffTarget, toolbarClickAction } from "../src/handoff.ts"
+
+function registryWithIds(...ids: string[]): HandoffRegistry {
+  return new HandoffRegistry(() => ids.shift() ?? "unexpected-id")
+}
 
 describe("HandoffRegistry", () => {
-  it("resolves a pending handoff for its session", async () => {
-    const registry = new HandoffRegistry()
-    const outcome = registry.wait({ sessionId: "alpha", message: "do the 2fa", timeoutMs: 5_000 })
-    expect(registry.pendingCount).toBe(1)
-    expect(registry.pendingMessage("alpha")).toBe("do the 2fa")
-    expect(registry.resolveForSession("alpha")).toBe(true)
-    await expect(outcome).resolves.toBe("resolved")
+  it("resolves only a matching handoff id and tab", async () => {
+    const registry = registryWithIds("handoff-1")
+    const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7", message: "do the 2fa", timeoutMs: 5_000 })
+
+    expect(registry.pendingForSession("alpha")).toEqual({
+      id: "handoff-1",
+      sessionId: "alpha",
+      tabId: 7,
+      targetId: "target-7",
+      targetSessionId: "bc-tab-7",
+      message: "do the 2fa",
+    })
+    expect(registry.complete({ id: "handoff-1", tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7" })).toBe(true)
+    await expect(wait.outcome).resolves.toBe("resolved")
     expect(registry.pendingCount).toBe(0)
   })
 
-  it("does not resolve other sessions", () => {
-    const registry = new HandoffRegistry()
-    void registry.wait({ sessionId: "alpha", message: "m", timeoutMs: 5_000 })
-    expect(registry.resolveForSession("beta")).toBe(false)
+  it("ignores mismatched ids and tabs", async () => {
+    const registry = registryWithIds("handoff-1")
+    const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7", message: "m", timeoutMs: 5_000 })
+
+    expect(registry.complete({ id: "other", tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7" })).toBe(false)
+    expect(registry.complete({ id: "handoff-1", tabId: 8, targetId: "target-7", targetSessionId: "bc-tab-7" })).toBe(false)
+    expect(registry.complete({ id: "handoff-1", tabId: 7, targetId: "replacement", targetSessionId: "bc-tab-7" })).toBe(false)
+    expect(registry.complete({ id: "handoff-1", tabId: 7, targetId: "target-7", targetSessionId: "replacement-session" })).toBe(false)
+    expect(registry.pendingForTab(7)?.id).toBe("handoff-1")
+
     registry.cancelAll()
+    await expect(wait.outcome).resolves.toBe("timeout")
   })
 
-  it("times out when nobody clicks", async () => {
-    const registry = new HandoffRegistry()
-    const outcome = registry.wait({ sessionId: "alpha", message: "m", timeoutMs: 10 })
-    await expect(outcome).resolves.toBe("timeout")
-    expect(registry.pendingCount).toBe(0)
+  it("does not let a stale id resolve a replacement wait", async () => {
+    const registry = registryWithIds("handoff-1", "handoff-2")
+    const first = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7", message: "one", timeoutMs: 5_000 })
+    const second = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7", message: "two", timeoutMs: 5_000 })
+
+    await expect(first.outcome).resolves.toBe("timeout")
+    expect(registry.complete({ id: first.id, tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7" })).toBe(false)
+    expect(registry.pendingForSession("alpha")?.id).toBe(second.id)
+    expect(registry.complete({ id: second.id, tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7" })).toBe(true)
+    await expect(second.outcome).resolves.toBe("resolved")
   })
 
-  it("resolveIfSingle resolves only when exactly one handoff is pending", async () => {
-    const registry = new HandoffRegistry()
-    expect(registry.resolveIfSingle()).toBe(false)
-    const first = registry.wait({ sessionId: "alpha", message: "m", timeoutMs: 5_000 })
-    const second = registry.wait({ sessionId: "beta", message: "m", timeoutMs: 5_000 })
-    expect(registry.resolveIfSingle()).toBe(false)
-    registry.cancelAll()
-    await expect(first).resolves.toBe("timeout")
-    await expect(second).resolves.toBe("timeout")
-    const third = registry.wait({ sessionId: "gamma", message: "m", timeoutMs: 5_000 })
-    expect(registry.resolveIfSingle()).toBe(true)
-    await expect(third).resolves.toBe("resolved")
-  })
+  it("times out and clears the pending descriptor", async () => {
+    const registry = registryWithIds("handoff-1")
+    const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7", message: "m", timeoutMs: 10 })
 
-  it("a second wait for the same session times out the first", async () => {
-    const registry = new HandoffRegistry()
-    const first = registry.wait({ sessionId: "alpha", message: "one", timeoutMs: 5_000 })
-    const second = registry.wait({ sessionId: "alpha", message: "two", timeoutMs: 5_000 })
-    await expect(first).resolves.toBe("timeout")
-    expect(registry.resolveForSession("alpha")).toBe(true)
-    await expect(second).resolves.toBe("resolved")
+    await expect(wait.outcome).resolves.toBe("timeout")
+    expect(registry.pendingForSession("alpha")).toBeUndefined()
+    expect(registry.pendingForTab(7)).toBeUndefined()
   })
 
   it("cancelAll times out every waiter", async () => {
-    const registry = new HandoffRegistry()
-    const one = registry.wait({ sessionId: "a", message: "m", timeoutMs: 5_000 })
-    const two = registry.wait({ sessionId: "b", message: "m", timeoutMs: 5_000 })
+    const registry = registryWithIds("handoff-1", "handoff-2")
+    const one = registry.wait({ sessionId: "a", tabId: 1, targetId: "target-1", targetSessionId: "bc-tab-1", message: "m", timeoutMs: 5_000 })
+    const two = registry.wait({ sessionId: "b", tabId: 2, targetId: "target-2", targetSessionId: "bc-tab-2", message: "m", timeoutMs: 5_000 })
+
     registry.cancelAll()
-    await expect(one).resolves.toBe("timeout")
-    await expect(two).resolves.toBe("timeout")
+    await expect(one.outcome).resolves.toBe("timeout")
+    await expect(two.outcome).resolves.toBe("timeout")
     expect(registry.pendingCount).toBe(0)
+  })
+})
+
+describe("resolveExactHandoffTarget", () => {
+  it("binds by stable target id regardless of page order or navigation", () => {
+    const target = {
+      tabId: 7,
+      sessionId: "bc-tab-7",
+      targetInfo: { targetId: "target-7", url: "https://example.com/after-navigation" },
+    }
+    const other = {
+      tabId: 8,
+      sessionId: "bc-tab-8",
+      targetInfo: { targetId: "target-8", url: "https://example.com/before-navigation" },
+    }
+
+    expect(resolveExactHandoffTarget({
+      targetId: "target-7",
+      targets: [other, target],
+      isVisible: () => true,
+    })).toBe(target)
+  })
+
+  it("rejects detached and invisible targets without falling back", () => {
+    const target = { tabId: 7, sessionId: "bc-tab-7", targetInfo: { targetId: "target-7" } }
+    expect(() => resolveExactHandoffTarget({ targetId: "missing", targets: [target], isVisible: () => true })).toThrow("detached or is no longer visible")
+    expect(() => resolveExactHandoffTarget({ targetId: "target-7", targets: [target], isVisible: () => false })).toThrow("detached or is no longer visible")
+  })
+})
+
+describe("toolbarClickAction", () => {
+  it("ignores toolbar clicks while a handoff is pending instead of completing or detaching", () => {
+    expect(toolbarClickAction({ handoffPending: true, sessionExecuting: true })).toBe("ignore")
+  })
+
+  it("ignores any executing tab and otherwise preserves the attach toggle", () => {
+    expect(toolbarClickAction({ handoffPending: false, sessionExecuting: true })).toBe("ignore")
+    expect(toolbarClickAction({ handoffPending: false, sessionExecuting: false })).toBe("toggle")
   })
 })

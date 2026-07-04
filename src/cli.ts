@@ -135,6 +135,7 @@ type ExecuteJsonEnvelope = {
   readonly error?: { readonly _tag: string; readonly message: string }
   readonly logs: readonly ExecuteLogEntry[]
   readonly warnings: readonly string[]
+  readonly diagnostic?: string
   readonly aftermath?: ExecuteAftermath
   readonly session?: ExecuteResponse["session"]
 }
@@ -150,6 +151,7 @@ export function executeJsonEnvelope(result: ExecuteResponse): ExecuteJsonEnvelop
     ...(result.isError ? { error: { _tag: "ScriptError", message: result.text } } : {}),
     logs: result.logs,
     warnings: result.warnings ?? [],
+    ...(result.diagnostic ? { diagnostic: result.diagnostic } : {}),
     ...(result.aftermath ? { aftermath: result.aftermath } : {}),
     session: result.session,
   }
@@ -205,7 +207,7 @@ const execute = Command.make(
     session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Use this Browser Control session id")),
     targetUrl: Flag.string("target-url").pipe(Flag.optional, Flag.withDescription("Use the attached page whose URL contains this text")),
     targetIndex: Flag.integer("target-index").pipe(Flag.optional, Flag.withDescription("Use the attached page at this zero-based index")),
-    json: Flag.boolean("json").pipe(Flag.withDescription("Print a machine-readable result envelope: { ok, isError, text, value, valueUnavailable, error?, logs, warnings, aftermath, session }")),
+    json: Flag.boolean("json").pipe(Flag.withDescription("Print a machine-readable result envelope: { ok, isError, text, value, valueUnavailable, error?, logs, warnings, diagnostic?, aftermath, session }")),
   },
   Effect.fn("Cli.execute")(function* ({ code, file, session, targetUrl, targetIndex, json }) {
     const run = Effect.gen(function* () {
@@ -269,6 +271,9 @@ const execute = Command.make(
       yield* print(formatExecuteLogs(result.logs))
     }
     yield* Effect.forEach(result.warnings ?? [], (warning) => print(`Warning: ${warning}`))
+    if (result.diagnostic) {
+      yield* print(`Diagnostic: ${result.diagnostic}`)
+    }
     const aftermath = result.aftermath ? formatAftermath(result.aftermath) : null
     if (aftermath) {
       yield* print(aftermath)

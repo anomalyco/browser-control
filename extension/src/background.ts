@@ -7,10 +7,11 @@ import type {
   OffscreenStopRecordingResult,
 } from "./recording-types.ts"
 import { isBrowserControlGroupTitle, shouldUngroupBrowserControlTab, tabGroupColor, tabGroupTitle } from "./tab-groups.ts"
+import { pageStatusFromJson } from "./page-status.ts"
 
 const relayHost = "127.0.0.1"
 const relayPort = 19989
-const shimVersion = "0.0.8"
+const shimVersion = "0.0.10"
 const offscreenDocumentPath = "offscreen.html"
 
 let socket: WebSocket | undefined
@@ -68,6 +69,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
       ...(sourceSession.sessionId === undefined ? {} : { sessionId: sourceSession.sessionId }),
     },
   })
+  void sendPageStatusMessage(source.tabId, { action: "page-status.clear" })
   void guardedUngroupBrowserControlTab(source.tabId)
 })
 
@@ -77,8 +79,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   sendMessage({ method: "tabs.removed", params: { tabId } })
 })
 
-chrome.runtime.onMessage.addListener((message: unknown) => {
-  handleRuntimeMessage(message)
+chrome.runtime.onMessage.addListener((message: unknown, sender) => {
+  handleRuntimeMessage(message, sender)
   return false
 })
 
@@ -238,6 +240,20 @@ async function handleCommand(command: ShimCommand): Promise<JsonObject> {
     if (title !== undefined) {
       await chrome.action.setTitle({ tabId, title })
     }
+    return {}
+  }
+  if (command.method === "pageStatus.set") {
+    const tabId = numberParam(command.params, "tabId")
+    const status = pageStatusFromJson(objectParam(command.params, "status"))
+    if (!status) {
+      throw new Error("Invalid page status")
+    }
+    await sendPageStatusMessage(tabId, { action: "page-status.set", status })
+    return {}
+  }
+  if (command.method === "pageStatus.clear") {
+    const tabId = numberParam(command.params, "tabId")
+    await sendPageStatusMessage(tabId, { action: "page-status.clear" })
     return {}
   }
   if (command.method === "runtime.reload") {
@@ -446,8 +462,21 @@ async function isTabDebuggerAttached(tabId: number): Promise<boolean> {
   return targets.some((target) => target.attached && target.tabId === tabId)
 }
 
-function handleRuntimeMessage(message: unknown): void {
+function handleRuntimeMessage(message: unknown, sender: chrome.runtime.MessageSender): void {
   if (!message || typeof message !== "object" || Array.isArray(message)) {
+    return
+  }
+  const pageStatusMessage = message as { readonly action?: unknown; readonly handoffId?: unknown }
+  if (pageStatusMessage.action === "page-status.ready") {
+    if (typeof sender.tab?.id === "number") {
+      sendMessage({ method: "pageStatus.requested", params: { tabId: sender.tab.id } })
+    }
+    return
+  }
+  if (pageStatusMessage.action === "handoff.complete") {
+    if (typeof sender.tab?.id === "number" && typeof pageStatusMessage.handoffId === "string") {
+      sendMessage({ method: "handoff.completed", params: { tabId: sender.tab.id, handoffId: pageStatusMessage.handoffId } })
+    }
     return
   }
   const offscreenMessage = message as OffscreenOutgoingMessage
@@ -465,6 +494,15 @@ function handleRuntimeMessage(message: unknown): void {
   if (offscreenMessage.action === "recording.cancelled") {
     activeRecordings.delete(offscreenMessage.tabId)
     sendMessage({ method: "recording.cancelled", params: { tabId: offscreenMessage.tabId } })
+  }
+}
+
+async function sendPageStatusMessage(tabId: number, message: JsonObject): Promise<void> {
+  try {
+    await chrome.tabs.sendMessage(tabId, message)
+  } catch {
+    // Restricted pages do not accept content scripts. Visibility is best-effort
+    // and must never interfere with debugger attachment or detachment.
   }
 }
 

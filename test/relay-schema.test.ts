@@ -6,6 +6,7 @@ import {
   ExtensionStatus,
   RecordingStartResponse,
   RecordingStatusResponse,
+  RelayVersion,
   SessionAdoptRequest,
   SessionAdoptResponse,
   SessionContainer,
@@ -27,6 +28,7 @@ const decodeExtensionStatus = Schema.decodeUnknownSync(ExtensionStatus)
 const decodeTargets = Schema.decodeUnknownSync(TargetSummaries)
 const decodeRecordingStart = Schema.decodeUnknownSync(RecordingStartResponse)
 const decodeRecordingStatus = Schema.decodeUnknownSync(RecordingStatusResponse)
+const decodeRelayVersion = Schema.decodeUnknownSync(RelayVersion)
 
 const session = {
   id: "rapid-otter-633",
@@ -79,6 +81,7 @@ describe("relay-schema", () => {
       isError: false,
       logs: [],
       warnings: ["The session default page was closed; created a new page."],
+      diagnostic: "execution-context/context-destroyed; pageClosed=false; urlChanged=true; mainFrameNavigations=1",
       aftermath: {
         startUrl: "about:blank",
         endUrl: "https://example.com/",
@@ -90,6 +93,7 @@ describe("relay-schema", () => {
       session,
     })
     expect(decoded.warnings).toHaveLength(1)
+    expect(decoded.diagnostic).toContain("context-destroyed")
     expect(decoded.aftermath?.endUrl).toBe("https://example.com/")
     expect(decoded.aftermath?.handoffs).toBe(2)
   })
@@ -121,12 +125,15 @@ describe("relay-schema", () => {
       isError: false,
       logs: [
         { source: "script", type: "log", text: "hello" },
-        { source: "page", type: "error", text: "boom", location: { url: "https://example.com", lineNumber: 1, columnNumber: 2 } },
+        { source: "page", type: "error", text: "boom", location: { url: "https://example.com", lineNumber: 1, columnNumber: 2 }, repeatCount: 3 },
       ],
+      logSummary: { totalCount: 5, returnedCount: 2, repeatedCount: 3, omittedCount: 0 },
       session,
     })
     expect(decoded.logs).toHaveLength(2)
     expect(decoded.logs[1]?.location?.lineNumber).toBe(1)
+    expect(decoded.logs[1]?.repeatCount).toBe(3)
+    expect(decoded.logSummary?.totalCount).toBe(5)
   })
 
   it("rejects an execute log with an unknown source", () => {
@@ -154,6 +161,11 @@ describe("relay-schema", () => {
     })
     expect(full.childTargets).toBe(1)
     expect(full.sessions).toHaveLength(1)
+  })
+
+  it("decodes relay versions from current and older builds", () => {
+    expect(decodeRelayVersion({ version: "0.1.0", buildId: "2026-07-04T02:00:00.000Z" }).buildId).toBe("2026-07-04T02:00:00.000Z")
+    expect(decodeRelayVersion({ version: "0.1.0" }).buildId).toBeUndefined()
   })
 
   it("decodes target summaries", () => {
