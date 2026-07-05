@@ -46,7 +46,7 @@ export function pageStatusView(status: PageStatus): PageStatusView {
     tone: status.state === "waiting" ? "waiting" : status.state === "attached" || status.readOnly ? "active" : "running",
     ...(status.state === "waiting" && status.message ? { message: status.message } : {}),
     ...(status.state === "waiting" && status.handoffId
-      ? { completion: { handoffId: status.handoffId, label: "I'm done, continue" } }
+      ? { completion: { handoffId: status.handoffId, label: "Continue" } }
       : {}),
   }
 }

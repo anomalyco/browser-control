@@ -44,7 +44,7 @@ bun link          # installs `browser-control` and `browser-control-mcp` globall
 3. Click **Load unpacked** and select the repo's `extension/dist` directory.
 4. Pin the Browser Control toolbar button.
 
-The current extension shim version is `0.0.11`; reload the unpacked extension
+The current extension shim version is `0.0.15`; reload the unpacked extension
 after rebuilding when its source changes.
 
 ### 3. Run it
@@ -111,8 +111,8 @@ browser-control journal -s demo
 browser-control session delete demo
 ```
 
-A visible tab opens in your browser, grouped under a purple `bc · demo` tab
-group. The toolbar badge shows `ON` when attached, `RUN` while a mutable session
+A visible tab opens in your browser with a subtle in-page status. The toolbar
+badge shows `ON` when attached, `RUN` while a mutable session
 executes, and `WAIT` when a script is paused for human handoff. Read-only
 execution stays quietly `ON`.
 

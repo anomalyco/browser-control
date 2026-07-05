@@ -745,8 +745,8 @@ return await snapshot({ interactive: true })
     name: "handoff-navigation",
     run: Effect.fnUntraced(function* (page) {
       const extension = yield* fetchStatus()
-      if (extension.version !== "0.0.11") {
-        return yield* Effect.fail(new Error(`handoff-navigation requires the built 0.0.11 shim; connected extension is ${extension.version ?? "unknown"}`))
+      if (extension.version !== "0.0.15") {
+        return yield* Effect.fail(new Error(`handoff-navigation requires the built 0.0.15 shim; connected extension is ${extension.version ?? "unknown"}`))
       }
       const marker = `bc-handoff-${Date.now()}`
       const smokeSession = `${marker}-session`
@@ -789,8 +789,8 @@ return await snapshot({ interactive: true })
     name: "handoff-cross-tab",
     run: Effect.fnUntraced(function* (page) {
       const extension = yield* fetchStatus()
-      if (extension.version !== "0.0.11") {
-        return yield* Effect.fail(new Error(`handoff-cross-tab requires the built 0.0.11 shim; connected extension is ${extension.version ?? "unknown"}`))
+      if (extension.version !== "0.0.15") {
+        return yield* Effect.fail(new Error(`handoff-cross-tab requires the built 0.0.15 shim; connected extension is ${extension.version ?? "unknown"}`))
       }
       const marker = `bc-handoff-a-${Date.now()}`
       const peerMarker = `bc-handoff-b-${Date.now()}`

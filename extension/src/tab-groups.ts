@@ -27,9 +27,6 @@ export function compactBrowserControlGroupTitle(title: string): string {
   return `${compactSessionTabGroupTitlePrefix}${label.slice(0, prefixLength)}…${label.slice(-suffixLength)}`
 }
 
-export function shouldUngroupBrowserControlTab(options: {
-  readonly groupTitle: string | undefined
-  readonly isDebuggerAttached: boolean
-}): boolean {
-  return isBrowserControlGroupTitle(options.groupTitle) && !options.isDebuggerAttached
+export function shouldUngroupBrowserControlTab(groupTitle: string | undefined): boolean {
+  return isBrowserControlGroupTitle(groupTitle)
 }

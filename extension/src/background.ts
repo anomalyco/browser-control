@@ -6,12 +6,12 @@ import type {
   OffscreenStatusRecordingResult,
   OffscreenStopRecordingResult,
 } from "./recording-types.ts"
-import { compactBrowserControlGroupTitle, isBrowserControlGroupTitle, shouldUngroupBrowserControlTab, tabGroupColor, tabGroupTitle } from "./tab-groups.ts"
+import { isBrowserControlGroupTitle, shouldUngroupBrowserControlTab } from "./tab-groups.ts"
 import { pageStatusFromJson } from "./page-status.ts"
 
 const relayHost = "127.0.0.1"
 const relayPort = 19989
-const shimVersion = "0.0.11"
+const shimVersion = "0.0.15"
 const offscreenDocumentPath = "offscreen.html"
 
 let socket: WebSocket | undefined
@@ -150,15 +150,13 @@ function announceHelloAndAttachedTabs(): void {
 }
 
 async function reannounceAttachedTabsAndReconcileGroups(): Promise<void> {
-  const attachedTabIds = new Set<number>()
   const targets = await chrome.debugger.getTargets()
   for (const target of targets) {
     if (target.attached && typeof target.tabId === "number") {
-      attachedTabIds.add(target.tabId)
       sendMessage({ method: "debugger.attached", params: { tabId: target.tabId } })
     }
   }
-  await reconcileBrowserControlGroups(attachedTabIds)
+  await reconcileBrowserControlGroups()
 }
 
 async function handleSocketMessage(data: unknown): Promise<void> {
@@ -217,10 +215,8 @@ async function handleCommand(command: ShimCommand): Promise<JsonObject> {
   }
   if (command.method === "tabs.group") {
     const tabId = numberParam(command.params, "tabId")
-    const title = compactBrowserControlGroupTitle(optionalStringParam(command.params, "title") ?? tabGroupTitle)
-    const groupId = await chrome.tabs.group({ tabIds: [tabId] })
-    await chrome.tabGroups.update(groupId, { title, color: tabGroupColor })
-    return { groupId }
+    await guardedUngroupBrowserControlTab(tabId)
+    return {}
   }
   if (command.method === "action.setAttached") {
     const tabId = numberParam(command.params, "tabId")
@@ -397,11 +393,10 @@ async function getTabCaptureStreamId(tabId: number): Promise<string> {
   }
 }
 
-async function reconcileBrowserControlGroups(knownAttachedTabIds?: ReadonlySet<number>): Promise<void> {
+async function reconcileBrowserControlGroups(): Promise<void> {
   if (!chrome.tabGroups) {
     return
   }
-  const attachedTabIds = knownAttachedTabIds ?? await getAttachedTabIds()
   const groups = await chrome.tabGroups.query({})
   for (const group of groups) {
     if (!isBrowserControlGroupTitle(group.title)) {
@@ -410,12 +405,6 @@ async function reconcileBrowserControlGroups(knownAttachedTabIds?: ReadonlySet<n
     const tabs = await chrome.tabs.query({ groupId: group.id })
     for (const tab of tabs) {
       if (typeof tab.id !== "number") {
-        continue
-      }
-      if (attachedTabIds.has(tab.id)) {
-        continue
-      }
-      if (await isTabDebuggerAttached(tab.id)) {
         continue
       }
       await guardedUngroupBrowserControlTab(tab.id)
@@ -434,8 +423,7 @@ async function guardedUngroupBrowserControlTab(tabId: number): Promise<void> {
       const group = await chrome.tabGroups.get(tab.groupId)
       groupTitle = group.title
     }
-    const isDebuggerAttached = await isTabDebuggerAttached(tabId)
-    if (!shouldUngroupBrowserControlTab({ groupTitle, isDebuggerAttached })) {
+    if (!shouldUngroupBrowserControlTab(groupTitle)) {
       return
     }
     await chrome.tabs.ungroup(tabId)
@@ -444,22 +432,6 @@ async function guardedUngroupBrowserControlTab(tabId: number): Promise<void> {
     // the browser. Ungrouping is best-effort because stale groups are reconciled
     // again on service-worker startup and relay reconnect.
   }
-}
-
-async function getAttachedTabIds(): Promise<Set<number>> {
-  const attachedTabIds = new Set<number>()
-  const targets = await chrome.debugger.getTargets()
-  for (const target of targets) {
-    if (target.attached && typeof target.tabId === "number") {
-      attachedTabIds.add(target.tabId)
-    }
-  }
-  return attachedTabIds
-}
-
-async function isTabDebuggerAttached(tabId: number): Promise<boolean> {
-  const targets = await chrome.debugger.getTargets()
-  return targets.some((target) => target.attached && target.tabId === tabId)
 }
 
 function handleRuntimeMessage(message: unknown, sender: chrome.runtime.MessageSender): void {

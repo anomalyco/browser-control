@@ -31,18 +31,18 @@ describe("isBrowserControlGroupTitle", () => {
 
 describe("shouldUngroupBrowserControlTab", () => {
   it("ungroups detached tabs in Browser Control groups", () => {
-    expect(shouldUngroupBrowserControlTab({ groupTitle: "browser-control", isDebuggerAttached: false })).toBe(true)
-    expect(shouldUngroupBrowserControlTab({ groupTitle: "bc:cosmic-otter-866", isDebuggerAttached: false })).toBe(true)
-    expect(shouldUngroupBrowserControlTab({ groupTitle: "bc · cos-ott-866", isDebuggerAttached: false })).toBe(true)
+    expect(shouldUngroupBrowserControlTab("browser-control")).toBe(true)
+    expect(shouldUngroupBrowserControlTab("bc:cosmic-otter-866")).toBe(true)
+    expect(shouldUngroupBrowserControlTab("bc · cos-ott-866")).toBe(true)
   })
 
-  it("keeps still-attached Browser Control tabs grouped", () => {
-    expect(shouldUngroupBrowserControlTab({ groupTitle: "browser-control", isDebuggerAttached: true })).toBe(false)
-    expect(shouldUngroupBrowserControlTab({ groupTitle: "bc:cosmic-otter-866", isDebuggerAttached: true })).toBe(false)
+  it("ungroups still-attached tabs from legacy Browser Control groups", () => {
+    expect(shouldUngroupBrowserControlTab("browser-control")).toBe(true)
+    expect(shouldUngroupBrowserControlTab("bc:cosmic-otter-866")).toBe(true)
   })
 
   it("ignores non-Browser Control groups even when detached", () => {
-    expect(shouldUngroupBrowserControlTab({ groupTitle: "reading-list", isDebuggerAttached: false })).toBe(false)
-    expect(shouldUngroupBrowserControlTab({ groupTitle: undefined, isDebuggerAttached: false })).toBe(false)
+    expect(shouldUngroupBrowserControlTab("reading-list")).toBe(false)
+    expect(shouldUngroupBrowserControlTab(undefined)).toBe(false)
   })
 })

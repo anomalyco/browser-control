@@ -51,11 +51,6 @@ The browser extension action surface used to attach, detach, and display status
 for the active tab.
 _Avoid_: Side panel, chat panel
 
-**Attached-Tab Group**:
-A visible browser tab group containing tabs currently attached to Browser
-Control.
-_Avoid_: Workspace, ownership boundary
-
 **Execute Sandbox**:
 A persistent trusted JavaScript environment where an agent runs browser
 automation code.

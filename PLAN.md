@@ -61,10 +61,9 @@ Agent / MCP client / CLI
 - **Minimal extension UI**: v1 uses the extension toolbar action for
   attach/detach plus a subtle in-page status and handoff control. It does not
   include a side panel.
-- **Visible attached-tab group**: attached tabs are grouped in the browser so
-  the user can see which tabs agents may control.
-- **Purple tab group**: v1 uses a purple `browser-control` tab group so
-  attached tabs are visually distinct from ordinary tab groups.
+- **Single presence surface**: the subtle in-page status is the persistent
+  indicator that Browser Control is attached; it does not claim tabs with
+  browser tab groups.
 - **Best-effort stock CDP only**: v1 does not add custom raw-CDP helpers; agents
   may use whatever stock `playwright-core` exposes.
 - **Name**: use `browser-control` for the product, repository, CLI command, and
@@ -182,8 +181,7 @@ Expected v1 support:
   debugging replay issues.
 - Show active-tab attach/detach through the extension toolbar action and keep a
   subtle in-page indicator for attached/running/waiting state.
-- Add attached tabs to a visible `browser-control` tab group and remove tabs
-  from it when they detach.
+- Remove legacy Browser Control tab groups; the in-page status is sufficient.
 
 ## First Milestone
 
@@ -202,12 +200,10 @@ Prove the smallest end-to-end path before adding product polish:
 Current status:
 
 - Relay starts at `http://127.0.0.1:19989`.
-- Extension shim `0.0.11` connects without websocket reconnect storms, reports
+- Extension shim `0.0.15` connects without websocket reconnect storms, reports
   its version in relay status, and re-announces attached tabs after reconnect so
-  a restarted relay recovers the attached-tab pool. It removes tabs from purple
-  groups when their debugger attachment ends and reconciles stale groups on
-  startup/reconnect. Session group labels are compact while full ids remain in
-  diagnostics and accessibility text.
+  a restarted relay recovers the attached-tab pool. It removes legacy Browser
+  Control groups on startup/reconnect and does not group attached tabs.
 - `browser-control session adopt --target-url/--target-index` makes a
   user-attached tab the session's sticky default page; adopted tabs are
   released, never closed, by session reset/delete. Execute warns with an adopt
@@ -403,8 +399,8 @@ Shipped:
    recreated, relay reconnect) are delivered with the call that caused them.
    Dialog capture was deliberately skipped: a passive `page.on("dialog")`
    listener would suppress Playwright's auto-dismiss and hang pages.
-3. **Visible session identity** (shipped): session-owned tabs use compact
-   `bc · <session>` groups while full ids remain in diagnostics; the badge shows
+3. **Visible session identity** (shipped): full ids remain in diagnostics while
+   the subtle in-page status and toolbar badge show presence; the badge shows
    `RUN` (amber) while mutable sessions execute, stays quietly `ON` for read-only
    work, and shows `WAIT` (blue) while a handoff is pending. A toolbar
    click during execution never detaches the tab, including a user-owned tab

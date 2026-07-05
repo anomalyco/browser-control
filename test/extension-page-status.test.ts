@@ -39,7 +39,7 @@ describe("pageStatusView", () => {
       message: "Complete 2FA",
       completion: {
         handoffId: "handoff-1",
-        label: "I'm done, continue",
+        label: "Continue",
       },
     })
   })

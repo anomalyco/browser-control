@@ -466,7 +466,7 @@ language changes, update `CONTEXT.md` too.
 - Extension changes not taking effect: rebuild `extension/dist` and reload the
   unpacked extension once.
 - Repeated `hello` messages or in-flight RPC timeouts: check for duplicate shim
-  websocket reconnects. The current shim version is `0.0.11`.
+  websocket reconnects. The current shim version is `0.0.15`.
 - Relay restarted while tabs were attached: shim `0.0.7`+ re-announces attached
   tabs after reconnecting, so the relay rebuilds its target registry without
   re-clicking the toolbar. If `activeTargets` stays 0 with an older shim,
@@ -475,19 +475,15 @@ language changes, update `CONTEXT.md` too.
   the user probably dismissed the "is being debugged" banner, which detaches
   chrome.debugger from every tab at once. Re-attach via the toolbar (or
   `session adopt` after re-attaching).
-- Purple groups: shim `0.0.8` removes tabs from `browser-control`, legacy `bc:*`,
-  and compact `bc · *` groups
-  when their debugger attachment ends and reconciles stale groups on startup
-  and reconnect, so a purple group means "currently attached". Lingering groups
-  indicate an older shim — reload the unpacked extension.
-- Attached tabs group under a compact purple tab group such as `bc · demo` for
-  session-owned tabs (plain `browser-control` for unadopted user-attached tabs).
-  Full session ids remain in CLI status, journals, and in-page accessibility text. The
-  toolbar badge shows `ON` when attached, `RUN` while a mutable session executes,
+- Legacy groups: shim `0.0.15` removes `browser-control`, `bc:*`, and `bc · *`
+  tab groups on startup and reconnect. Attached tabs are not grouped.
+- Full session ids remain in CLI status, journals, and in-page accessibility
+  text. The toolbar badge shows `ON` when attached, `RUN` while a mutable session executes,
   and `WAIT` while a handoff is pending. Read-only execution stays quietly `ON`.
   Badges beyond `ON` require shim `0.0.6`
   or newer. The explicit in-page handoff completion control and navigation
-  reinjection require shim `0.0.10`; compact group labels require `0.0.11`.
+  reinjection require shim `0.0.10`; cursor-anchored handoff prompts require
+  `0.0.15`.
 - Active targets after an execute run are expected: relay-created tabs persist
   across short-lived CLI calls. Close the visible tab, call `await page.close()`,
   or detach it with the toolbar if you want `/extension/status` to return to zero.

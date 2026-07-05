@@ -338,13 +338,6 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
   }
   function refreshTabPresentation(tabId: number): void {
     refreshPageStatus(tabId)
-    const target = registry.tabTargets.get(tabId)
-    if (!target) return
-    const sessionId = pageStatusSessionId(target)
-    Effect.runPromise(Effect.ignore(sendToExtension({
-      method: "tabs.group",
-      params: { tabId, ...(sessionId ? { title: `bc:${sessionId}` } : {}) },
-    }))).catch(() => {})
   }
   const httpServer = http.createServer(createHttpRequestHandler({
     host,
@@ -583,12 +576,15 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       const handoffId = typeof message.params?.handoffId === "string" ? message.params.handoffId : undefined
       const target = tabId ? registry.tabTargets.get(tabId) : undefined
       if (target && handoffId) {
-        handoffs.complete({
+        const completed = handoffs.complete({
           id: handoffId,
           tabId: target.tabId,
           targetId: target.targetInfo.targetId,
           targetSessionId: target.sessionId,
         })
+        if (completed) {
+          refreshPageStatus(target.tabId)
+        }
       }
       return
     }
@@ -1135,10 +1131,6 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
         flatten: true,
       },
     })
-    yield* Effect.ignore(sendToExtension({
-      method: "tabs.group",
-      params: { tabId, ...(options.browserControlSessionId ? { title: `bc:${options.browserControlSessionId}` } : {}) },
-    }))
     yield* Effect.ignore(sendToExtension({ method: "action.setAttached", params: { tabId, attached: true } }))
     sendPageStatus(target, options.browserControlSessionId && sessions.isExecuting(options.browserControlSessionId) ? "running" : "attached")
     announceAttachedTarget(target)
