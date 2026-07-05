@@ -6,6 +6,7 @@ import {
   createSnapshotHelpers,
   defaultAriaSnapshotTimeoutMs,
   pageTargetId,
+  runUserCode,
 } from "../src/execute.ts"
 
 describe("execute log capture", () => {
@@ -60,6 +61,47 @@ describe("execute log capture", () => {
     })
     expect(result.consoleErrorCount).toBe(6)
     expect(result.pageErrorCount).toBe(2)
+  })
+
+  it("folds routine policy and blocked analytics chatter without folding application errors", () => {
+    const capture = createExecuteLogCapture()
+
+    capture.add({ source: "page", type: "warning", text: "Permissions-Policy header warning: camera", location: { url: "https://example.com/a", lineNumber: 1, columnNumber: 1 } })
+    capture.add({ source: "page", type: "warning", text: "Permissions-Policy header warning: microphone", location: { url: "https://example.com/b", lineNumber: 2, columnNumber: 1 } })
+    capture.add({ source: "page", type: "error", text: "Failed to load resource: net::ERR_BLOCKED_BY_CLIENT", location: { url: "https://www.google-analytics.com/g/collect", lineNumber: 0, columnNumber: 0 } })
+    capture.add({ source: "page", type: "error", text: "Failed to load resource: net::ERR_BLOCKED_BY_CLIENT", location: { url: "https://www.googletagmanager.com/gtm.js", lineNumber: 0, columnNumber: 0 } })
+    capture.add({ source: "page", type: "error", text: "Failed to load resource: net::ERR_BLOCKED_BY_CLIENT", location: { url: "https://example.com/app.js", lineNumber: 0, columnNumber: 0 } })
+    capture.add({ source: "page", type: "warning", text: "Application permissions-policy configuration is invalid", location: { url: "https://example.com/app.js", lineNumber: 10, columnNumber: 2 } })
+
+    const result = capture.snapshot()
+    expect(result.logs).toHaveLength(4)
+    expect(result.logs[0]).toMatchObject({ repeatCount: 1 })
+    expect(result.logs[1]).toMatchObject({ repeatCount: 1 })
+    expect(result.logs[2]).toMatchObject({ location: { url: "https://example.com/app.js" } })
+    expect(result.logs[3]).toMatchObject({ text: "Application permissions-policy configuration is invalid" })
+    expect(result.summary).toEqual({ totalCount: 6, returnedCount: 4, repeatedCount: 2, omittedCount: 0 })
+    expect(result.consoleErrorCount).toBe(3)
+  })
+})
+
+describe("user code execution", () => {
+  it("classifies syntax errors as user-code failures and removes page listeners", async () => {
+    const page = {
+      isClosed: vi.fn(() => false),
+      url: vi.fn(() => "https://example.com"),
+      on: vi.fn(),
+      off: vi.fn(),
+      mainFrame: vi.fn(() => ({})),
+    }
+
+    await expect(runUserCode({ code: "const = ]", globals: { page, handoffTracker: { count: 0 } } as never })).rejects.toMatchObject({
+      name: "SyntaxError",
+      aftermath: {
+        startUrl: "https://example.com",
+        endUrl: "https://example.com",
+      },
+    })
+    expect(page.off).toHaveBeenCalledTimes(3)
   })
 })
 

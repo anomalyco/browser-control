@@ -85,6 +85,25 @@ describe("BrowserControlSessions", () => {
     expect(sandbox.closes()).toBe(1)
   })
 
+  it("keeps an implicitly created session after a user-code failure", async () => {
+    const sandbox = makeFakeSandbox()
+    sandbox.execute = () => Effect.succeed({
+      text: "SyntaxError: Unexpected token",
+      isError: true,
+      logs: [],
+      logSummary: { totalCount: 0, returnedCount: 0, repeatedCount: 0, omittedCount: 0 },
+      warnings: [],
+    })
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox)
+
+    const result = await Effect.runPromise(sessions.execute({ code: "const = ]", createIfMissing: true }))
+
+    expect(result.result.isError).toBe(true)
+    expect(result.session.created).toBe(true)
+    expect(sessions.listSummaries().map((session) => session.id)).toEqual([result.session.id])
+    expect(sandbox.closes()).toBe(0)
+  })
+
   it("creates, lists, and deletes sessions", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {

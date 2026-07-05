@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
   generateSessionId,
+  getTargetInfo,
   isRestrictedTarget,
   optionalSessionId,
   parseTargetSelection,
@@ -109,10 +110,16 @@ describe("isRestrictedTarget", () => {
     ...overrides,
   })
 
-  it("allows normal pages and iframes", () => {
+  it("allows normal pages, iframes, and dedicated workers", () => {
     expect(isRestrictedTarget(target({}))).toBe(false)
     expect(isRestrictedTarget(target({ type: "iframe" }))).toBe(false)
+    expect(isRestrictedTarget(target({ type: "worker" }))).toBe(false)
     expect(isRestrictedTarget(target({ url: "" }))).toBe(false)
+  })
+
+  it("parses dedicated workers but leaves service workers unsupported", () => {
+    expect(getTargetInfo({ ...target({}), type: "worker" })?.type).toBe("worker")
+    expect(getTargetInfo({ ...target({}), type: "service_worker" })).toBeUndefined()
   })
 
   it("blocks browser-internal targets", () => {

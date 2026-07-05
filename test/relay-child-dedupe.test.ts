@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest"
 import { startRelay } from "../src/relay.ts"
 import type { CdpEvent, JsonObject, TargetInfo } from "../src/protocol.ts"
 
-function targetInfo(targetId: string, type: "page" | "iframe" = "page"): TargetInfo {
+function targetInfo(targetId: string, type: TargetInfo["type"] = "page"): TargetInfo {
   return { targetId, type, title: targetId, url: "https://example.com/", attached: true, canAccessOpener: false }
 }
 
@@ -40,7 +40,7 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 describe("relay child target announce dedupe", () => {
-  it("resumes unsupported child targets without exposing them to Playwright", async () => {
+  it("suppresses service workers while preserving dedicated worker routing", async () => {
     const port = await freePort()
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       yield* startRelay({ port })
@@ -55,7 +55,7 @@ describe("relay child target announce dedupe", () => {
             : {}
           extension.send(JSON.stringify({ id: command.id, result }))
         })
-        extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.10" } }))
+        extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.11" } }))
         extension.send(JSON.stringify({ method: "toolbar.clicked", params: { tabId: 1 } }))
         await waitFor(() => extensionCommands.some((command) => command.method === "action.setAttached"))
 
@@ -98,6 +98,59 @@ describe("relay child target announce dedupe", () => {
             message.method === "Target.attachedToTarget" &&
             message.params?.sessionId === "service-worker-session"
         })).toBe(false)
+
+        extension.send(JSON.stringify({
+          method: "debugger.event",
+          params: {
+            tabId: 1,
+            method: "Target.targetCreated",
+            params: {
+              targetInfo: {
+                targetId: "service-worker-created-target",
+                type: "service_worker",
+                title: "Service Worker",
+                url: "https://example.com/created-service-worker.js",
+                attached: false,
+                canAccessOpener: false,
+              },
+            },
+          },
+        }))
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        expect(messages.some((message) => {
+          const targetInfo = "method" in message && message.method === "Target.targetCreated" ? message.params?.targetInfo : undefined
+          return targetInfo && typeof targetInfo === "object" && !Array.isArray(targetInfo) && targetInfo.targetId === "service-worker-created-target"
+        })).toBe(false)
+
+        extension.send(JSON.stringify({
+          method: "debugger.event",
+          params: {
+            tabId: 1,
+            method: "Target.attachedToTarget",
+            params: {
+              sessionId: "worker-session",
+              targetInfo: targetInfo("worker-target", "worker"),
+              waitingForDebugger: true,
+            },
+          },
+        }))
+        await waitFor(() => messages.some((message) => {
+          return "method" in message &&
+            message.method === "Target.attachedToTarget" &&
+            message.params?.sessionId === "worker-session"
+        }))
+        expect(extensionCommands.some((command) => {
+          return command.method === "debugger.sendCommand" &&
+            command.params?.method === "Runtime.runIfWaitingForDebugger" &&
+            command.params?.sessionId === "worker-session"
+        })).toBe(false)
+
+        client.send(JSON.stringify({ id: 2, sessionId: "worker-session", method: "Runtime.runIfWaitingForDebugger", params: {} }))
+        await waitFor(() => extensionCommands.some((command) => {
+          return command.method === "debugger.sendCommand" &&
+            command.params?.method === "Runtime.runIfWaitingForDebugger" &&
+            command.params?.sessionId === "worker-session"
+        }))
 
         client.close()
         extension.close()

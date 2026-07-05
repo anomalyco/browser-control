@@ -73,6 +73,9 @@ local Node relay.
   (URL movement, navigations, error counts, handoffs). Do not add a passive
   `page.on("dialog")` listener for aftermath: it would suppress Playwright's
   dialog auto-dismiss and hang pages.
+- Allowed Playwright mouse actions automatically reveal a spring-animated arrow cursor;
+  explicit helpers can keep it visible or disable it for the current document.
+  Read-only input is rejected before cursor mirroring.
 - Compact `snapshot()` refs are scoped to the session's latest snapshot and
   rejected after main-frame navigation. Their locators combine structural and
   accessible identity so sibling drift fails closed. Snapshot budgets reserve
@@ -114,9 +117,9 @@ local Node relay.
 - Root page targets must be stored before applying `Target.setAutoAttach`, because
   Chrome can emit child/OOPIF attach events immediately and the relay needs the
   root target to route and store them.
-- `Target.setAutoAttach` also reports unsupported children such as service
-  workers. If they start paused, resume them directly and suppress them from
-  Playwright; exposing an unroutable child session can hang its parent navigation.
+- `Target.setAutoAttach` forwards dedicated `worker` targets to Playwright, but
+  resumes and suppresses unsupported children such as page-scoped service
+  workers. Exposing an unroutable paused child can hang its parent navigation.
 - OOPIF reconnect depends on replaying stored child target attaches plus the
   current child frame navigation on the child session for stock Playwright.
 - Relay shutdown should await HTTP and websocket close callbacks so scoped tests
@@ -136,7 +139,7 @@ local Node relay.
 - Extension shim changes require reloading the unpacked extension once in Brave.
 - Relay-only changes should not require reloading the extension.
 - Use `termctrl` for long-running relay sessions during testing.
-- Run `SMOKE_CASE=local-forms,local-cart,local-checkout,reconnect-evaluate,redirect-reconnect-evaluate,execute-target-url,execute-fill-helpers,execute-snapshot-refs,handoff-navigation,handoff-cross-tab,oopif-reconnect,session-isolation,multi-client,stale-client-checkout,raw-first-checkout pnpm smoke`
+- Run `SMOKE_CASE=local-forms,local-cart,local-checkout,reconnect-evaluate,redirect-reconnect-evaluate,execute-target-url,execute-fill-helpers,execute-snapshot-refs,handoff-navigation,handoff-cross-tab,oopif-reconnect,dedicated-worker,execute-ghost-cursor,session-isolation,multi-client,stale-client-checkout,raw-first-checkout pnpm smoke`
   before claiming the current smoke set is green.
 - CDP target visibility is scoped per client (`src/cdp-visibility.ts`):
   session-owned tabs are announced and their events delivered only to that
@@ -159,8 +162,8 @@ browser-control status
 browser-control session new
 browser-control session new inspect --read-only
 browser-control session list
-browser-control execute "return { url: page.url(), title: await page.title() }"
-browser-control execute --json "page.url()"
+browser-control execute 'return { url: page.url(), title: await page.title() }'
+browser-control execute --json 'page.url()'
 browser-control journal
 browser-control skill
 ```
@@ -169,7 +172,7 @@ browser-control skill
 
 - Load `extension/dist` as the unpacked extension.
 - The relay listens on `127.0.0.1:19989` by default.
-- Current shim version is `0.0.10`.
+- Current shim version is `0.0.11`.
 - On socket open the shim sends `hello` and then re-announces every tab it still
   has `chrome.debugger` attached to (`debugger.attached` events), so a restarted
   relay rebuilds its target registry without the user re-clicking the toolbar.
@@ -181,7 +184,9 @@ browser-control skill
 - The relay installs scoped `uncaughtException`/`unhandledRejection` guards for
   its lifetime; in-process playwright event dispatch errors are logged, not
   fatal.
-- The attached tab group should use the purple `browser-control` group. The
+- The attached tab group should use the purple `browser-control` group or a
+  compact `bc · <session>` label. The
   shim ungroups tabs when their debugger attachment ends (including the user
   dismissing the "being debugged" banner, which detaches all tabs) and
-  reconciles stale `browser-control`/`bc:*` groups on startup and reconnect.
+  reconciles stale `browser-control`, legacy `bc:*`, and compact `bc · *` groups
+  on startup and reconnect.

@@ -15,7 +15,7 @@ agent.
 
 ```bash
 browser-control --help
-browser-control execute "return { url: page.url(), title: await page.title() }"
+browser-control execute 'return { url: page.url(), title: await page.title() }'
 ```
 
 Relay-backed commands start a detached relay when needed and wait briefly for
@@ -67,7 +67,7 @@ Browser Control toolbar button on that tab, then select it while creating a new
 session or adopt it for sticky reuse:
 
 ```bash
-browser-control execute --target-url example.com "return page.url()"
+browser-control execute --target-url example.com 'return page.url()'
 browser-control session adopt --target-url example.com
 ```
 
@@ -75,14 +75,14 @@ browser-control session adopt --target-url example.com
 
 ```bash
 # Creates a fresh session and prints its id.
-browser-control execute "return { url: page.url(), title: await page.title() }"
+browser-control execute 'return { url: page.url(), title: await page.title() }'
 # Continue only with that returned id.
-browser-control execute --session cosmic-otter-866 "page.url()"
+browser-control execute --session cosmic-otter-866 'page.url()'
 browser-control execute --session cosmic-otter-866 --file ./script.js
 browser-control session new amazon
-browser-control execute --session amazon "await page.goto('https://www.amazon.com')"
-browser-control execute --target-url example.com "return page.url()"
-browser-control execute --target-index 0 "return page.url()"
+browser-control execute --session amazon 'await page.goto("https://www.amazon.com")'
+browser-control execute --target-url example.com 'return page.url()'
+browser-control execute --target-index 0 'return page.url()'
 ```
 
 Use `page`, `context`, `browser`, relay-backed persistent `state`, and `fillInput`
@@ -121,7 +121,10 @@ or a stable element before entering data or continuing.
 Single-expression snippets such as `page.url()` and `await page.title()` return
 their value automatically; multi-statement scripts still require `return` for a
 value. Use `browser-control execute --file <path>` for longer scripts instead of
-embedding code in the shell. Do not pass both positional code and `--file`.
+embedding code in the shell. Prefer single-quoted shell arguments with
+double-quoted JavaScript strings so `$`, backticks, and `!` are not expanded by
+the shell. If the script itself needs shell single quotes, use `--file`. Do not
+pass both positional code and `--file`.
 Execute responses include structured per-call script/page console logs and page
 errors; human CLI output prints the returned value first, then logs, then any
 warnings and a one-line aftermath summary when the page URL changed or the call
@@ -130,7 +133,7 @@ navigated, hit page errors, or paused for handoffs.
 Use `browser-control execute --json` when you want to branch on the result: it
 prints `{ ok, isError, text, value, valueUnavailable, error?: { _tag, message },
 logs, warnings, diagnostic?, aftermath, session }`. `value` is the structured JSON result of
-the script (jq-able: `execute --json "({a: 1})" | jq .value.a` prints `1`);
+the script (jq-able: `execute --json '({a: 1})' | jq .value.a` prints `1`);
 `text` is the human-formatted rendering. `value` carries plain data only: objects,
 arrays, and primitives round-trip; `Map` becomes a plain object, `Set` an
 array, bigints strings. Class instances (Playwright `Page`, `Locator`, ...)
@@ -138,7 +141,10 @@ and results whose JSON exceeds 32KB are withheld: `value` is `null` and
 `valueUnavailable` is `true` — fall back to `text`.
 `aftermath` reports `startUrl`, `endUrl`, main-frame `navigations`,
 `consoleErrorCount`, `pageErrorCount`, and `handoffs` for that one call.
-Warnings are delivered with the call that caused them, for example when the
+Recurring permissions-policy warnings and blocked analytics resources are folded
+into representative log entries, while application errors stay distinct and
+aftermath error counts continue to include every event. Warnings are delivered
+with the call that caused them, for example when the
 session default page was closed and recreated. Failed execution-context calls
 also carry a short fixed diagnostic classification with page/navigation counts;
 it never includes evaluation arguments or results.
@@ -157,7 +163,7 @@ screenshot but not click or type:
 
 ```bash
 browser-control session new inspect-prod --read-only
-browser-control execute -s inspect-prod "await page.goto('https://example.com'); return await page.title()"
+browser-control execute -s inspect-prod 'await page.goto("https://example.com"); return await page.title()'
 ```
 
 In a read-only session, Playwright actions like `locator.click()` keep retrying
@@ -236,21 +242,24 @@ This is useful when installed browser extensions, such as password managers,
 interfere with Playwright's focus/fill machinery. It sets the value and dispatches
 `input` and `change` events; it is only for `input` and `textarea` locators.
 
-The ghost cursor is off by default. To show the small cosmetic overlay during
-visible actions, call it after navigation and before those actions. The relay
-mirrors `Input.dispatchMouseEvent` move/press/release commands while it is shown:
+Allowed Playwright mouse actions automatically show a spring-animated arrow cursor that
+fades after idle time. The relay mirrors successful `Input.dispatchMouseEvent`
+move/press/release commands; blocked read-only input never renders the cursor.
+Use the helpers to keep it visible, customize it, or disable it for the current
+document:
 
 ```js
 await page.goto("https://example.com")
-await showGhostCursor()
 await page.mouse.move(100, 120)
 await page.getByRole("button", { name: "Submit" }).click()
+await showGhostCursor({ size: 20 })
 await ghostCursor.hide()
 ```
 
-Use `hideGhostCursor()` or `ghostCursor.hide()` during cleanup if desired.
-Recording does not enable the ghost cursor, and the cursor does not start or
-edit recordings.
+`showGhostCursor()` / `ghostCursor.show()` enters persistent mode.
+`hideGhostCursor()` / `ghostCursor.hide()` disables the cursor until the page's
+next document. Recording does not change cursor mode, and the cursor does not
+start or edit recordings.
 
 ## Recording
 
@@ -308,9 +317,9 @@ Prefer `snapshot()` for the compact read-before-act happy path. It uses the
 page's single `main` region when available, collapses navigation, and spends its
 bounded item budget on alerts, semantic groups, lists, tables, block code,
 headings, primary links, and controls before repeated metadata. It summarizes
-select option counts and assigns refs to controls. Its timeout defaults to 10
-seconds to accommodate a cold first browser evaluation. Text input and textarea
-values are omitted:
+select option counts, pairs table headers with row cell values, and assigns refs
+to controls. Its timeout defaults to 10 seconds to accommodate a cold first
+browser evaluation. Text input and textarea values are omitted:
 
 ```js
 return await snapshot()
@@ -457,7 +466,7 @@ language changes, update `CONTEXT.md` too.
 - Extension changes not taking effect: rebuild `extension/dist` and reload the
   unpacked extension once.
 - Repeated `hello` messages or in-flight RPC timeouts: check for duplicate shim
-  websocket reconnects. The current shim version is `0.0.10`.
+  websocket reconnects. The current shim version is `0.0.11`.
 - Relay restarted while tabs were attached: shim `0.0.7`+ re-announces attached
   tabs after reconnecting, so the relay rebuilds its target registry without
   re-clicking the toolbar. If `activeTargets` stays 0 with an older shim,
@@ -466,16 +475,19 @@ language changes, update `CONTEXT.md` too.
   the user probably dismissed the "is being debugged" banner, which detaches
   chrome.debugger from every tab at once. Re-attach via the toolbar (or
   `session adopt` after re-attaching).
-- Purple groups: shim `0.0.8` removes tabs from `browser-control`/`bc:*` groups
+- Purple groups: shim `0.0.8` removes tabs from `browser-control`, legacy `bc:*`,
+  and compact `bc · *` groups
   when their debugger attachment ends and reconciles stale groups on startup
   and reconnect, so a purple group means "currently attached". Lingering groups
   indicate an older shim — reload the unpacked extension.
-- Attached tabs group under a purple tab group titled `bc:<session-id>` for
-  session-owned tabs (plain `browser-control` for user-attached tabs). The
-  toolbar badge shows `ON` when attached, `RUN` while a script is executing, and
-  `WAIT` while a handoff is pending. Badges beyond `ON` require shim `0.0.6`
+- Attached tabs group under a compact purple tab group such as `bc · demo` for
+  session-owned tabs (plain `browser-control` for unadopted user-attached tabs).
+  Full session ids remain in CLI status, journals, and in-page accessibility text. The
+  toolbar badge shows `ON` when attached, `RUN` while a mutable session executes,
+  and `WAIT` while a handoff is pending. Read-only execution stays quietly `ON`.
+  Badges beyond `ON` require shim `0.0.6`
   or newer. The explicit in-page handoff completion control and navigation
-  reinjection require shim `0.0.10`.
+  reinjection require shim `0.0.10`; compact group labels require `0.0.11`.
 - Active targets after an execute run are expected: relay-created tabs persist
   across short-lived CLI calls. Close the visible tab, call `await page.close()`,
   or detach it with the toolbar if you want `/extension/status` to return to zero.
@@ -485,11 +497,10 @@ language changes, update `CONTEXT.md` too.
   interfering with Playwright's native fill path. Try selector-based
   `fillInput(selector, value)` first, or `fillInput(locator, value)` after
   confirming the locator resolves.
-- Ghost cursor overlay: use `showGhostCursor()`, `hideGhostCursor()`, or
-  `ghostCursor.show/hide` inside execute code. It mirrors visible
-  `Input.dispatchMouseEvent` move/press/release commands while shown. It is off
-  by default; show it after navigation and before visible actions. Recording
-  does not enable it, and it can be hidden during cleanup.
+- Ghost cursor overlay: allowed Playwright mouse actions show it automatically,
+  and it fades when idle. Use `showGhostCursor()`, `hideGhostCursor()`, or
+  `ghostCursor.show/hide` for persistent/customized or disabled behavior.
+  Read-only input is rejected before rendering; recording does not change mode.
 - Closed page during input on real-world React apps: suspect CDP session detach
   handling around `Target.detachFromTarget` / `Input.dispatchKeyEvent`. Reproduce
   with local smoke fixtures before changing unrelated locator code, then compare

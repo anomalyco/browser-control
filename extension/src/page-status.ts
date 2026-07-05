@@ -24,13 +24,13 @@ const stateTitles = {
 } as const
 
 export function pageStatusView(status: PageStatus): PageStatusView {
-  const parts = ["BC", stateLabels[status.state], status.owner === "session" ? "SESSION" : "USER"]
-  if (status.sessionId) {
-    parts.push(status.sessionId)
-  }
-  if (status.readOnly) {
-    parts.push("RO")
-  }
+  const label = status.state === "waiting"
+    ? `BC · ${stateLabels.waiting}`
+    : status.readOnly
+    ? "BC · RO"
+    : status.state === "running"
+    ? `BC · ${stateLabels.running}`
+    : "BC"
 
   const details = [
     stateTitles[status.state],
@@ -41,9 +41,9 @@ export function pageStatusView(status: PageStatus): PageStatusView {
   ].filter((part): part is string => Boolean(part))
 
   return {
-    label: parts.join(" | "),
+    label,
     title: details.join(". "),
-    tone: status.state === "attached" ? "active" : status.state,
+    tone: status.state === "waiting" ? "waiting" : status.state === "attached" || status.readOnly ? "active" : "running",
     ...(status.state === "waiting" && status.message ? { message: status.message } : {}),
     ...(status.state === "waiting" && status.handoffId
       ? { completion: { handoffId: status.handoffId, label: "I'm done, continue" } }

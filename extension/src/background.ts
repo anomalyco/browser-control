@@ -6,12 +6,12 @@ import type {
   OffscreenStatusRecordingResult,
   OffscreenStopRecordingResult,
 } from "./recording-types.ts"
-import { isBrowserControlGroupTitle, shouldUngroupBrowserControlTab, tabGroupColor, tabGroupTitle } from "./tab-groups.ts"
+import { compactBrowserControlGroupTitle, isBrowserControlGroupTitle, shouldUngroupBrowserControlTab, tabGroupColor, tabGroupTitle } from "./tab-groups.ts"
 import { pageStatusFromJson } from "./page-status.ts"
 
 const relayHost = "127.0.0.1"
 const relayPort = 19989
-const shimVersion = "0.0.10"
+const shimVersion = "0.0.11"
 const offscreenDocumentPath = "offscreen.html"
 
 let socket: WebSocket | undefined
@@ -217,7 +217,7 @@ async function handleCommand(command: ShimCommand): Promise<JsonObject> {
   }
   if (command.method === "tabs.group") {
     const tabId = numberParam(command.params, "tabId")
-    const title = optionalStringParam(command.params, "title") ?? tabGroupTitle
+    const title = compactBrowserControlGroupTitle(optionalStringParam(command.params, "title") ?? tabGroupTitle)
     const groupId = await chrome.tabs.group({ tabIds: [tabId] })
     await chrome.tabGroups.update(groupId, { title, color: tabGroupColor })
     return { groupId }

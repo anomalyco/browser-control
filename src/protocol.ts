@@ -28,7 +28,7 @@ export type CdpEvent = {
 
 export type TargetInfo = {
   readonly targetId: string
-  readonly type: "page" | "iframe"
+  readonly type: "page" | "iframe" | "worker"
   readonly title: string
   readonly url: string
   readonly attached: boolean

@@ -3,11 +3,13 @@ import type { WebSocket } from "ws"
 import {
   createClientTargetAnnouncements,
   hasAnnouncedSession,
+  replayChildTargetsForParent,
   sendAttachedToChildTarget,
   sendAttachedToTarget,
 } from "../src/cdp-shims.ts"
 import type { ChildTarget, ConnectedTarget } from "../src/relay-types.ts"
 import type { CdpEvent, TargetInfo } from "../src/protocol.ts"
+import { TargetRegistry } from "../src/target-registry.ts"
 
 function socket(events: CdpEvent[]): WebSocket {
   return {
@@ -80,6 +82,32 @@ describe("sendAttachedToChildTarget", () => {
       sessionId: "bc-tab-1",
       method: "Target.detachedFromTarget",
       params: { sessionId: "child-session-1", targetId: "child-target-1" },
+    })
+  })
+
+  it("replays dedicated workers without synthesizing iframe navigation events", () => {
+    const events: CdpEvent[] = []
+    const client = socket(events)
+    const announcements = new Map([[client, createClientTargetAnnouncements()]])
+    const registry = new TargetRegistry()
+    registry.addChildTarget({
+      ...child("worker-session", "worker-target"),
+      targetInfo: { ...targetInfo("worker-target"), type: "worker", url: "https://example.com/worker.js" },
+      waitingForDebugger: true,
+    })
+
+    replayChildTargetsForParent({
+      socket: client,
+      parentSessionId: "bc-tab-1",
+      registry,
+      clientAnnouncements: announcements,
+    })
+
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
+      sessionId: "bc-tab-1",
+      method: "Target.attachedToTarget",
+      params: { sessionId: "worker-session", waitingForDebugger: true, targetInfo: { type: "worker" } },
     })
   })
 })

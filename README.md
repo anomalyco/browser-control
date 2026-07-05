@@ -44,13 +44,13 @@ bun link          # installs `browser-control` and `browser-control-mcp` globall
 3. Click **Load unpacked** and select the repo's `extension/dist` directory.
 4. Pin the Browser Control toolbar button.
 
-The current extension shim version is `0.0.10`; reload the unpacked extension
+The current extension shim version is `0.0.11`; reload the unpacked extension
 after rebuilding when its source changes.
 
 ### 3. Run it
 
 ```bash
-browser-control execute "await page.goto('https://example.com'); return await page.title()"
+browser-control execute 'await page.goto("https://example.com"); return await page.title()'
 browser-control status
 ```
 
@@ -105,15 +105,16 @@ The skill-driven CLI workflow and MCP expose the same relay sessions.
 
 ```bash
 browser-control session new demo
-browser-control execute -s demo "await page.goto('https://example.com'); return await page.title()"
-browser-control execute -s demo --json "page.url()"
+browser-control execute -s demo 'await page.goto("https://example.com"); return await page.title()'
+browser-control execute -s demo --json 'page.url()'
 browser-control journal -s demo
 browser-control session delete demo
 ```
 
-A visible tab opens in your browser, grouped under a purple `bc:demo` tab
-group. The toolbar badge shows `ON` when attached, `RUN` while a script
-executes, and `WAIT` when a script is paused for human handoff.
+A visible tab opens in your browser, grouped under a purple `bc · demo` tab
+group. The toolbar badge shows `ON` when attached, `RUN` while a mutable session
+executes, and `WAIT` when a script is paused for human handoff. Read-only
+execution stays quietly `ON`.
 
 ## Usage Notes
 
@@ -121,8 +122,8 @@ Execute code receives `browser`, `context`, `page`, persistent session `state`,
 selected Node built-ins, `fillInput(selectorOrLocator, value)`,
 `fillInputs(page, fields)`, `snapshot(options?)`, `ref(id)`,
 `screenshotWithLabels({ page, path })`, `ariaSnapshot(target?, { timeout })`, and
-`handoff(message, { timeoutMs })`, plus opt-in `showGhostCursor()` /
-`hideGhostCursor()` helpers. Bare execute creates a fresh readable session and
+`handoff(message, { timeoutMs })`, plus `showGhostCursor()` /
+`hideGhostCursor()` cursor controls. Bare execute creates a fresh readable session and
 prints `Session: <id>. Continue with --session <id>.` Pass that id through `--session` or
 `BROWSER_CONTROL_SESSION` to reuse its page and `state`; those explicit ids must
 already exist. Each session owns one default page so concurrent agents do not
@@ -134,10 +135,16 @@ screenshot but not click or type.
 
 Single-expression snippets such as `page.url()` or `await page.title()` return
 their value automatically. Longer scripts can be passed with `--file <path>`
-instead of positional code. Each execute response includes console messages,
+instead of positional code. Prefer single-quoted shell arguments with
+double-quoted JavaScript strings so shell expansion cannot corrupt `$`,
+backticks, or `!`; use `--file` when the script itself needs single quotes. Each
+execute response includes console messages,
 page errors, warnings, and an aftermath summary (URL movement, navigations,
 error counts, handoffs); `--json` prints a structured envelope
 (`{ ok, value | error, logs, warnings, aftermath, session }`) for scripting.
+Repeated permissions-policy warnings and blocked analytics resources are folded
+into representative entries; application errors remain distinct, and aftermath
+error counts still include every event.
 
 Prefer normal Playwright actions; use `fillInput` only when installed
 extensions in the user's browser make login/password-field `locator.fill()`
@@ -148,7 +155,7 @@ Use `screenshotWithLabels` with an absolute path to save a screenshot annotated
 with simple `e1`, `e2`, ... DOM labels for visible likely-interactive elements:
 
 ```bash
-browser-control execute "return await screenshotWithLabels({ page, path: path.resolve('tmp/page-labels.png') })"
+browser-control execute 'return await screenshotWithLabels({ page, path: path.resolve("tmp/page-labels.png") })'
 ```
 
 The result includes `path`, screenshot `size`, `labelCount`, `labels`, and `refs`.
@@ -157,8 +164,9 @@ Use `snapshot()` as the compact read-before-act default. It prefers the page's
 single `main` region, collapses navigation, and spends its bounded item budget
 on alerts, semantic groups, lists, tables, block code, headings, primary links,
 and controls before repeated metadata. Select values and option counts are
-summarized; text input and textarea values are omitted. Its timeout defaults to
-10 seconds to accommodate a cold first browser evaluation:
+summarized, and table rows pair column headers with cell values. Text input and
+textarea values are omitted. Its timeout defaults to 10 seconds to accommodate a
+cold first browser evaluation:
 
 ```js
 return await snapshot()
@@ -207,10 +215,12 @@ if (!page.url().startsWith("https://app.example.com/")) {
 await page.getByRole("heading", { name: "Dashboard" }).waitFor()
 ```
 
-The ghost cursor is off by default. For a visible demo, call
-`showGhostCursor()` after navigation and before visible mouse actions, then call
-`hideGhostCursor()` during cleanup if desired. Starting a recording never
-enables the ghost cursor.
+Allowed Playwright mouse actions automatically show an arrow cursor whose tip
+tracks the action point with spring motion and fades after idle time. Read-only
+sessions reject input before cursor rendering.
+Call `showGhostCursor(options)` to keep it visible or customize it, and
+`hideGhostCursor()` to disable it for the current document, including while
+recording.
 
 Use `browser-control doctor` for a read-only install/runtime diagnosis,
 including relay reachability, extension connection/version, sessions, active
@@ -241,8 +251,8 @@ Use `browser-control recording start <output-path>` to record an attached tab.
 directories for relay-owned tabs. The `--session` flag accepts either the
 Browser Control session id used with `execute` or the lower-level `bc-tab-*`
 session id from `browser-control status --json`.
-Recording and the ghost cursor are independent; recording does not enable the
-cursor overlay.
+Recording and the ghost cursor are independent; recording does not change its
+automatic, persistent, or disabled mode.
 
 ```bash
 browser-control recording start ./tmp/demo-frames --session amazon --mode cdp

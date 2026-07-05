@@ -18,7 +18,7 @@ function relay(options: {
   return {
     endpoint: "http://127.0.0.1:19989",
     version: options.version,
-    extensionStatus: options.extensionStatus ?? Effect.succeed({ connected: true, version: "0.0.10", activeTargets: 0 }),
+    extensionStatus: options.extensionStatus ?? Effect.succeed({ connected: true, version: "0.0.11", activeTargets: 0 }),
   } as RelayClient.Interface
 }
 
@@ -80,7 +80,7 @@ describe("relay lifecycle", () => {
     let attempts = 0
     const client = relay({
       version: Effect.succeed(version),
-      extensionStatus: Effect.sync(() => ({ connected: ++attempts >= 2, version: "0.0.10", activeTargets: 0 })),
+      extensionStatus: Effect.sync(() => ({ connected: ++attempts >= 2, version: "0.0.11", activeTargets: 0 })),
     })
 
     const status = await Effect.runPromise(ensureExtensionConnected({
@@ -103,7 +103,7 @@ describe("relay lifecycle", () => {
     })
     expect(statusCollections({
       connected: true,
-      version: "0.0.10",
+      version: "0.0.11",
       activeTargets: 0,
       sessions: [],
       targets: [],

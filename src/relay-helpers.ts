@@ -373,7 +373,7 @@ export function getTargetInfo(value: unknown): TargetInfo | undefined {
   if (typeof object.targetId !== "string" || typeof object.url !== "string") {
     return undefined
   }
-  if (object.type !== "page" && object.type !== "iframe") {
+  if (object.type !== "page" && object.type !== "iframe" && object.type !== "worker") {
     return undefined
   }
   const type = object.type
@@ -391,7 +391,7 @@ export function getTargetInfo(value: unknown): TargetInfo | undefined {
 }
 
 export function isRestrictedTarget(targetInfo: TargetInfo): boolean {
-  if (targetInfo.type !== "page" && targetInfo.type !== "iframe") {
+  if (targetInfo.type !== "page" && targetInfo.type !== "iframe" && targetInfo.type !== "worker") {
     return true
   }
   if (!targetInfo.url) {

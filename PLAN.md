@@ -202,11 +202,12 @@ Prove the smallest end-to-end path before adding product polish:
 Current status:
 
 - Relay starts at `http://127.0.0.1:19989`.
-- Extension shim `0.0.10` connects without websocket reconnect storms, reports
+- Extension shim `0.0.11` connects without websocket reconnect storms, reports
   its version in relay status, and re-announces attached tabs after reconnect so
   a restarted relay recovers the attached-tab pool. It removes tabs from purple
   groups when their debugger attachment ends and reconciles stale groups on
-  startup/reconnect.
+  startup/reconnect. Session group labels are compact while full ids remain in
+  diagnostics and accessibility text.
 - `browser-control session adopt --target-url/--target-index` makes a
   user-attached tab the session's sticky default page; adopted tabs are
   released, never closed, by session reset/delete. Execute warns with an adopt
@@ -214,7 +215,7 @@ Current status:
 - CDP target visibility is scoped per client so concurrent sessions and raw
   clients cannot double-initialize each other's pages (`stale-client-checkout`
   smoke pins the regression).
-- `browser-control execute "return await page.title()"` works.
+- `browser-control execute 'return await page.title()'` works.
 - `context.newPage()` works.
 - `page.goto("https://example.com")` reaches load and locator reads work.
 - UI Testing Playground obstacle checks pass for dynamic IDs, AJAX waits,
@@ -229,7 +230,9 @@ Current status:
   page selection when a session needs to manually select or recover a shared tab.
 - CLI execute supports `--file <path>` for longer scripts, auto-returns
   conservative single-expression snippets such as `page.url()`, and returns
-  structured per-call script/page console logs plus page errors.
+  structured per-call script/page console logs plus page errors. Routine
+  permissions-policy and blocked-analytics chatter is folded without removing
+  distinct application errors or changing raw aftermath error counts.
 - Bare CLI execute creates a fresh readable session in the execute request and
   prints the id. `--session` or `BROWSER_CONTROL_SESSION` explicitly reuses that
   session's default page and JavaScript `state` across commands.
@@ -240,11 +243,13 @@ Current status:
   child events are not dropped, reapplies auto-attach to existing tabs, waits
   briefly for default runtime execution contexts after `Runtime.enable`, and
   awaits HTTP/websocket close callbacks during scoped relay shutdown.
-- Smoke evidence currently has session isolation passing, plus the main cases for
-  local action/form fixtures, local cart and checkout flows, reconnect/evaluate,
-  `execute --target-url`, execute fill helpers, and OOPIF reconnect. Smoke cases
-  use local fixtures for app flows instead of third-party ecommerce sites so the
-  signal is not coupled to the user browser profile or external site health.
+- The 17-case smoke matrix passes local forms/cart/checkout, stale/raw client
+  ordering, reconnect and redirect-reconnect evaluation, OOPIF reconnect,
+  explicit execute targets, fill helpers, compact snapshots, cross-navigation
+  and cross-tab handoffs, dedicated workers, automatic cursor modes, session
+  isolation, and multi-client visibility. Smoke cases use local fixtures for app
+  flows instead of third-party ecommerce sites so the signal is not coupled to
+  the user browser profile or external site health.
 - Execute exposes `screenshotWithLabels({ page, path })`, a small DOM-based
   labeled screenshot helper that writes to an absolute path, removes its overlay
   after capture, and returns label/ref metadata.
@@ -252,7 +257,8 @@ Current status:
   `ref(id)` for controls from the latest snapshot. The default prefers one
   `main`, collapses navigation, reserves its bounded budget for safety text and
   semantic structures, prioritizes primary links and controls over repeated
-  metadata, summarizes selects, and omits form values. Refs combine structural
+  metadata, summarizes selects, pairs table headers with row cell values, and
+  omits form values. Refs combine structural
   selectors with accessible identity so DOM drift fails closed. Explicit
   `snapshot({ diff: true })` captures compare semantic lines against the previous
   compatible snapshot, expose refs only for current additions or changes, and
@@ -296,8 +302,8 @@ V1 intentionally avoids capabilities that would require forking
 - No `page.sessionId()` or `page.targetId()`.
 - No `frame.frameId()`.
 - No `locator.selector()`.
-- Ghost cursor support is a minimal relay-injected overlay, not a recording or
-  demo-video editing system.
+- Ghost cursor support is a transient relay-injected arrow with spring motion and
+  persistent and disabled overrides, not a recording or demo-video editing system.
 - Recording supports existing `chrome.tabCapture` WebM for user-owned tabs and a
   relay-side CDP JPEG frame-directory fallback for relay-owned tabs. CDP recording
   does not encode video or capture audio yet.
@@ -397,10 +403,10 @@ Shipped:
    recreated, relay reconnect) are delivered with the call that caused them.
    Dialog capture was deliberately skipped: a passive `page.on("dialog")`
    listener would suppress Playwright's auto-dismiss and hang pages.
-3. **Visible session identity** (shipped): session-owned tabs group under
-   `bc:<session-id>` (shim `0.0.6` accepts a `title` param on `tabs.group`);
-   the badge shows `RUN` (amber) while executing and `WAIT` (blue) while a
-   handoff is pending via the new `action.setBadge` shim command. A toolbar
+3. **Visible session identity** (shipped): session-owned tabs use compact
+   `bc · <session>` groups while full ids remain in diagnostics; the badge shows
+   `RUN` (amber) while mutable sessions execute, stays quietly `ON` for read-only
+   work, and shows `WAIT` (blue) while a handoff is pending. A toolbar
    click during execution never detaches the tab, including a user-owned tab
    bound to an active handoff. True mid-script interruption (cancelling the
    running effect) is future work.

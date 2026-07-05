@@ -123,6 +123,9 @@ export function replayChildTargetsForParent(options: {
 }
 
 export function replayFrameEventsForChild(options: { readonly socket: WebSocket; readonly registry: TargetRegistry; readonly target: ChildTarget }): void {
+  if (options.target.targetInfo.type !== "iframe") {
+    return
+  }
   const frameEvents = options.registry.tabFrameEvents.get(options.target.tabId)?.get(options.target.targetInfo.targetId)
   if (!frameEvents) {
     return
@@ -147,6 +150,9 @@ export function replayChildFrameNavigation(options: { readonly socket: WebSocket
 }
 
 export function childFrameNavigationParams(options: { readonly registry: TargetRegistry; readonly target: ChildTarget }): JsonObject | undefined {
+  if (options.target.targetInfo.type !== "iframe") {
+    return undefined
+  }
   const frameEvents = options.registry.findFrameEventsForChild(options.target, getObject)
   const navigated = frameEvents?.navigated
   const frame = getObject(navigated?.frame)

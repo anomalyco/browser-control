@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Browser Control",
-  "version": "0.0.10",
+  "version": "0.0.11",
   "description": "Attach visible browser tabs to the local browser-control relay.",
   "permissions": ["activeTab", "alarms", "debugger", "offscreen", "tabs", "tabCapture", "tabGroups"],
   "host_permissions": ["<all_urls>"],

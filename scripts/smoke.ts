@@ -690,7 +690,7 @@ await page.setContent(
   '<div role="tablist" aria-label="Settings sections"><button role="tab" aria-selected="true">Security</button><button role="tab" aria-selected="false">Billing</button></div>' +
   '<details open><summary>Recovery settings</summary><p>Recovery detail</p></details>' +
   inlineCode +
-  '<table><caption>Team access</caption><tr><th>Member</th><th>Role</th></tr><tr><td>Ada</td><td>Owner</td></tr></table>' +
+  '<table><caption>Team access</caption><tr><th scope="col">Member</th><th scope="col">Role</th></tr><tr><th scope="row">Ada</th><td>Owner</td></tr></table>' +
   '<pre><code>const safe = true</code></pre>' +
   '<input name="q">' +
   '<dialog open aria-modal="true" aria-label="Confirmation"><button>Cancel</button></dialog></main>'
@@ -707,7 +707,8 @@ return await snapshot({ interactive: true })
           !structureOutput.includes('selected=true') ||
           !structureOutput.includes('group "Recovery settings" [expanded=true]') ||
           !structureOutput.includes('table "Team access" [2 rows]') ||
-          !structureOutput.includes('row "Ada Owner"') ||
+          !structureOutput.includes('row "Member | Role"') ||
+          !structureOutput.includes('row "Member: Ada | Role: Owner"') ||
           !structureOutput.includes('code "const safe = true"') ||
           !structureOutput.includes('textbox "q"') ||
           !structureOutput.includes('dialog "Confirmation" [open=true modal=true]') ||
@@ -744,8 +745,8 @@ return await snapshot({ interactive: true })
     name: "handoff-navigation",
     run: Effect.fnUntraced(function* (page) {
       const extension = yield* fetchStatus()
-      if (extension.version !== "0.0.10") {
-        return yield* Effect.fail(new Error(`handoff-navigation requires the built 0.0.10 shim; connected extension is ${extension.version ?? "unknown"}`))
+      if (extension.version !== "0.0.11") {
+        return yield* Effect.fail(new Error(`handoff-navigation requires the built 0.0.11 shim; connected extension is ${extension.version ?? "unknown"}`))
       }
       const marker = `bc-handoff-${Date.now()}`
       const smokeSession = `${marker}-session`
@@ -788,8 +789,8 @@ return await snapshot({ interactive: true })
     name: "handoff-cross-tab",
     run: Effect.fnUntraced(function* (page) {
       const extension = yield* fetchStatus()
-      if (extension.version !== "0.0.10") {
-        return yield* Effect.fail(new Error(`handoff-cross-tab requires the built 0.0.10 shim; connected extension is ${extension.version ?? "unknown"}`))
+      if (extension.version !== "0.0.11") {
+        return yield* Effect.fail(new Error(`handoff-cross-tab requires the built 0.0.11 shim; connected extension is ${extension.version ?? "unknown"}`))
       }
       const marker = `bc-handoff-a-${Date.now()}`
       const peerMarker = `bc-handoff-b-${Date.now()}`
@@ -858,6 +859,36 @@ return await snapshot({ interactive: true })
     }),
   },
   {
+    name: "dedicated-worker",
+    run: Effect.fnUntraced(function* () {
+      const marker = `bc-worker-${Date.now()}`
+      const smokeSession = `${marker}-session`
+      return yield* Effect.gen(function* () {
+        yield* runBrowserControl(["session", "new", smokeSession])
+        const output = yield* runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          `
+await page.setContent('<main><h1>Dedicated worker fixture</h1></main>')
+const workerPromise = page.waitForEvent('worker')
+await page.evaluate(() => {
+  const source = 'self.answer = 42; self.postMessage(self.answer)'
+  const worker = new Worker(URL.createObjectURL(new Blob([source], { type: 'text/javascript' })))
+  globalThis.__browserControlSmokeWorker = worker
+})
+const worker = await workerPromise
+return { answer: await worker.evaluate(() => globalThis.answer), url: worker.url() }
+          `,
+        ])
+        if (!output.includes("answer: 42") || !output.includes("blob:")) {
+          return yield* Effect.fail(new Error(`dedicated worker was not routed through Playwright: ${output}`))
+        }
+        return output.trim()
+      }).pipe(Effect.ensuring(runBrowserControl(["session", "delete", smokeSession]).pipe(Effect.ignore)))
+    }),
+  },
+  {
     name: "execute-ghost-cursor",
     run: Effect.fnUntraced(function* () {
       const marker = `bc-cursor-${Date.now()}`
@@ -870,24 +901,45 @@ return await snapshot({ interactive: true })
           smokeSession,
           `
 await page.setContent('<main style="height:300px"><button>Cursor target</button></main>')
-await showGhostCursor({ size: 20 })
 await page.mouse.move(80, 90)
 await page.mouse.down()
 await page.mouse.up()
 await page.waitForTimeout(150)
-const beforeHide = await page.evaluate(() => {
+const automatic = await page.evaluate(() => {
   const element = document.getElementById('__browser_control_ghost_cursor__')
-  return { exists: Boolean(element), transform: element?.style.transform, pressed: element?.dataset.pressed }
+  return { exists: Boolean(element), motion: element?.dataset.motion, targetX: element?.dataset.targetX, targetY: element?.dataset.targetY, pressed: element?.dataset.pressed }
 })
+await page.getByRole('button', { name: 'Cursor target' }).click()
+const locatorDriven = await page.evaluate(() => document.getElementById('__browser_control_ghost_cursor__')?.dataset.pressed)
+await page.waitForTimeout(1000)
+const faded = await page.evaluate(() => Boolean(document.getElementById('__browser_control_ghost_cursor__')))
+await page.mouse.move(40, 50)
+await page.waitForTimeout(100)
+const returned = await page.evaluate(() => Boolean(document.getElementById('__browser_control_ghost_cursor__')))
 await ghostCursor.hide()
-const afterHide = await page.evaluate(() => Boolean(document.getElementById('__browser_control_ghost_cursor__')))
-if (!beforeHide.exists || !beforeHide.transform?.includes('70px, 80px') || beforeHide.pressed !== 'false' || afterHide) {
-  throw new Error('ghost cursor did not show, move, release, and hide: ' + JSON.stringify({ beforeHide, afterHide }))
+await page.mouse.move(60, 70)
+await page.waitForTimeout(100)
+const disabled = await page.evaluate(() => Boolean(document.getElementById('__browser_control_ghost_cursor__')))
+await showGhostCursor({ size: 20 })
+await page.mouse.move(80, 90)
+await page.waitForTimeout(1000)
+const persistent = await page.evaluate(() => {
+  const element = document.getElementById('__browser_control_ghost_cursor__')
+  return { exists: Boolean(element), motion: element?.dataset.motion, targetX: element?.dataset.targetX, targetY: element?.dataset.targetY, transform: element?.style.transform }
+})
+await page.reload()
+await page.waitForTimeout(100)
+const restored = await page.evaluate(() => {
+  const element = document.getElementById('__browser_control_ghost_cursor__')
+  return { exists: Boolean(element), targetX: element?.dataset.targetX, targetY: element?.dataset.targetY, transform: element?.style.transform }
+})
+if (!automatic.exists || automatic.motion !== 'spring' || automatic.targetX !== '80' || automatic.targetY !== '90' || automatic.pressed !== 'false' || locatorDriven !== 'false' || faded || !returned || disabled || !persistent.exists || persistent.motion !== 'spring' || persistent.targetX !== '80' || persistent.targetY !== '90' || !persistent.transform?.includes('80px, 90px') || !restored.exists || restored.targetX !== '80' || restored.targetY !== '90' || !restored.transform?.includes('80px, 90px')) {
+  throw new Error('ghost cursor automatic, fade, disable, persistent, or navigation behavior failed: ' + JSON.stringify({ automatic, locatorDriven, faded, returned, disabled, persistent, restored }))
 }
-return { beforeHide, afterHide }
+return { automatic, locatorDriven, faded, returned, disabled, persistent, restored }
           `,
         ])
-        if (!output.includes("70px, 80px") || !output.includes("afterHide: false")) {
+        if (!output.includes("motion: 'spring'") || !output.includes("targetX: '80'") || !output.includes("80px, 90px") || !output.includes("disabled: false")) {
           return yield* Effect.fail(new Error(`execute ghost cursor helper failed: ${output}`))
         }
         return output.trim()

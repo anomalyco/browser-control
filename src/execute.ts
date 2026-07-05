@@ -809,7 +809,35 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           return normalize(element.querySelector("h1, h2, h3, h4, h5, h6, [role='heading']")?.textContent ?? "")
         }
         if (role === "code") return normalize(element.textContent ?? "")
-        if (role === "row" || role === "listitem") return safeText(element)
+        if (role === "row") {
+          const cells = Array.from(element.children).filter((child) => child.matches("th, td, [role='columnheader'], [role='rowheader'], [role='cell'], [role='gridcell']"))
+          const values = cells.map((cell) => safeText(cell))
+          if (values.length === 0) return safeText(element)
+          const headerCells = cells.filter((cell) => cell.matches("th, [role='columnheader'], [role='rowheader']"))
+          const table = element.closest("table, [role='table'], [role='grid']")
+          const tableRows = table ? Array.from(table.querySelectorAll("tr, [role='row']")) : []
+          const headerRow = tableRows.find((row) => {
+            if (row === element) return false
+            const rowCells = Array.from(row.children).filter((child) => child.matches("th, td, [role='columnheader'], [role='rowheader'], [role='cell'], [role='gridcell']"))
+            return rowCells.length > 0 && (rowCells.every((cell) => cell.matches("th, [role='columnheader']")) || rowCells.some((cell) => cell.matches("th[scope='col'], [role='columnheader']")))
+          })
+          if (headerRow) {
+            const headers = Array.from(headerRow.children)
+              .filter((child) => child.matches("th, [role='columnheader']"))
+              .map((cell) => safeText(cell))
+            if (headers.length === values.length && headers.every(Boolean)) {
+              return values.map((value, index) => `${headers[index]}: ${value}`).join(" | ")
+            }
+          }
+          if (headerCells.length === cells.length) return values.join(" | ")
+          if (headerCells.length > 0) {
+            const headers = headerCells.map((cell) => safeText(cell)).filter(Boolean)
+            const data = cells.filter((cell) => !headerCells.includes(cell)).map((cell) => safeText(cell)).filter(Boolean)
+            return headers.length === 1 && data.length > 0 ? `${headers[0]}: ${data.join(" | ")}` : values.join(" | ")
+          }
+          return values.join(" | ")
+        }
+        if (role === "listitem") return safeText(element)
         return ""
       }
       const root = rootOrSettings instanceof Element
@@ -1647,6 +1675,10 @@ export function createExecuteLogCapture(limits: {
 }
 
 function pageLogKey(entry: ExecuteLogEntry): string {
+  const routineCategory = routinePageLogCategory(entry)
+  if (routineCategory) {
+    return JSON.stringify([entry.type, routineCategory])
+  }
   return JSON.stringify([
     entry.type,
     entry.text,
@@ -1654,6 +1686,25 @@ function pageLogKey(entry: ExecuteLogEntry): string {
     entry.location?.lineNumber ?? null,
     entry.location?.columnNumber ?? null,
   ])
+}
+
+function routinePageLogCategory(entry: ExecuteLogEntry): string | undefined {
+  if (entry.source !== "page") return undefined
+  const text = entry.text.toLowerCase()
+  if (/^(?:error with permissions-policy header|permissions-policy header warning|permissions policy violation|\[violation\] potential permissions policy violation)/.test(text)) {
+    return "browser-permissions-policy"
+  }
+  if (!text.includes("err_blocked_by_client")) return undefined
+  const resource = entry.location?.url.toLowerCase() ?? ""
+  const analyticsMarkers = [
+    "google-analytics.com",
+    "googletagmanager.com",
+    "doubleclick.net",
+    "connect.facebook.net",
+    "/analytics",
+    "analytics.",
+  ]
+  return analyticsMarkers.some((marker) => resource.includes(marker)) ? "blocked-analytics-resource" : undefined
 }
 
 function emptyExecuteLogSummary(): ExecuteLogSummary {
@@ -1672,7 +1723,7 @@ function formatLogCompactionWarning(summary: ExecuteLogSummary): string | undefi
   return `Captured ${summary.totalCount} console/page events: returned ${summary.returnedCount}, folded ${summary.repeatedCount} repeated page entries, and omitted ${summary.omittedCount} after limits (page=${maxCapturedPageLogs}, script=${maxCapturedScriptLogs}). Aftermath error counts include all events.`
 }
 
-async function runUserCode({ code, globals }: { readonly code: string; readonly globals: SandboxGlobals }): Promise<{
+export async function runUserCode({ code, globals }: { readonly code: string; readonly globals: SandboxGlobals }): Promise<{
   readonly result: unknown
   readonly logs: readonly ExecuteLogEntry[]
   readonly logSummary: ExecuteLogSummary
@@ -1721,27 +1772,27 @@ async function runUserCode({ code, globals }: { readonly code: string; readonly 
       },
     } satisfies { readonly logs: readonly ExecuteLogEntry[]; readonly logSummary: ExecuteLogSummary; readonly aftermath: ExecuteAftermath }
   }
-  const AsyncFunction = async function () {}.constructor as new (...args: string[]) => (...args: unknown[]) => Promise<unknown>
-  const fn = new AsyncFunction(
-    "console",
-    "browser",
-    "context",
-    "page",
-    "state",
-    "modules",
-    "fillInput",
-    "fillInputs",
-    "screenshotWithLabels",
-    "ariaSnapshot",
-    "snapshot",
-    "ref",
-    "showGhostCursor",
-    "hideGhostCursor",
-    "ghostCursor",
-    "handoff",
-    `const { fs, path, os, crypto, url, util, events, stream, buffer, http, https, zlib } = modules;\n${wrapCode(code)}`,
-  )
   try {
+    const AsyncFunction = async function () {}.constructor as new (...args: string[]) => (...args: unknown[]) => Promise<unknown>
+    const fn = new AsyncFunction(
+      "console",
+      "browser",
+      "context",
+      "page",
+      "state",
+      "modules",
+      "fillInput",
+      "fillInputs",
+      "screenshotWithLabels",
+      "ariaSnapshot",
+      "snapshot",
+      "ref",
+      "showGhostCursor",
+      "hideGhostCursor",
+      "ghostCursor",
+      "handoff",
+      `const { fs, path, os, crypto, url, util, events, stream, buffer, http, https, zlib } = modules;\n${wrapCode(code)}`,
+    )
     const result = await fn(
       sandboxConsole,
       globals.browser,

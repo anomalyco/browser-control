@@ -51,24 +51,24 @@ function renderStatus(): void {
         box-sizing: border-box;
         max-width: min(360px, calc(100vw - 20px));
         overflow: hidden;
-        padding: 5px 8px;
-        border: 1px solid rgba(255, 255, 255, 0.18);
+        padding: 4px 7px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
         border-radius: 999px;
-        background: rgba(24, 24, 27, 0.82);
-        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.22);
-        color: rgba(255, 255, 255, 0.9);
-        font: 600 10px/1.2 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-        letter-spacing: 0.04em;
+        background: rgba(24, 24, 27, 0.76);
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16);
+        color: rgba(255, 255, 255, 0.86);
+        font: 650 9px/1.2 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        letter-spacing: 0.06em;
         text-overflow: ellipsis;
         white-space: nowrap;
-        backdrop-filter: blur(6px);
-        opacity: 0.82;
+        backdrop-filter: blur(8px);
+        opacity: 0.58;
       }
       #status::before {
         display: inline-block;
-        width: 6px;
-        height: 6px;
-        margin-right: 6px;
+        width: 5px;
+        height: 5px;
+        margin-right: 5px;
         border-radius: 50%;
         background: #8b5cf6;
         content: "";
@@ -76,10 +76,12 @@ function renderStatus(): void {
       }
       #status[data-tone="running"]::before { background: #f59e0b; }
       #status[data-tone="waiting"]::before { background: #3b82f6; }
+      #status[data-tone="running"] { opacity: 0.92; }
       #status[data-tone="waiting"] {
         min-width: min(320px, calc(100vw - 20px));
         padding: 10px;
         border-radius: 12px;
+        opacity: 1;
         white-space: normal;
       }
       #prompt {

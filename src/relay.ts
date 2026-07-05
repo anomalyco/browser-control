@@ -35,7 +35,7 @@ import {
   validateWebSocketOrigin,
 } from "./relay-helpers.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
-import { ghostCursorClientSource, ghostCursorMouseActionExpression, inputDispatchMouseEventToGhostCursorAction } from "./ghost-cursor.ts"
+import { ghostCursorClientSource, ghostCursorMouseActionExpression, ghostCursorRestoreExpression, inputDispatchMouseEventToGhostCursorAction } from "./ghost-cursor.ts"
 import { guardCdpMethod } from "./cdp-guardrails.ts"
 import { HandoffRegistry, resolveExactHandoffTarget, toolbarClickAction, type HandoffOutcome } from "./handoff.ts"
 import { ExecuteSandbox, type HandoffPageTarget } from "./execute.ts"
@@ -166,6 +166,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
   const attachedBadge = { text: "ON", color: "#7c3aed", title: "Detach from Browser Control" }
   const executingBadge = { text: "RUN", color: "#f59e0b", title: "Browser Control is running a script" }
   const waitingBadge = (message: string) => ({ text: "WAIT", color: "#2563eb", title: `Browser Control is waiting for you: ${message}` })
+  const executionBadge = (sessionId: string, executing: boolean) => executing && !sessions.isReadOnly(sessionId) ? executingBadge : attachedBadge
   const setActivityForSessionTabs = (
     browserControlSessionId: string,
     state: PageStatus["state"],
@@ -218,7 +219,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       const currentTarget = registry.tabTargets.get(target.tabId)
       if (currentTarget) {
         const executing = sessions.isExecuting(options.sessionId)
-        setActivityForTarget(currentTarget, executing ? "running" : "attached", executing ? executingBadge : attachedBadge, { sessionId: options.sessionId })
+        setActivityForTarget(currentTarget, executing ? "running" : "attached", executionBadge(options.sessionId, executing), { sessionId: options.sessionId })
       }
     }
   }
@@ -232,7 +233,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       }),
     {
       onExecuteStateChange: (sessionId, executing) => {
-        setActivityForSessionTabs(sessionId, executing ? "running" : "attached", executing ? executingBadge : attachedBadge)
+        setActivityForSessionTabs(sessionId, executing ? "running" : "attached", executionBadge(sessionId, executing))
         if (!executing) {
           for (const tabId of activeHandoffTabs.get(sessionId) ?? []) {
             const target = registry.tabTargets.get(tabId)
@@ -335,6 +336,16 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     const sessionId = pageStatusSessionId(target) ?? activeHandoffSessionIdForTab(tabId)
     sendPageStatus(target, sessionId && sessions.isExecuting(sessionId) ? "running" : "attached", sessionId ? { sessionId } : {})
   }
+  function refreshTabPresentation(tabId: number): void {
+    refreshPageStatus(tabId)
+    const target = registry.tabTargets.get(tabId)
+    if (!target) return
+    const sessionId = pageStatusSessionId(target)
+    Effect.runPromise(Effect.ignore(sendToExtension({
+      method: "tabs.group",
+      params: { tabId, ...(sessionId ? { title: `bc:${sessionId}` } : {}) },
+    }))).catch(() => {})
+  }
   const httpServer = http.createServer(createHttpRequestHandler({
     host,
     port,
@@ -344,7 +355,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     sessions,
     refreshPageStatuses: (tabIds) => {
       for (const tabId of tabIds) {
-        refreshPageStatus(tabId)
+        refreshTabPresentation(tabId)
       }
     },
     extensionStatus: () => {
@@ -365,6 +376,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
   let autoAttachParams: JsonObject | undefined
   let idleRuntimeResetGeneration = 0
   const mainFrameIdsByTab = new Map<number, string>()
+  const ghostCursorPositionsByTab = new Map<number, { readonly x: number; readonly y: number }>()
 
   function targetDiagnosticIdentity(target: ConnectedTarget | ChildTarget | undefined): string {
     if (!target) {
@@ -690,6 +702,12 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
         }
       }
     }
+    if (method.startsWith("Target.") && params?.targetInfo !== undefined) {
+      const eventTargetInfo = getTargetInfo(params.targetInfo)
+      if (!eventTargetInfo || isRestrictedTarget(eventTargetInfo)) {
+        return
+      }
+    }
     if (method === "Target.detachedFromTarget") {
       const childSessionId = typeof params?.sessionId === "string" ? params.sessionId : undefined
       if (childSessionId) {
@@ -751,6 +769,14 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       const auxData = getObject(context?.auxData)
       const contextTarget = targetForCdpSession(tabId, eventSessionId)
       contextDebugLog?.(`context-created id=${boundedToken(typeof context?.id === "number" || typeof context?.id === "string" ? String(context.id) : undefined)} unique=${boundedToken(typeof context?.uniqueId === "string" ? context.uniqueId : undefined)} default=${auxData?.isDefault === true} type=${boundedToken(typeof auxData?.type === "string" ? auxData.type : undefined)} frame=${boundedToken(typeof auxData?.frameId === "string" ? auxData.frameId : undefined)} ${targetDiagnosticIdentity(contextTarget)} ${summarizeDiagnosticUrl(typeof context?.origin === "string" ? context.origin : undefined)}`)
+      const cursorPosition = ghostCursorPositionsByTab.get(tabId)
+      if (cursorPosition && auxData?.isDefault === true && auxData.frameId === mainFrameIdsByTab.get(tabId)) {
+        Effect.runPromise(Effect.ignore(sendDebuggerCommand({
+          tabId,
+          method: "Runtime.evaluate",
+          params: { expression: ghostCursorRestoreExpression(cursorPosition) },
+        }))).catch(() => {})
+      }
     } else if (method === "Runtime.executionContextDestroyed") {
       const contextTarget = targetForCdpSession(tabId, eventSessionId)
       contextDebugLog?.(`context-destroyed id=${boundedToken(typeof params?.executionContextId === "number" || typeof params?.executionContextId === "string" ? String(params.executionContextId) : undefined)} unique=${boundedToken(typeof params?.executionContextUniqueId === "string" ? params.executionContextUniqueId : undefined)} ${targetDiagnosticIdentity(contextTarget)}`)
@@ -1140,6 +1166,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     if (!action) {
       return
     }
+    ghostCursorPositionsByTab.set(options.tabId, { x: action.x, y: action.y })
     yield* sendDebuggerCommand({
       tabId: options.tabId,
       method: "Runtime.evaluate",
@@ -1173,6 +1200,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     }
     sessions.releaseAdoptedTarget(detached.target.targetInfo.targetId)
     mainFrameIdsByTab.delete(tabId)
+    ghostCursorPositionsByTab.delete(tabId)
     contextDebugLog?.(`target-detached kind=root ${targetDiagnosticIdentity(detached.target)}`)
     sendEventToTargetViewers(detached.target.sessionId, {
       method: "Target.targetDestroyed",
