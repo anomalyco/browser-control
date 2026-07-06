@@ -110,6 +110,22 @@ describe("RelayClient", () => {
     expect(result.session.id).toBe(session.id)
   })
 
+  it("decodes execute image media", async () => {
+    routes.set("POST /cli/execute", {
+      status: 200,
+      body: {
+        text: "Image (image/png, 8 bytes)",
+        media: [{ type: "image", mimeType: "image/png", data: "iVBORw0KGgo=", size: 8 }],
+        isError: false,
+        logs: [],
+        session,
+      },
+    })
+    const result = await withClient((client) =>
+      client.execute({ sessionId: session.id, code: "page.screenshot()", createIfMissing: false }))
+    expect(result.media).toEqual([{ type: "image", mimeType: "image/png", data: "iVBORw0KGgo=", size: 8 }])
+  })
+
   it("decodes session adopt responses", async () => {
     routes.set("POST /cli/session/adopt", {
       status: 200,

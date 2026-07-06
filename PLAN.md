@@ -246,9 +246,15 @@ Current status:
   isolation, and multi-client visibility. Smoke cases use local fixtures for app
   flows instead of third-party ecommerce sites so the signal is not coupled to
   the user browser profile or external site health.
-- Execute exposes `screenshotWithLabels({ page, path })`, a small DOM-based
-  labeled screenshot helper that writes to an absolute path, removes its overlay
-  after capture, and returns label/ref metadata.
+- Execute exposes `screenshotWithLabels({ page, path? })`, a small DOM-based
+  labeled screenshot helper that optionally writes to an absolute path, removes
+  its overlay after capture, and returns image plus label/ref metadata in memory
+  when no path is supplied.
+- Returned PNG, JPEG, and WebP buffers, including buffers nested in objects and
+  arrays, use a dedicated relay media channel rather than the bounded structured
+  JSON value. MCP converts them to ordered native image attachments without a
+  temporary file or duplicated base64 in structured metadata. Screenshots saved
+  as side effects and not returned remain file-only.
 - Execute exposes `snapshot(options?)` as the compact semantic happy path and
   `ref(id)` for controls from the latest snapshot. The default prefers one
   `main`, collapses navigation, reserves its bounded budget for safety text and

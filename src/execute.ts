@@ -14,7 +14,7 @@ import http from "node:http"
 import https from "node:https"
 import zlib from "node:zlib"
 import { hideGhostCursor as hideGhostCursorOnPage, showGhostCursor as showGhostCursorOnPage, type GhostCursorClientOptions } from "./ghost-cursor.ts"
-import type { ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary } from "./relay-schema.ts"
+import type { ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary, ExecuteMedia } from "./relay-schema.ts"
 import { executionContextFailureDiagnostic } from "./runtime-diagnostics.ts"
 
 const nodeModules = { fs, path, os, crypto, url, util, events, stream, buffer, http, https, zlib }
@@ -160,11 +160,12 @@ type HideGhostCursorOptions = {
 
 type ScreenshotWithLabelsOptions = {
   readonly page: Page
-  readonly path: string
+  readonly path?: string
 }
 
 type ScreenshotWithLabelsResult = {
-  readonly path: string
+  readonly path?: string
+  readonly image?: Buffer
   readonly size: number
   readonly labelCount: number
   readonly labels: readonly ScreenshotLabel[]
@@ -217,6 +218,7 @@ type ExecuteSandboxOptions = {
 export type ExecuteResult = {
   readonly text: string
   readonly value?: unknown
+  readonly media?: readonly ExecuteMedia[]
   readonly isError: boolean
   readonly logs: readonly ExecuteLogEntry[]
   readonly logSummary: ExecuteLogSummary
@@ -267,7 +269,8 @@ export class ExecuteSandbox {
       try: async () => {
         const globals = await this.getGlobals(options)
         const { result, logs, logSummary, aftermath } = await runUserCode({ code, globals })
-        const jsonSafeResult = toJsonSafeValue(result)
+        const extracted = extractExecuteMedia(result)
+        const jsonSafeResult = toJsonSafeValue(extracted.value)
         const warnings = this.drainWarnings()
         const logCompactionWarning = formatLogCompactionWarning(logSummary)
         if (logCompactionWarning) {
@@ -277,8 +280,9 @@ export class ExecuteSandbox {
           warnings.push(`Execute result could not be represented as JSON value: ${jsonSafeResult.reason}`)
         }
         return {
-          text: stringifyResult(result),
+          text: stringifyResult(extracted.value),
           ...(jsonSafeResult.serializable ? { value: jsonSafeResult.value } : {}),
+          ...(extracted.media.length > 0 ? { media: extracted.media } : {}),
           isError: false,
           logs,
           logSummary,
@@ -1306,15 +1310,15 @@ async function fillInputs(page: Page, fields: ReadonlyArray<InputField>): Promis
 }
 
 async function screenshotWithLabels(options: ScreenshotWithLabelsOptions): Promise<ScreenshotWithLabelsResult> {
-  if (!path.isAbsolute(options.path)) {
+  if (options.path !== undefined && !path.isAbsolute(options.path)) {
     throw new Error("screenshotWithLabels requires an absolute path")
   }
 
   const labels = await showScreenshotLabels(options.page)
   try {
-    const screenshot = await options.page.screenshot({ path: options.path })
+    const screenshot = await options.page.screenshot(options.path ? { path: options.path } : {})
     return {
-      path: options.path,
+      ...(options.path ? { path: options.path } : { image: screenshot }),
       size: screenshot.byteLength,
       labelCount: labels.length,
       labels,
@@ -1922,6 +1926,73 @@ type JsonSafeResult =
 
 const maxJsonSafeDepth = 8
 const maxJsonSafeBytes = 32 * 1024
+
+export function extractExecuteMedia(value: unknown): { readonly value: unknown; readonly media: readonly ExecuteMedia[] } {
+  const media: ExecuteMedia[] = []
+  const seen = new WeakMap<object, unknown>()
+
+  const replace = (item: unknown): unknown => {
+    if (Buffer.isBuffer(item)) {
+      const mimeType = imageMimeType(item)
+      if (!mimeType) return item
+      const image = {
+        type: "image" as const,
+        mimeType,
+        data: item.toString("base64"),
+        size: item.byteLength,
+      }
+      media.push(image)
+      return { type: image.type, mimeType: image.mimeType, size: image.size }
+    }
+    if (item === null || typeof item !== "object") return item
+    const previous = seen.get(item)
+    if (previous !== undefined) return previous
+    if (Array.isArray(item)) {
+      const output: unknown[] = []
+      seen.set(item, output)
+      for (const value of item) output.push(replace(value))
+      return output
+    }
+    if (item instanceof Map) {
+      const output = new Map<unknown, unknown>()
+      seen.set(item, output)
+      for (const [key, value] of item) output.set(replace(key), replace(value))
+      return output
+    }
+    if (item instanceof Set) {
+      const output = new Set<unknown>()
+      seen.set(item, output)
+      for (const value of item) output.add(replace(value))
+      return output
+    }
+    if (!isPlainJsonContainer(item)) return item
+    const output: Record<string, unknown> = {}
+    seen.set(item, output)
+    for (const key of safeObjectKeys(item) ?? []) {
+      try {
+        output[key] = replace(item[key as keyof typeof item])
+      } catch {
+        // Match structured-result conversion: skip inaccessible properties.
+      }
+    }
+    return output
+  }
+
+  return { value: replace(value), media }
+}
+
+function imageMimeType(value: Buffer): string | undefined {
+  if (value.length >= 8 && value.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return "image/png"
+  }
+  if (value.length >= 3 && value[0] === 0xff && value[1] === 0xd8 && value[2] === 0xff) {
+    return "image/jpeg"
+  }
+  if (value.length >= 12 && value.subarray(0, 4).toString("ascii") === "RIFF" && value.subarray(8, 12).toString("ascii") === "WEBP") {
+    return "image/webp"
+  }
+  return undefined
+}
 
 /**
  * Best-effort structured execute value for machine consumers.

@@ -93,6 +93,12 @@ session: "id" })` must already exist. Each session gets one owned default page
 that persists across named execute calls. MCP keeps its own process-local current
 session because the MCP process itself is the agent boundary.
 
+MCP `execute` extracts returned screenshot buffers, including buffers nested in
+objects and arrays, into ordered native image attachments without temporary
+files. This lets one call return images plus metadata. A screenshot saved to a
+path but not returned remains file-only. `snapshot()` remains the preferred
+compact textual read; request images only when visual layout matters.
+
 Bare execute drives its new session-owned page, never the user's attached tabs. To
 drive a tab the user attached with the toolbar, adopt it as the session's
 default page:
@@ -299,10 +305,12 @@ that the next action must consume.
 
 ## Labeled Screenshots
 
-Use `screenshotWithLabels({ page, path })` when a visual page read would help.
-`path` must be absolute. The helper overlays simple `e1`, `e2`, ... labels on
-visible likely-interactive elements, saves a Playwright screenshot, removes the
-overlay, and returns `{ path, size, labelCount, labels }`.
+Use `screenshotWithLabels({ page, path? })` when a visual page read would help.
+The helper overlays simple `e1`, `e2`, ... labels on visible likely-interactive
+elements, captures a Playwright screenshot, removes the overlay, and returns
+image plus label metadata. Omit `path` and return the result through MCP for an
+in-memory attachment; when supplied, `path` must be absolute and the image is
+saved instead.
 
 ```js
 const screenshotPath = path.resolve("tmp/home-labels.png")

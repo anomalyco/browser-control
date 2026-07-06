@@ -133,6 +133,17 @@ describe("relay-schema", () => {
     expect(decodeExecuteSession(session).created).toBeUndefined()
   })
 
+  it("decodes and encodes native execute image media", () => {
+    const response = {
+      text: "Image (image/png, 8 bytes)",
+      media: [{ type: "image", mimeType: "image/png", data: "iVBORw0KGgo=", size: 8 }],
+      isError: false,
+      logs: [],
+      session,
+    }
+    expect(encodeExecute(decodeExecute(response))).toEqual(response)
+  })
+
   it("decodes an execute response without warnings or aftermath (older relay)", () => {
     const decoded = decodeExecute({ text: "ok", isError: false, logs: [], session })
     expect(decoded.warnings).toBeUndefined()

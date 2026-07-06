@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { toJsonSafeValue } from "../src/execute.ts"
+import { extractExecuteMedia, toJsonSafeValue } from "../src/execute.ts"
 
 describe("toJsonSafeValue", () => {
   it("keeps JSON primitives and plain nested values", () => {
@@ -118,5 +118,44 @@ describe("toJsonSafeValue", () => {
     const value: { name: string; self?: unknown } = { name: "loop" }
     value.self = value
     expect(toJsonSafeValue(value)).toEqual({ serializable: true, value: { name: "loop" } })
+  })
+})
+
+describe("extractExecuteMedia", () => {
+  const png = (suffix: number) => Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, suffix])
+
+  it("extracts nested screenshot buffers and leaves compact metadata", () => {
+    const before = png(1)
+    const after = png(2)
+    expect(extractExecuteMedia({ url: "https://example.com", images: [before, after] })).toEqual({
+      value: {
+        url: "https://example.com",
+        images: [
+          { type: "image", mimeType: "image/png", size: before.byteLength },
+          { type: "image", mimeType: "image/png", size: after.byteLength },
+        ],
+      },
+      media: [
+        { type: "image", mimeType: "image/png", data: before.toString("base64"), size: before.byteLength },
+        { type: "image", mimeType: "image/png", data: after.toString("base64"), size: after.byteLength },
+      ],
+    })
+  })
+
+  it("does not treat arbitrary buffers as images", () => {
+    const value = Buffer.from("hello")
+    expect(extractExecuteMedia(value)).toEqual({ value, media: [] })
+  })
+
+  it("extracts images from Map keys and values and from Sets", () => {
+    const key = png(1)
+    const value = png(2)
+    const setValue = png(3)
+    const extracted = extractExecuteMedia({ map: new Map([[key, value]]), set: new Set([setValue]) })
+    expect(extracted.media.map((image) => image.data)).toEqual([
+      key.toString("base64"),
+      value.toString("base64"),
+      setValue.toString("base64"),
+    ])
   })
 })

@@ -99,7 +99,11 @@ Agents that prefer MCP over shell commands can use `browser-control-mcp`:
 claude mcp add browser-control -- browser-control-mcp
 ```
 
-The skill-driven CLI workflow and MCP expose the same relay sessions.
+The skill-driven CLI workflow and MCP expose the same relay sessions. MCP
+`execute` extracts returned screenshot buffers, including buffers nested in
+objects and arrays, as native image attachments without writing temporary files.
+This allows one result to return metadata and multiple images. Screenshots that
+are saved to a path but not returned remain file-only.
 
 ### Explicit sessions
 
@@ -151,14 +155,17 @@ extensions in the user's browser make login/password-field `locator.fill()`
 calls hang after the locator resolves. Prefer selector-based `fillInput` or
 `fillInputs` for forms that hang on locator-level DOM evaluation.
 
-Use `screenshotWithLabels` with an absolute path to save a screenshot annotated
-with simple `e1`, `e2`, ... DOM labels for visible likely-interactive elements:
+Use `screenshotWithLabels` to capture a screenshot annotated with simple `e1`,
+`e2`, ... DOM labels for visible likely-interactive elements. Omit `path` and
+return the result through MCP to attach the image in memory, or pass an absolute
+path to save it:
 
 ```bash
 browser-control execute 'return await screenshotWithLabels({ page, path: path.resolve("tmp/page-labels.png") })'
 ```
 
-The result includes `path`, screenshot `size`, `labelCount`, `labels`, and `refs`.
+The result includes an in-memory `image` or saved `path`, plus screenshot `size`,
+`labelCount`, `labels`, and `refs`.
 
 Use `snapshot()` as the compact read-before-act default. It prefers the page's
 single `main` region, collapses navigation, and spends its bounded item budget

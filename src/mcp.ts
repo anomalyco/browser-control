@@ -273,7 +273,7 @@ const registerTools = Effect.gen(function* () {
         return spec.handle(payload).pipe(
           Effect.match({
             onFailure: (error) => toolResult({ text: error.message, isError: true }),
-            onSuccess: (value) => toolResult({ text: stringifyResult(value), structuredContent: value, isError: false }),
+            onSuccess: (value) => toolResultForValue(value),
           }),
         )
       },
@@ -383,6 +383,33 @@ function stringifyResult(value: unknown): string {
     return value
   }
   return JSON.stringify(value, null, 2)
+}
+
+export function toolResultForValue(value: unknown): McpSchema.CallToolResult {
+  const object = getObject(value)
+  const media = Array.isArray(object?.media)
+    ? object.media.flatMap((item) => {
+      const image = getObject(item)
+      return image?.type === "image" && typeof image.mimeType === "string" && typeof image.data === "string"
+        ? [{ data: image.data, mimeType: image.mimeType }]
+        : []
+    })
+    : []
+  if (media.length > 0) {
+    const { media: _media, ...structuredContent } = object ?? {}
+    return new McpSchema.CallToolResult({
+      content: [
+        McpSchema.TextContent.make({ text: stringifyResult(structuredContent) }),
+        ...media.map((image) => McpSchema.ImageContent.make({
+          data: new Uint8Array(Buffer.from(image.data, "base64")),
+          mimeType: image.mimeType,
+        })),
+      ],
+      structuredContent,
+      isError: false,
+    })
+  }
+  return toolResult({ text: stringifyResult(value), structuredContent: value, isError: false })
 }
 
 function toolResult(options: { readonly text: string; readonly structuredContent?: unknown; readonly isError: boolean }): McpSchema.CallToolResult {

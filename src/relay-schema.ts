@@ -121,9 +121,19 @@ export const ExecuteAftermath = Schema.Struct({
 
 export interface ExecuteAftermath extends Schema.Schema.Type<typeof ExecuteAftermath> {}
 
+export const ExecuteMedia = Schema.Struct({
+  type: Schema.Literal("image"),
+  mimeType: Schema.String,
+  data: Schema.String,
+  size: Schema.Number,
+})
+
+export interface ExecuteMedia extends Schema.Schema.Type<typeof ExecuteMedia> {}
+
 export const ExecuteResponse = Schema.Struct({
   text: Schema.String,
   value: Schema.optionalKey(Schema.Unknown),
+  media: Schema.optionalKey(Schema.Array(ExecuteMedia)),
   isError: Schema.Boolean,
   logs: Schema.Array(ExecuteLogEntry),
   logSummary: Schema.optionalKey(ExecuteLogSummary),
