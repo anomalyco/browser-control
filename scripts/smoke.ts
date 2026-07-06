@@ -951,7 +951,7 @@ return { automatic, locatorDriven, faded, returned, disabled, persistent, restor
     run: Effect.fnUntraced(function* () {
       const marker = `bc-recording-${Date.now()}`
       const smokeSession = `${marker}-session`
-      const outputPath = path.join(repoRoot, "tmp", `${marker}-frames`)
+      const outputPath = path.join(repoRoot, "tmp", `${marker}.webm`)
       return yield* Effect.gen(function* () {
         yield* runBrowserControl(["session", "new", smokeSession])
         yield* runBrowserControl([
@@ -975,8 +975,8 @@ return { automatic, locatorDriven, faded, returned, disabled, persistent, restor
         ])
         yield* Effect.sleep("1500 millis")
         const stopOutput = yield* runBrowserControl(["recording", "stop", "--session", smokeSession])
-        const metadata = yield* readRecordingMetadata(path.join(outputPath, "metadata.json"))
-        if (metadata.mode !== "cdp" || metadata.artifactType !== "frame-directory" || metadata.frameCount < 1) {
+        const metadata = yield* readRecordingMetadata(`${outputPath}.json`)
+        if (metadata.mode !== "cdp" || metadata.artifactType !== "webm" || metadata.frameCount < 1) {
           return yield* Effect.fail(new Error(`logical recording metadata invalid: ${formatValue(metadata)} stop=${stopOutput}`))
         }
         return { session: smokeSession, frameCount: metadata.frameCount, artifactType: metadata.artifactType }
@@ -986,6 +986,7 @@ return { automatic, locatorDriven, faded, returned, disabled, persistent, restor
             yield* runBrowserControl(["recording", "cancel", "--session", smokeSession]).pipe(Effect.ignore)
             yield* runBrowserControl(["session", "delete", smokeSession]).pipe(Effect.ignore)
             yield* removePath(outputPath)
+            yield* removePath(`${outputPath}.json`)
           }),
         ),
       )

@@ -92,6 +92,12 @@ local Node relay.
 - The session journal (`src/session-journal.ts`) appends one JSON line per
   execute under `~/.browser-control/sessions/<id>/journal.jsonl`; writes are
   best-effort and must never fail the execute call.
+- Relay-owned recording uses `Page.startScreencast`, immediately acknowledges
+  compositor frames, activates the target to avoid background-tab throttling,
+  and fits its viewport within 1280×720. Stream each distinct JPEG once in a
+  timestamped Matroska envelope and let ffmpeg produce constant 25 fps output;
+  never push duplicated JPEGs through Node or derive duration from discontinuous
+  navigation timestamps.
 - Session delete/reset must acquire the session's execute permit before closing
   the sandbox, so running scripts are never yanked mid-flight.
 - The version string and build id are injected by `scripts/build-cli.ts`

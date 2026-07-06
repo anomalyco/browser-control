@@ -247,15 +247,24 @@ command exits, so repeated shell commands reuse the same visible tab. Close the
 tab, call `await page.close()`, or detach with the toolbar when finished.
 
 Use `browser-control recording start <output-path>` to record an attached tab.
-`--mode auto` uses WebM `tab-capture` for user-owned tabs and CDP JPEG frame
-directories for relay-owned tabs. The `--session` flag accepts either the
+`--mode auto` uses WebM `tab-capture` for user-owned tabs and timestamped CDP
+screencasting for relay-owned tabs. CDP recording writes `.webm` or `.mp4`
+directly at a constant 25 fps, fits the active viewport within 1280×720, and
+requires `ffmpeg` on `PATH`. CDP mode activates the recorded tab because
+Chromium throttles compositor frames for background tabs. It timestamps each
+distinct frame and lets ffmpeg synthesize the constant-rate stream instead of
+feeding duplicate JPEGs through Node. `tab-capture` output must end in `.webm`;
+pass `--mode cdp` for `.mp4`. The `--session` flag accepts either the
 Browser Control session id used with `execute` or the lower-level `bc-tab-*`
 session id from `browser-control status --json`.
 Recording and the ghost cursor are independent; recording does not change its
 automatic, persistent, or disabled mode.
 
+Run `pnpm bench:recording` with the extension connected to measure distinct
+encoded source FPS and queue-drop ratio over a controlled compositor animation.
+
 ```bash
-browser-control recording start ./tmp/demo-frames --session amazon --mode cdp
+browser-control recording start ./tmp/demo.mp4 --session amazon --mode cdp
 browser-control recording status --session amazon
 browser-control recording stop --session amazon
 ```

@@ -211,7 +211,7 @@ describe("relay-schema", () => {
   })
 
   it("decodes recording responses", () => {
-    const start = decodeRecordingStart({ success: true, tabId: 7, startedAt: 1, path: "/tmp/rec", mimeType: "image/jpeg", mode: "cdp", artifactType: "frame-directory" })
+    const start = decodeRecordingStart({ success: true, tabId: 7, startedAt: 1, path: "/tmp/rec.mp4", mimeType: "video/mp4", mode: "cdp", artifactType: "mp4" })
     expect(start.mode).toBe("cdp")
     const failed = decodeRecordingStart({ success: false, error: "nope" })
     expect(failed.error).toBe("nope")

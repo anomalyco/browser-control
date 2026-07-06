@@ -171,7 +171,7 @@ export interface RelayVersion extends Schema.Schema.Type<typeof RelayVersion> {}
 
 export const RecordingMode = Schema.Literals(["tab-capture", "cdp"])
 
-export const RecordingArtifactType = Schema.Literals(["webm", "frame-directory"])
+export const RecordingArtifactType = Schema.Literals(["webm", "mp4"])
 
 export const RecordingStartResponse = Schema.Struct({
   success: Schema.Boolean,

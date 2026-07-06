@@ -265,20 +265,25 @@ start or edit recordings.
 
 Use `browser-control recording start <output-path>` to record an attached tab.
 The default `--mode auto` keeps `chrome.tabCapture` for user-owned tabs and uses
-CDP frame capture for relay-owned tabs, so session-created `bc-tab-*` pages can be
-recorded without clicking the extension icon. Pass `--mode tab-capture` or
-`--mode cdp` to force a mode.
+timestamped CDP screencasting for relay-owned tabs, so session-created `bc-tab-*`
+pages can be recorded without clicking the extension icon. CDP mode requires
+`ffmpeg` on `PATH`, accepts `.webm` or `.mp4`, defaults to 25 fps, and bounds
+the active viewport within 1280×720. It activates the recorded tab because
+Chromium throttles compositor frames in background tabs. `tab-capture` output
+must end in `.webm`; pass `--mode cdp` for `.mp4` or to force CDP on a
+user-owned tab.
 The `--session` flag accepts either the Browser Control session id you use with
 `execute` or the lower-level CDP `bc-tab-*` session id from `status --json`.
 
 ```bash
-browser-control recording start ./tmp/demo-frames --session my-session --mode cdp
+browser-control recording start ./tmp/demo.mp4 --session my-session --mode cdp
 browser-control recording status --session my-session
 browser-control recording stop --session my-session
 ```
 
-`tab-capture` writes a WebM file and can include audio. `cdp` writes a directory
-of JPEG frames plus `metadata.json`; it does not encode WebM or capture audio yet.
+`tab-capture` writes a WebM file and can include audio. `cdp` writes WebM or MP4
+plus a `.json` metadata sidecar with source, encoded, coalesced, and dropped
+frame counts; it does not capture audio.
 
 Session-owned pages stay attached and visible so repeated shell commands reuse the
 same browser state. Use `browser-control session reset` or

@@ -13,6 +13,7 @@
     "browser-control-mcp": "./dist/mcp.js"
   },
   "scripts": {
+    "bench:recording": "tsx scripts/bench-recording.ts",
     "build:cli": "tsx scripts/build-cli.ts",
     "build": "pnpm build:cli && pnpm build:extension",
     "build:extension": "tsx scripts/build-extension.ts",

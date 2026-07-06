@@ -429,8 +429,8 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
 
   const cleanup = Effect.fnUntraced(function* () {
     handoffs.cancelAll()
-    recordingRelay.cleanupAll("Relay closed")
     extensionRpc.rejectPending(new Error("Relay closed"))
+    yield* Effect.tryPromise(() => recordingRelay.cleanupAll("Relay closed")).pipe(Effect.ignore)
     yield* sessions.closeAll()
     for (const socket of cdpClients) {
       socket.close()
@@ -490,7 +490,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       })
       socket.on("close", () => {
         if (extensionRpc.disconnectIfCurrent(socket)) {
-          recordingRelay.cleanupAll("Extension disconnected")
+          void recordingRelay.cleanupAll("Extension disconnected").catch(() => {})
           registry.clear()
         }
       })
@@ -642,6 +642,9 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     const params = getObject(message.params?.params)
     const sourceSessionId = typeof message.params?.sessionId === "string" ? message.params.sessionId : undefined
     debugLog?.(`evt tab=${tabId} ${method} src=${sourceSessionId ?? "root"}`)
+    if (recordingRelay.handleDebuggerEvent({ tabId, method, params })) {
+      return
+    }
     let shouldBroadcast = true
     let attachedChildTarget: ChildTarget | undefined
 

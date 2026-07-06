@@ -528,12 +528,12 @@ const status = Command.make(
 const recordingStart = Command.make(
   "start",
   {
-    outputPath: Argument.string("output-path").pipe(Argument.withDescription("Path to write the recording artifact; WebM file for tab-capture, frame directory for CDP")),
+    outputPath: Argument.string("output-path").pipe(Argument.withDescription("Path to write the recording artifact; tabCapture requires .webm, CDP accepts .webm or .mp4")),
     session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Record the page for this Browser Control or CDP session id")),
     tabId: Flag.integer("tab-id").pipe(Flag.optional, Flag.withDescription("Record this attached Chrome tab id")),
     mode: Flag.string("mode").pipe(Flag.optional, Flag.withDescription("Recording mode: auto, tab-capture, or cdp. auto uses CDP for relay-owned tabs and tabCapture for user-owned tabs")),
     audio: Flag.boolean("audio").pipe(Flag.withDescription("Include tab audio")),
-    frameRate: Flag.integer("frame-rate").pipe(Flag.optional, Flag.withDescription("Capture frame rate, defaults to 30 for tab-capture and 5 for CDP")),
+    frameRate: Flag.integer("frame-rate").pipe(Flag.optional, Flag.withDescription("Output frame rate, defaults to 30 for tab-capture and 25 for CDP")),
     maxDurationMs: Flag.integer("max-duration-ms").pipe(Flag.optional, Flag.withDescription("Auto-stop guard in milliseconds, defaults to 900000")),
   },
   Effect.fn("Cli.recordingStart")(function* ({ outputPath, session, tabId, mode, audio, frameRate, maxDurationMs }) {
@@ -620,7 +620,7 @@ const recordingCancel = Command.make(
 ).pipe(Command.withDescription("Cancel recording without writing a file"))
 
 const recording = Command.make("recording").pipe(
-  Command.withDescription("Record an attached tab with tabCapture or CDP frames"),
+  Command.withDescription("Record an attached tab to WebM or MP4"),
   Command.withSubcommands([recordingStart, recordingStop, recordingStatus, recordingCancel]),
 )
 

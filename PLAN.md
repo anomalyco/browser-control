@@ -300,9 +300,11 @@ V1 intentionally avoids capabilities that would require forking
 - No `locator.selector()`.
 - Ghost cursor support is a transient relay-injected arrow with spring motion and
   persistent and disabled overrides, not a recording or demo-video editing system.
-- Recording supports existing `chrome.tabCapture` WebM for user-owned tabs and a
-  relay-side CDP JPEG frame-directory fallback for relay-owned tabs. CDP recording
-  does not encode video or capture audio yet.
+- Recording supports existing `chrome.tabCapture` WebM for user-owned tabs and
+  timestamped, 720p-bounded CDP screencasting to WebM or MP4 for relay-owned
+  tabs. CDP recording activates its tab to avoid Chromium's background
+  compositor throttle, streams timestamped MJPEG through Matroska, requires
+  `ffmpeg` on `PATH`, and does not capture audio.
 - No advanced raw-CDP helper guarantees.
 - No custom raw-CDP helper API beyond stock Playwright behavior.
 - No custom timeout, dialog, or inspect patches to Playwright internals.
