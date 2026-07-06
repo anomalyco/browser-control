@@ -6,12 +6,12 @@ import type {
   OffscreenStatusRecordingResult,
   OffscreenStopRecordingResult,
 } from "./recording-types.ts"
-import { isBrowserControlGroupTitle, shouldUngroupBrowserControlTab } from "./tab-groups.ts"
+import { isBrowserControlGroupTitle, isCurrentBrowserControlGroupTitle, isLegacyBrowserControlGroupTitle, shouldUngroupBrowserControlTab, tabGroupColor, tabGroupTitle } from "./tab-groups.ts"
 import { pageStatusFromJson } from "./page-status.ts"
 
 const relayHost = "127.0.0.1"
 const relayPort = 19989
-const shimVersion = "0.0.15"
+const shimVersion = "0.0.16"
 const offscreenDocumentPath = "offscreen.html"
 
 let socket: WebSocket | undefined
@@ -150,13 +150,15 @@ function announceHelloAndAttachedTabs(): void {
 }
 
 async function reannounceAttachedTabsAndReconcileGroups(): Promise<void> {
+  const attachedTabIds = new Set<number>()
   const targets = await chrome.debugger.getTargets()
   for (const target of targets) {
     if (target.attached && typeof target.tabId === "number") {
+      attachedTabIds.add(target.tabId)
       sendMessage({ method: "debugger.attached", params: { tabId: target.tabId } })
     }
   }
-  await reconcileBrowserControlGroups()
+  await reconcileBrowserControlGroups(attachedTabIds)
 }
 
 async function handleSocketMessage(data: unknown): Promise<void> {
@@ -214,6 +216,34 @@ async function handleCommand(command: ShimCommand): Promise<JsonObject> {
     return {}
   }
   if (command.method === "tabs.group") {
+    const tabId = numberParam(command.params, "tabId")
+    const tab = await chrome.tabs.get(tabId)
+    if (tab.groupId !== undefined && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
+      const currentGroup = await chrome.tabGroups.get(tab.groupId)
+      if (currentGroup.title === tabGroupTitle && currentGroup.color === tabGroupColor) {
+        return { groupId: currentGroup.id }
+      }
+    }
+    const attachedTabIds = await getAttachedTabIds()
+    let existingGroup: chrome.tabGroups.TabGroup | undefined
+    for (const group of await chrome.tabGroups.query({ windowId: tab.windowId })) {
+      if (group.title !== tabGroupTitle || group.color !== tabGroupColor) {
+        continue
+      }
+      const groupedTabs = await chrome.tabs.query({ groupId: group.id })
+      if (groupedTabs.some((groupedTab) => typeof groupedTab.id === "number" && attachedTabIds.has(groupedTab.id))) {
+        existingGroup = group
+        break
+      }
+    }
+    const groupId = await chrome.tabs.group({
+      tabIds: [tabId],
+      ...(existingGroup ? { groupId: existingGroup.id } : {}),
+    })
+    await chrome.tabGroups.update(groupId, { title: tabGroupTitle, color: tabGroupColor })
+    return { groupId }
+  }
+  if (command.method === "tabs.ungroup") {
     const tabId = numberParam(command.params, "tabId")
     await guardedUngroupBrowserControlTab(tabId)
     return {}
@@ -393,13 +423,14 @@ async function getTabCaptureStreamId(tabId: number): Promise<string> {
   }
 }
 
-async function reconcileBrowserControlGroups(): Promise<void> {
+async function reconcileBrowserControlGroups(knownAttachedTabIds?: ReadonlySet<number>): Promise<void> {
   if (!chrome.tabGroups) {
     return
   }
+  const attachedTabIds = knownAttachedTabIds ?? await getAttachedTabIds()
   const groups = await chrome.tabGroups.query({})
   for (const group of groups) {
-    if (!isBrowserControlGroupTitle(group.title)) {
+    if (!isCurrentBrowserControlGroupTitle(group.title) && !isLegacyBrowserControlGroupTitle(group.title)) {
       continue
     }
     const tabs = await chrome.tabs.query({ groupId: group.id })
@@ -407,9 +438,23 @@ async function reconcileBrowserControlGroups(): Promise<void> {
       if (typeof tab.id !== "number") {
         continue
       }
+      if (attachedTabIds.has(tab.id)) {
+        continue
+      }
       await guardedUngroupBrowserControlTab(tab.id)
     }
   }
+}
+
+async function getAttachedTabIds(): Promise<Set<number>> {
+  const attachedTabIds = new Set<number>()
+  const targets = await chrome.debugger.getTargets()
+  for (const target of targets) {
+    if (target.attached && typeof target.tabId === "number") {
+      attachedTabIds.add(target.tabId)
+    }
+  }
+  return attachedTabIds
 }
 
 async function guardedUngroupBrowserControlTab(tabId: number): Promise<void> {

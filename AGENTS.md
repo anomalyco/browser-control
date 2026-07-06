@@ -178,7 +178,7 @@ browser-control skill
 
 - Load `extension/dist` as the unpacked extension.
 - The relay listens on `127.0.0.1:19989` by default.
-- Current shim version is `0.0.15`.
+- Current shim version is `0.0.16`.
 - On socket open the shim sends `hello` and then re-announces every tab it still
   has `chrome.debugger` attached to (`debugger.attached` events), so a restarted
   relay rebuilds its target registry without the user re-clicking the toolbar.
@@ -190,6 +190,8 @@ browser-control skill
 - The relay installs scoped `uncaughtException`/`unhandledRejection` guards for
   its lifetime; in-process playwright event dispatch errors are logged, not
   fatal.
-- The in-page status is the sole persistent presence indicator. Do not group
-  attached tabs. The shim removes stale `browser-control`, legacy `bc:*`, and
-  compact `bc · *` groups on startup and reconnect.
+- Session-owned tabs, including adopted user tabs, share a purple `control`
+  group within each browser window. Merely attached tabs remain in their
+  existing location. Releasing an adopted tab removes it from `control` without
+  closing it. The shim also recognizes legacy `browser-control`, `bc:*`, and
+  `bc · *` groups for cleanup.

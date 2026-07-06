@@ -44,7 +44,7 @@ bun link          # installs `browser-control` and `browser-control-mcp` globall
 3. Click **Load unpacked** and select the repo's `extension/dist` directory.
 4. Pin the Browser Control toolbar button.
 
-The current extension shim version is `0.0.15`; reload the unpacked extension
+The current extension shim version is `0.0.16`; reload the unpacked extension
 after rebuilding when its source changes.
 
 ### 3. Run it

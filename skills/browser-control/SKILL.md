@@ -479,7 +479,7 @@ language changes, update `CONTEXT.md` too.
 - Extension changes not taking effect: rebuild `extension/dist` and reload the
   unpacked extension once.
 - Repeated `hello` messages or in-flight RPC timeouts: check for duplicate shim
-  websocket reconnects. The current shim version is `0.0.15`.
+  websocket reconnects. The current shim version is `0.0.16`.
 - Relay restarted while tabs were attached: shim `0.0.7`+ re-announces attached
   tabs after reconnecting, so the relay rebuilds its target registry without
   re-clicking the toolbar. If `activeTargets` stays 0 with an older shim,
@@ -488,8 +488,11 @@ language changes, update `CONTEXT.md` too.
   the user probably dismissed the "is being debugged" banner, which detaches
   chrome.debugger from every tab at once. Re-attach via the toolbar (or
   `session adopt` after re-attaching).
-- Legacy groups: shim `0.0.15` removes `browser-control`, `bc:*`, and `bc · *`
-  tab groups on startup and reconnect. Attached tabs are not grouped.
+- Control group: shim `0.0.16` puts session-owned tabs, including adopted user
+  tabs, in a purple `control` group within each browser window. Merely attached
+  tabs remain where the user put them. Reset, delete, or re-adoption releases an
+  adopted tab from the group without closing it. Legacy `browser-control`,
+  `bc:*`, and `bc · *` groups remain recognized for cleanup.
 - Full session ids remain in CLI status, journals, and in-page accessibility
   text. The toolbar badge shows `ON` when attached, `RUN` while a mutable session executes,
   and `WAIT` while a handoff is pending. Read-only execution stays quietly `ON`.

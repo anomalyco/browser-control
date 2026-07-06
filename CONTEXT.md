@@ -51,6 +51,11 @@ The browser extension action surface used to attach, detach, and display status
 for the active tab.
 _Avoid_: Side panel, chat panel
 
+**Control Group**:
+The purple browser tab group named `control` that makes session-owned tabs,
+including adopted user tabs, visible in the browser tab strip.
+_Avoid_: Workspace, ownership boundary
+
 **Execute Sandbox**:
 A persistent trusted JavaScript environment where an agent runs browser
 automation code.
@@ -70,7 +75,7 @@ _Avoid_: Explicit MCP session id
 - A **User Browser** contains zero or more **Attached Tabs**.
 - The **Attached-Tab Pool** is shared across sessions in v1.
 - A **Toolbar Control** attaches or detaches the active tab.
-- An **Attached-Tab Group** makes the **Attached-Tab Pool** visible to the user.
+- A **Control Group** makes session-owned tabs visible to the user.
 - An **Agent** controls the browser by running code in an **Execute Sandbox**.
 - An **Execute Sandbox** owns **Persistent State**, not browser tabs.
 - **Detach** removes an **Attached Tab** from the **Attached-Tab Pool**.

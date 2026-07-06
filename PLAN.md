@@ -61,9 +61,10 @@ Agent / MCP client / CLI
 - **Minimal extension UI**: v1 uses the extension toolbar action for
   attach/detach plus a subtle in-page status and handoff control. It does not
   include a side panel.
-- **Single presence surface**: the subtle in-page status is the persistent
-  indicator that Browser Control is attached; it does not claim tabs with
-  browser tab groups.
+- **Visible session control**: session-owned tabs share a purple `control` group
+  within each browser window. This includes adopted user tabs; merely attached
+  tabs remain in their existing location. The in-page status shows finer-grained
+  attached, running, and waiting state.
 - **Best-effort stock CDP only**: v1 does not add custom raw-CDP helpers; agents
   may use whatever stock `playwright-core` exposes.
 - **Name**: use `browser-control` for the product, repository, CLI command, and
@@ -181,7 +182,8 @@ Expected v1 support:
   debugging replay issues.
 - Show active-tab attach/detach through the extension toolbar action and keep a
   subtle in-page indicator for attached/running/waiting state.
-- Remove legacy Browser Control tab groups; the in-page status is sufficient.
+- Put session-owned and adopted tabs in a visible `control` group. Remove an
+  adopted tab from the group when its session releases it without closing it.
 
 ## First Milestone
 
@@ -200,10 +202,11 @@ Prove the smallest end-to-end path before adding product polish:
 Current status:
 
 - Relay starts at `http://127.0.0.1:19989`.
-- Extension shim `0.0.15` connects without websocket reconnect storms, reports
+- Extension shim `0.0.16` connects without websocket reconnect storms, reports
   its version in relay status, and re-announces attached tabs after reconnect so
-  a restarted relay recovers the attached-tab pool. It removes legacy Browser
-  Control groups on startup/reconnect and does not group attached tabs.
+  a restarted relay recovers the attached-tab pool. Session-owned tabs share a
+  purple `control` group per browser window; legacy Browser Control groups are
+  recognized for cleanup.
 - `browser-control session adopt --target-url/--target-index` makes a
   user-attached tab the session's sticky default page; adopted tabs are
   released, never closed, by session reset/delete. Execute warns with an adopt

@@ -57,6 +57,7 @@ export type ExtensionCommand = {
     | "tabs.create"
     | "tabs.remove"
     | "tabs.group"
+    | "tabs.ungroup"
     | "action.setAttached"
     | "action.setBadge"
     | "pageStatus.set"
