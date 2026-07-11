@@ -76,8 +76,12 @@ describe("SessionStore", () => {
     expect(parsed.endpoints[otherEndpoint]?.id).toBe("other-session")
   })
 
-  it("treats corrupt files as empty", async () => {
+  it("reports corrupt files instead of overwriting them as empty", async () => {
     await fs.writeFile(path.join(dir, "session.json"), "not json")
-    expect(await runStore({ endpoint: defaultEndpoint }, (store) => store.read)).toBeUndefined()
+    await expect(runStore({ endpoint: defaultEndpoint }, (store) => store.read)).rejects.toMatchObject({
+      _tag: "SessionStore.SessionStoreError",
+      operation: "decode",
+    })
+    expect(await fs.readFile(path.join(dir, "session.json"), "utf8")).toBe("not json")
   })
 })

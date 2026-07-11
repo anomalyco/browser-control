@@ -4,6 +4,15 @@ import { getObject, sendCdpEvent } from "./relay-helpers.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
 import type { TargetRegistry } from "./target-registry.ts"
 
+export type ClientCdpSessionAlias =
+  | { readonly kind: "browser" }
+  | {
+    readonly kind: "target"
+    readonly tabId: number
+    readonly targetId: string
+    readonly chromeSessionId?: string
+  }
+
 export type ClientTargetAnnouncements = {
   readonly sessions: Set<string>
   readonly targets: Map<string, { readonly sessionId: string; readonly parentSessionId?: string }>
@@ -12,6 +21,32 @@ export type ClientTargetAnnouncements = {
 
 export function createClientTargetAnnouncements(): ClientTargetAnnouncements {
   return { sessions: new Set(), targets: new Map(), sessionTargets: new Map() }
+}
+
+export function chromeSessionIdForClientRequest(options: {
+  readonly alias: { readonly chromeSessionId?: string } | undefined
+  readonly requestedSessionId: string | undefined
+  readonly rootSessionId: string | undefined
+}): string | undefined {
+  if (options.alias) {
+    return options.alias.chromeSessionId
+  }
+  return options.requestedSessionId && options.requestedSessionId !== options.rootSessionId
+    ? options.requestedSessionId
+    : undefined
+}
+
+export function removeClientTargetAliases(
+  clients: Iterable<Map<string, ClientCdpSessionAlias>>,
+  matches: (alias: Extract<ClientCdpSessionAlias, { readonly kind: "target" }>) => boolean,
+): void {
+  for (const aliases of clients) {
+    for (const [aliasId, alias] of aliases) {
+      if (alias.kind === "target" && matches(alias)) {
+        aliases.delete(aliasId)
+      }
+    }
+  }
 }
 
 export function hasAnnouncedSession(state: ClientTargetAnnouncements | undefined, sessionId: string): boolean {

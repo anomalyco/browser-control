@@ -23,6 +23,14 @@ describe("runtime diagnostics", () => {
     })).toBe("execution-context/context-destroyed; pageClosed=false; urlChanged=true; mainFrameNavigations=1")
   })
 
+  it("classifies cross-extension navigation failures", () => {
+    expect(runtimeFailureKind(new Error("Protocol error (Page.navigate): Cannot access a chrome-extension:// URL of different extension"))).toBe("cross-extension-page")
+    expect(executionContextFailureDiagnostic(
+      new Error("Protocol error (Page.navigate): Cannot access a chrome-extension:// URL of different extension"),
+      undefined,
+    )).toBe("target/cross-extension-page")
+  })
+
   it("does not attach diagnostics to unrelated failures", () => {
     expect(executionContextFailureDiagnostic(new Error("selector did not match"), undefined)).toBeUndefined()
   })

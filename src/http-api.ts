@@ -8,15 +8,22 @@ import {
   parseTargetSelection,
   readJsonBody,
   requiredSessionId,
-  requiredString,
   sendJson,
   validateBrowserFetchSite,
   validateHostHeader,
 } from "./relay-helpers.ts"
 import { selectTarget } from "./execute.ts"
-import { ExecuteRequest, SessionAdoptRequest } from "./relay-schema.ts"
+import {
+  ExecuteRequest,
+  RecordingStartRequest,
+  RecordingTargetRequest,
+  SessionAdoptRequest,
+  SessionIdRequest,
+  SessionNewRequest,
+  type TargetSummary,
+} from "./relay-schema.ts"
 import type { BrowserControlSessions } from "./session-manager.ts"
-import type { RecordingMode, RecordingRelay, RecordingStartOptions, RecordingTargetOptions } from "./recording-relay.ts"
+import type { RecordingRelay, RecordingStartOptions, RecordingTargetOptions } from "./recording-relay.ts"
 import type { TargetRegistry } from "./target-registry.ts"
 import { browserControlBuildId, browserControlVersion } from "./version.ts"
 
@@ -83,31 +90,37 @@ export function createHttpRequestHandler(options: {
       return
     }
     if (pathname.startsWith("/recording/")) {
-      Effect.runPromise(handleRecordingRequest({ request, response, pathname, requestUrl, registry: options.registry, recordingRelay: options.recordingRelay })).catch((error: unknown) => {
-        sendJson(response, {
-          error: error instanceof Error ? error.message : String(error),
-        }, error instanceof HttpRouteError ? error.status : 500)
-      })
+      runRequestEffect(response, handleRecordingRequest({ request, response, pathname, requestUrl, registry: options.registry, recordingRelay: options.recordingRelay }))
       return
     }
     if (pathname.startsWith("/cli/")) {
-      Effect.runPromise(handleCliRequest({
+      runRequestEffect(response, handleCliRequest({
         request,
         response,
         pathname,
         sessions: options.sessions,
         registry: options.registry,
         ...(options.refreshPageStatuses ? { refreshPageStatuses: options.refreshPageStatuses } : {}),
-      })).catch((error: unknown) => {
-        sendJson(response, {
-          error: error instanceof Error ? error.message : String(error),
-        }, error instanceof HttpRouteError ? error.status : 500)
-      })
+      }))
       return
     }
     response.writeHead(404)
     response.end("Not found")
   }
+}
+
+function runRequestEffect(response: http.ServerResponse, effect: Effect.Effect<void, Error>): void {
+  const controller = new AbortController()
+  const onClose = () => controller.abort()
+  response.once("close", onClose)
+  Effect.runPromise(effect, { signal: controller.signal }).catch((error: unknown) => {
+    if (response.destroyed || response.writableEnded) return
+    sendJson(response, {
+      error: error instanceof Error ? error.message : String(error),
+    }, error instanceof HttpRouteError ? error.status : 500)
+  }).finally(() => {
+    response.off("close", onClose)
+  })
 }
 
 function handleRecordingRequest(options: {
@@ -121,24 +134,19 @@ function handleRecordingRequest(options: {
   return Effect.gen(function* () {
     if (options.pathname === "/recording/start" && options.request.method === "POST") {
       const body = yield* readJsonBody(options.request)
-      const target = resolveAttachedRecordingTarget({ registry: options.registry, tabId: body.tabId, sessionId: body.sessionId })
-      const outputPath = requiredString(body.outputPath, "outputPath")
-      const frameRate = optionalNumber(body.frameRate)
-      const videoBitsPerSecond = optionalNumber(body.videoBitsPerSecond)
-      const audioBitsPerSecond = optionalNumber(body.audioBitsPerSecond)
-      const maxDurationMs = optionalNumber(body.maxDurationMs)
-      const mode = optionalRecordingMode(body.mode)
+      const request = yield* decodeRequest(RecordingStartRequest, body, "recording start")
+      const target = resolveAttachedRecordingTarget({ registry: options.registry, tabId: request.tabId, sessionId: request.sessionId })
       const startOptions: RecordingStartOptions = {
         tabId: target.tabId,
         ...(target.sessionId ? { sessionId: target.sessionId } : {}),
         owner: target.owner,
-        outputPath,
-        ...(mode === undefined ? {} : { mode }),
-        ...(frameRate === undefined ? {} : { frameRate }),
-        ...(typeof body.audio === "boolean" ? { audio: body.audio } : {}),
-        ...(videoBitsPerSecond === undefined ? {} : { videoBitsPerSecond }),
-        ...(audioBitsPerSecond === undefined ? {} : { audioBitsPerSecond }),
-        ...(maxDurationMs === undefined ? {} : { maxDurationMs }),
+        outputPath: request.outputPath,
+        ...(request.mode === undefined ? {} : { mode: request.mode }),
+        ...(request.frameRate === undefined ? {} : { frameRate: request.frameRate }),
+        ...(request.audio === undefined ? {} : { audio: request.audio }),
+        ...(request.videoBitsPerSecond === undefined ? {} : { videoBitsPerSecond: request.videoBitsPerSecond }),
+        ...(request.audioBitsPerSecond === undefined ? {} : { audioBitsPerSecond: request.audioBitsPerSecond }),
+        ...(request.maxDurationMs === undefined ? {} : { maxDurationMs: request.maxDurationMs }),
       }
       const result = yield* Effect.tryPromise({
         try: () => options.recordingRelay.startRecording(startOptions),
@@ -149,7 +157,8 @@ function handleRecordingRequest(options: {
     }
     if (options.pathname === "/recording/stop" && options.request.method === "POST") {
       const body = yield* readJsonBody(options.request)
-      const target = recordingTargetFromValues({ registry: options.registry, tabId: body.tabId, sessionId: body.sessionId })
+      const request = yield* decodeRequest(RecordingTargetRequest, body, "recording stop")
+      const target = recordingTargetFromValues({ registry: options.registry, tabId: request.tabId, sessionId: request.sessionId })
       const result = yield* Effect.tryPromise({
         try: () => options.recordingRelay.stopRecording(target),
         catch: (cause) => new Error(formatCauseMessage({ label: "stop recording", cause }), { cause }),
@@ -168,7 +177,8 @@ function handleRecordingRequest(options: {
     }
     if (options.pathname === "/recording/cancel" && options.request.method === "POST") {
       const body = yield* readJsonBody(options.request)
-      const target = recordingTargetFromValues({ registry: options.registry, tabId: body.tabId, sessionId: body.sessionId })
+      const request = yield* decodeRequest(RecordingTargetRequest, body, "recording cancel")
+      const target = recordingTargetFromValues({ registry: options.registry, tabId: request.tabId, sessionId: request.sessionId })
       const result = yield* Effect.tryPromise({
         try: () => options.recordingRelay.cancelRecording(target),
         catch: (cause) => new Error(formatCauseMessage({ label: "cancel recording", cause }), { cause }),
@@ -206,13 +216,15 @@ function handleCliRequest(options: {
     }
     if (options.pathname === "/cli/session/new" && options.request.method === "POST") {
       const body = yield* readJsonBody(options.request)
-      const session = options.sessions.createNew(optionalSessionId(body.id), { readOnly: body.readOnly === true })
+      const request = yield* decodeRequest(SessionNewRequest, body, "session new")
+      const session = options.sessions.createNew(optionalSessionId(request.id), { readOnly: request.readOnly === true })
       sendJson(options.response, { session: options.sessions.summary(session.id) })
       return
     }
     if (options.pathname === "/cli/session/delete" && options.request.method === "POST") {
       const body = yield* readJsonBody(options.request)
-      const id = requiredSessionId(body.id)
+      const request = yield* decodeRequest(SessionIdRequest, body, "session delete")
+      const id = requiredSessionId(request.id)
       const adoptedTargetId = options.sessions.adoptedTargetId(id)
       const deleted = yield* options.sessions.delete(id)
       if (!deleted) {
@@ -225,7 +237,8 @@ function handleCliRequest(options: {
     }
     if (options.pathname === "/cli/session/reset" && options.request.method === "POST") {
       const body = yield* readJsonBody(options.request)
-      const id = requiredSessionId(body.id)
+      const request = yield* decodeRequest(SessionIdRequest, body, "session reset")
+      const id = requiredSessionId(request.id)
       const adoptedTargetId = options.sessions.adoptedTargetId(id)
       const session = yield* options.sessions.reset(id)
       if (!session) {
@@ -292,7 +305,7 @@ function handleCliRequest(options: {
   })
 }
 
-function targetSummaries(registry: TargetRegistry) {
+function targetSummaries(registry: TargetRegistry): TargetSummary[] {
   return registry.listRootTargets().map((target) => {
       return {
         id: target.targetInfo.targetId,
@@ -301,10 +314,20 @@ function targetSummaries(registry: TargetRegistry) {
         url: target.targetInfo.url,
         tabId: target.tabId,
         sessionId: target.sessionId,
-        browserControlSessionId: target.browserControlSessionId,
+        ...(target.browserControlSessionId ? { browserControlSessionId: target.browserControlSessionId } : {}),
         owner: target.owner,
+        ...(target.crashed ? { crashed: true } : {}),
       }
   })
+}
+
+function decodeRequest<A>(schema: Schema.ConstraintDecoder<A>, body: unknown, label: string): Effect.Effect<A, Error> {
+  return Schema.decodeUnknownEffect(schema)(body).pipe(
+    Effect.mapError((cause) => new HttpRouteError({
+      message: `Invalid ${label} request: ${cause.message}`,
+      status: 400,
+    })),
+  )
 }
 
 export function releaseSessionTargets(registry: TargetRegistry, browserControlSessionId: string, targetIds: readonly string[]): number[] {
@@ -340,7 +363,7 @@ function resolveAttachedRecordingTarget(options: {
   if (tabId !== undefined) {
     const target = options.registry.getRootTargetByTabId(tabId)
     if (!target) {
-      throw new HttpRouteError(`No attached tab found for tabId ${tabId}`, 404)
+      throw new HttpRouteError({ message: `No attached tab found for tabId ${tabId}`, status: 404 })
     }
     return { tabId, sessionId: target.sessionId, owner: target.owner }
   }
@@ -348,20 +371,20 @@ function resolveAttachedRecordingTarget(options: {
   if (sessionId) {
     const target = options.registry.getRootTargetBySessionId(sessionId)
     if (!target) {
-      throw new HttpRouteError(`No attached tab found for sessionId ${sessionId}`, 404)
+      throw new HttpRouteError({ message: `No attached tab found for sessionId ${sessionId}`, status: 404 })
     }
     return { tabId: target.tabId, sessionId: target.sessionId, owner: target.owner }
   }
   const targets = options.registry.listRootTargets()
   if (targets.length === 0) {
-    throw new HttpRouteError("No attached tab available for recording", 404)
+    throw new HttpRouteError({ message: "No attached tab available for recording", status: 404 })
   }
   if (targets.length > 1) {
-    throw new HttpRouteError("Multiple attached tabs available; provide sessionId or tabId", 400)
+    throw new HttpRouteError({ message: "Multiple attached tabs available; provide sessionId or tabId", status: 400 })
   }
   const target = targets[0]
   if (!target) {
-    throw new HttpRouteError("No attached tab available for recording", 404)
+    throw new HttpRouteError({ message: "No attached tab available for recording", status: 404 })
   }
   return { tabId: target.tabId, sessionId: target.sessionId, owner: target.owner }
 }
@@ -387,32 +410,12 @@ function recordingTargetFromQuery(options: { readonly registry: TargetRegistry; 
   }
 }
 
-function optionalNumber(value: unknown): number | undefined {
-  if (value === undefined) {
-    return undefined
-  }
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    throw new HttpRouteError("Expected finite number", 400)
-  }
-  return value
-}
-
-function optionalRecordingMode(value: unknown): RecordingMode | undefined {
-  if (value === undefined) {
-    return undefined
-  }
-  if (value === "auto" || value === "tab-capture" || value === "cdp") {
-    return value
-  }
-  throw new HttpRouteError("mode must be auto, tab-capture, or cdp", 400)
-}
-
 function optionalInteger(value: unknown, field: string): number | undefined {
   if (value === undefined) {
     return undefined
   }
   if (typeof value !== "number" || !Number.isInteger(value)) {
-    throw new HttpRouteError(`${field} must be an integer`, 400)
+    throw new HttpRouteError({ message: `${field} must be an integer`, status: 400 })
   }
   return value
 }

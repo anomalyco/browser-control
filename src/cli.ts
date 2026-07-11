@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
-import { Console, Effect, FileSystem, Layer, Option } from "effect"
+import { Config, Console, Effect, FileSystem, Layer, Option } from "effect"
 import { Argument, Command, Flag } from "effect/unstable/cli"
 import path from "node:path"
 import process from "node:process"
@@ -16,6 +16,9 @@ import * as SessionStore from "./session-store.ts"
 import { browserControlVersion } from "./version.ts"
 
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
+const sessionIdConfig = Config.option(Config.string("BROWSER_CONTROL_SESSION"))
+const targetUrlConfig = Config.option(Config.string("BROWSER_CONTROL_TARGET_URL"))
+const targetIndexConfig = Config.option(Config.int("BROWSER_CONTROL_TARGET_INDEX"))
 
 const readExecuteFile = Effect.fnUntraced(function* (filePath: string) {
   const fs = yield* FileSystem.FileSystem
@@ -87,17 +90,6 @@ const parseRecordingModeOption = Effect.fnUntraced(function* (value: string | un
     return value
   }
   return yield* Effect.fail(new Error("Recording mode must be auto, tab-capture, or cdp"))
-})
-
-const parseOptionalTargetIndex = Effect.fnUntraced(function* (value: string | undefined) {
-  if (!value) {
-    return undefined
-  }
-  const parsed = Number(value)
-  if (!Number.isInteger(parsed)) {
-    return yield* Effect.fail(new Error("BROWSER_CONTROL_TARGET_INDEX must be an integer"))
-  }
-  return parsed
 })
 
 function formatExecuteLogs(logs: readonly ExecuteLogEntry[]): string {
@@ -181,7 +173,7 @@ const serve = Command.make(
   "serve",
   {},
   Effect.fn("Cli.serve")(function* () {
-    const port = yield* Effect.orDie(RelayClient.portConfig)
+    const port = yield* RelayClient.portConfig
     yield* Effect.scoped(
       Effect.gen(function* () {
         const relay = yield* startRelay({ port })
@@ -215,9 +207,9 @@ const execute = Command.make(
       }
       const executeCode = filePath ? yield* readExecuteFile(filePath) : code.join(" ")
       yield* ensureCliRelayAndExtension()
-      const explicitSessionId = optionString(session) ?? process.env.BROWSER_CONTROL_SESSION
-      const targetUrlValue = optionString(targetUrl) ?? process.env.BROWSER_CONTROL_TARGET_URL
-      const targetIndexValue = optionNumber(targetIndex) ?? (yield* parseOptionalTargetIndex(process.env.BROWSER_CONTROL_TARGET_INDEX))
+      const explicitSessionId = optionString(session) ?? Option.getOrUndefined(yield* sessionIdConfig)
+      const targetUrlValue = optionString(targetUrl) ?? Option.getOrUndefined(yield* targetUrlConfig)
+      const targetIndexValue = optionNumber(targetIndex) ?? Option.getOrUndefined(yield* targetIndexConfig)
       if (targetIndexValue !== undefined && targetIndexValue < 0) {
         return yield* Effect.fail(new Error("Target index must be a non-negative integer"))
       }
@@ -372,7 +364,7 @@ const sessionAdopt = Command.make(
   Effect.fn("Cli.sessionAdopt")(function* ({ session, targetUrl, targetIndex }) {
     const relay = yield* RelayClient.Service
     yield* ensureCliRelayAndExtension()
-    const explicitSessionId = optionString(session) ?? process.env.BROWSER_CONTROL_SESSION
+    const explicitSessionId = optionString(session) ?? Option.getOrUndefined(yield* sessionIdConfig)
     const targetUrlValue = optionString(targetUrl)
     const targetIndexValue = optionNumber(targetIndex)
     if (!targetUrlValue && targetIndexValue === undefined) {
@@ -514,7 +506,8 @@ const status = Command.make(
         const tab = target.tabId === undefined ? "" : ` tab=${target.tabId}`
         const browserControlSession = target.browserControlSessionId ? ` session=${target.browserControlSessionId}` : ""
         const owner = target.owner ? ` owner=${target.owner}` : ""
-        return Console.log(`- [${index}] ${target.type} ${target.id}${tab}${browserControlSession}${owner} ${target.url || "about:blank"}`)
+        const health = target.crashed ? " crashed=true" : ""
+        return Console.log(`- [${index}] ${target.type} ${target.id}${tab}${browserControlSession}${owner}${health} ${target.url || "about:blank"}`)
       })
     }
     if (buildProblem) {
@@ -541,14 +534,16 @@ const recordingStart = Command.make(
     yield* ensureCliRelayAndExtension()
     const target = yield* recordingTarget({ session, tabId })
     const modeValue = yield* parseRecordingModeOption(optionString(mode))
+    const frameRateValue = optionNumber(frameRate)
+    const maxDurationMsValue = optionNumber(maxDurationMs)
     const resolvedOutputPath = path.resolve(outputPath)
     const result = yield* relay.recordingStart({
       ...target,
       outputPath: resolvedOutputPath,
       ...(modeValue === undefined ? {} : { mode: modeValue }),
       audio,
-      ...(optionNumber(frameRate) === undefined ? {} : { frameRate: optionNumber(frameRate) }),
-      ...(optionNumber(maxDurationMs) === undefined ? {} : { maxDurationMs: optionNumber(maxDurationMs) }),
+      ...(frameRateValue === undefined ? {} : { frameRate: frameRateValue }),
+      ...(maxDurationMsValue === undefined ? {} : { maxDurationMs: maxDurationMsValue }),
     })
     if (!result.success) {
       return yield* Effect.fail(new Error(result.error ?? "Failed to start recording"))
@@ -633,7 +628,7 @@ const journal = Command.make(
   },
   Effect.fn("Cli.journal")(function* ({ session, limit, json }) {
     const store = yield* SessionStore.Service
-    const sessionId = optionString(session) ?? process.env.BROWSER_CONTROL_SESSION ?? (yield* store.read)
+    const sessionId = optionString(session) ?? Option.getOrUndefined(yield* sessionIdConfig) ?? (yield* store.read)
     if (!sessionId) {
       return yield* Effect.fail(new Error("No session provided and no current Browser Control session exists"))
     }
@@ -702,6 +697,8 @@ const browserControl = Command.make("browser-control").pipe(
 )
 
 const mainLayer = Layer.mergeAll(RelayClient.layerFetch, SessionStore.layer).pipe(
+  // CLI commands consume FileSystem directly in addition to SessionStore, so
+  // Node services intentionally remain exposed downstream.
   Layer.provideMerge(NodeServices.layer),
 )
 

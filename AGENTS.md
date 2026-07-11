@@ -40,6 +40,9 @@ local Node relay.
 - Prefer `Effect.fn` / `Effect.fnUntraced` for functions that return Effects,
   and use scoped resources (`Effect.acquireRelease`, `Effect.scoped`) for
   Playwright and relay lifecycles.
+- Read application runtime configuration through Effect `Config`. Direct
+  `process.env` access is reserved for synchronous process-fault reporting and
+  child-process environment forwarding at Node adapter boundaries.
 - Keep the relay/extension protocol as custom JSON-over-websocket unless there is
   a concrete reason to adopt Effect RPC across that boundary.
 - Keep the extension as a stable shim over Chrome APIs. Put behavior in the
@@ -48,12 +51,18 @@ local Node relay.
 - Relay HTTP wire shapes live in `src/relay-schema.ts` (Effect Schema). Both the
   HTTP responders and clients must derive types from those schemas; do not
   hand-roll relay JSON parsers.
+- Tie relay HTTP effects to the response lifetime with an `AbortSignal`.
+  Browser execute itself is uninterruptible at the underlying Playwright
+  Promise boundary so interruption cannot release its session permit while the
+  script still mutates the page.
 - The CLI and MCP server talk to the relay only through the shared
   `src/relay-client.ts` service (`RelayClient.Service`), never through ad-hoc
   fetch/node:http calls. Failures are tagged errors that keep the relay's own
   error message as the top-level message.
 - Human session-management commands keep an endpoint-scoped current id in
   `~/.browser-control/session.json`; execute and adopt never use it implicitly.
+  Invalid persisted session JSON is reported and preserved, never treated as an
+  empty store that a later write may overwrite.
 - An extension RPC timeout fails only that command; the extension socket is
   closed only when a websocket-level ping probe also fails.
 - CDP guardrails are pure logic in `src/cdp-guardrails.ts`, enforced at the top
@@ -70,9 +79,14 @@ local Node relay.
 - Adopted targets are exclusive to one Browser Control session. Serialize adopts,
   reject competing owners, and release ownership on detach, reset, or delete.
 - Execute results carry per-call `warnings` and an `aftermath` summary
-  (URL movement, navigations, error counts, handoffs). Do not add a passive
-  `page.on("dialog")` listener for aftermath: it would suppress Playwright's
-  dialog auto-dismiss and hang pages.
+  (URL movement, navigations, error counts, handoffs). After an execution-context
+  diagnostic or target crash, the next normal execute performs a bounded page
+  health check: recreate unhealthy relay-owned pages only after the old page
+  closes, but never close or replace unhealthy adopted user tabs. Crash events
+  reject pending debugger commands for only that tab and remain visible in
+  status/doctor until navigation or detach.
+  Do not add a passive `page.on("dialog")` listener for aftermath: it would
+  suppress Playwright's dialog auto-dismiss and hang pages.
 - Allowed Playwright mouse actions automatically reveal a spring-animated arrow cursor;
   explicit helpers can keep it visible or disable it for the current document.
   Read-only input is rejected before cursor mirroring.
@@ -114,6 +128,10 @@ local Node relay.
   broadcast-to-all: it double-initializes pages across clients and hangs
   `newPage`/`setContent`/`evaluate` (regression case: `stale-client-checkout`
   smoke).
+- Client-side CDP aliases for already-announced root targets must route commands
+  without a Chrome child `sessionId`; only child-target aliases carry a real
+  Chrome session id. Use `chromeSessionIdForClientRequest` for both ordinary
+  commands and `Runtime.enable`.
 - `session adopt` makes a user-attached tab the session's default page. Adopted
   tabs are never closed by session reset/delete — only released. Adopting
   closes the session's previously relay-created page.
@@ -145,7 +163,7 @@ local Node relay.
 - Extension shim changes require reloading the unpacked extension once in Brave.
 - Relay-only changes should not require reloading the extension.
 - Use `termctrl` for long-running relay sessions during testing.
-- Run `SMOKE_CASE=local-forms,local-cart,local-checkout,reconnect-evaluate,redirect-reconnect-evaluate,execute-target-url,execute-fill-helpers,execute-snapshot-refs,handoff-navigation,handoff-cross-tab,oopif-reconnect,dedicated-worker,execute-ghost-cursor,session-isolation,multi-client,stale-client-checkout,raw-first-checkout pnpm smoke`
+- Run `SMOKE_CASE=local-forms,local-cart,local-checkout,reconnect-evaluate,redirect-reconnect-evaluate,execute-target-url,execute-page-recovery,execute-fill-helpers,execute-snapshot-refs,handoff-navigation,handoff-cross-tab,oopif-reconnect,dedicated-worker,execute-ghost-cursor,session-isolation,multi-client,stale-client-checkout,raw-first-checkout pnpm smoke`
   before claiming the current smoke set is green.
 - CDP target visibility is scoped per client (`src/cdp-visibility.ts`):
   session-owned tabs are announced and their events delivered only to that

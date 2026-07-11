@@ -104,7 +104,17 @@ export class TargetRegistry {
     if (!target) {
       return
     }
-    this.updateRootTargetInfo(tabId, { ...target.targetInfo, title: url, url })
+    this.addRootTarget({ ...target, targetInfo: { ...target.targetInfo, title: url, url }, crashed: false })
+  }
+
+  markRootTargetCrashed(tabId: number): ConnectedTarget | undefined {
+    const target = this.tabTargets.get(tabId)
+    if (!target) {
+      return undefined
+    }
+    const crashed: ConnectedTarget = { ...target, crashed: true }
+    this.addRootTarget(crashed)
+    return crashed
   }
 
   updateConnectedTargetInfo(options: { readonly tabId: number; readonly targetInfo: TargetInfo }): void {

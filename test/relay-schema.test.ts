@@ -5,12 +5,14 @@ import {
   ExecuteResponse,
   ExecuteSessionSummary,
   ExtensionStatus,
+  RecordingStartRequest,
   RecordingStartResponse,
   RecordingStatusResponse,
   RelayVersion,
   SessionAdoptRequest,
   SessionAdoptResponse,
   SessionContainer,
+  SessionNewRequest,
   SessionsContainer,
   SessionSummary,
   TargetSummaries,
@@ -29,6 +31,8 @@ const decodeExecuteSession = Schema.decodeUnknownSync(ExecuteSessionSummary)
 const decodeExtensionStatus = Schema.decodeUnknownSync(ExtensionStatus)
 const decodeTargets = Schema.decodeUnknownSync(TargetSummaries)
 const decodeRecordingStart = Schema.decodeUnknownSync(RecordingStartResponse)
+const decodeRecordingStartRequest = Schema.decodeUnknownSync(RecordingStartRequest)
+const decodeSessionNewRequest = Schema.decodeUnknownSync(SessionNewRequest)
 const decodeRecordingStatus = Schema.decodeUnknownSync(RecordingStatusResponse)
 const decodeRelayVersion = Schema.decodeUnknownSync(RelayVersion)
 
@@ -210,10 +214,12 @@ describe("relay-schema", () => {
         sessionId: "bc-tab-1",
         browserControlSessionId: "rapid-otter-633",
         owner: "relay",
+        crashed: true,
       },
       { id: "T2", type: "page", title: "", url: "" },
     ])
     expect(targets[0]?.owner).toBe("relay")
+    expect(targets[0]?.crashed).toBe(true)
     expect(targets[1]?.tabId).toBeUndefined()
   })
 
@@ -228,5 +234,14 @@ describe("relay-schema", () => {
     expect(failed.error).toBe("nope")
     const status = decodeRecordingStatus({ isRecording: false })
     expect(status.isRecording).toBe(false)
+  })
+
+  it("rejects malformed session and recording requests", () => {
+    expect(() => decodeSessionNewRequest({ id: "alpha", readOnly: "yes" })).toThrow()
+    expect(() => decodeRecordingStartRequest({
+      outputPath: "/tmp/demo.webm",
+      tabId: 7,
+      audio: "yes",
+    })).toThrow()
   })
 })

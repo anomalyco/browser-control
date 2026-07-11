@@ -1,4 +1,4 @@
-import { Effect, Schedule } from "effect"
+import { Effect, Schedule, Schema } from "effect"
 import { spawn } from "node:child_process"
 import process from "node:process"
 import * as RelayClient from "./relay-client.ts"
@@ -18,6 +18,20 @@ export type EnsureRelayOptions = {
   readonly retryTimes?: number
   readonly retryDelayMs?: number
 }
+
+export class RelayStartFailed extends Schema.TaggedErrorClass<RelayStartFailed>()(
+  "RelayLifecycle.RelayStartFailed",
+  {
+    message: Schema.String,
+    endpoint: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {}
+
+export class ExtensionDisconnected extends Schema.TaggedErrorClass<ExtensionDisconnected>()(
+  "RelayLifecycle.ExtensionDisconnected",
+  { message: Schema.String },
+) {}
 
 export function relayBuildProblem(version: RelayVersion, buildId = browserControlBuildId): string | undefined {
   if (buildId === "dev") {
@@ -52,7 +66,11 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
       while: isRelayUnreachable,
     }),
     Effect.mapError((error) => isRelayUnreachable(error)
-      ? new Error(`Browser Control relay did not start at ${options.relay.endpoint}`)
+      ? new RelayStartFailed({
+        message: `Browser Control relay did not start at ${options.relay.endpoint}`,
+        endpoint: options.relay.endpoint,
+        cause: error,
+      })
       : error),
   )
   const buildProblem = relayBuildProblem(version, buildId)
@@ -68,7 +86,9 @@ export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensio
   const check = options.relay.extensionStatus.pipe(
     Effect.flatMap((status) => status.connected
       ? Effect.succeed(status)
-      : Effect.fail(new ExtensionDisconnected())),
+      : Effect.fail(new ExtensionDisconnected({
+        message: "Browser Control extension is not connected. Load extension/dist in Chromium; it reconnects automatically when the relay starts.",
+      }))),
   )
   if (!options.waitForReconnect) {
     return yield* check
@@ -97,13 +117,6 @@ export function statusCollections(status: ExtensionStatus): {
   readonly targets: NonNullable<ExtensionStatus["targets"]>
 } | undefined {
   return status.sessions && status.targets ? { sessions: status.sessions, targets: status.targets } : undefined
-}
-
-class ExtensionDisconnected extends Error {
-  constructor() {
-    super("Browser Control extension is not connected. Load extension/dist in Chromium; it reconnects automatically when the relay starts.")
-    this.name = "ExtensionDisconnected"
-  }
 }
 
 function spawnManagedRelay(): Effect.Effect<void, Error> {

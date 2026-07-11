@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { Deferred, Effect, Fiber } from "effect"
 import { adoptionTipForUrl, BrowserControlSessions, shouldAppendAdoptionTip } from "../src/session-manager.ts"
 import type { ExecuteSandboxLike } from "../src/relay-types.ts"
@@ -6,6 +6,7 @@ import type { ExecuteSandboxLike } from "../src/relay-types.ts"
 type FakeSandbox = ExecuteSandboxLike & {
   readonly closes: () => number
   readonly adoptedSelections: () => unknown[]
+  readonly crashedTargets: () => string[]
 }
 
 const makeFakeSandbox = (options?: {
@@ -13,9 +14,11 @@ const makeFakeSandbox = (options?: {
   readonly setupFailure?: Error
   readonly adoptFailure?: Error
   readonly onAdopt?: ExecuteSandboxLike["adoptPage"]
+  readonly defaultTargetId?: string
 }): FakeSandbox => {
   let closes = 0
   const adoptedSelections: unknown[] = []
+  const crashedTargets: string[] = []
   return {
     execute: () =>
       (options?.onExecute ?? Effect.void).pipe(
@@ -48,9 +51,14 @@ const makeFakeSandbox = (options?: {
           adoptedSelections.push(selection)
           return "https://example.com/adopted"
         }),
+    markTargetCrashed: (targetId) => {
+      crashedTargets.push(targetId)
+      return options?.defaultTargetId === undefined || options.defaultTargetId === targetId
+    },
     getStatus: () => ({ connected: false, pageUrl: null, stateKeys: [] }),
     closes: () => closes,
     adoptedSelections: () => adoptedSelections,
+    crashedTargets: () => crashedTargets,
   }
 }
 
@@ -158,6 +166,63 @@ describe("BrowserControlSessions", () => {
     )
   })
 
+  it("closeAll waits for a running execute before closing the sandbox", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const started = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
+        const sandbox = makeFakeSandbox({
+          onExecute: Deferred.succeed(started, undefined).pipe(
+            Effect.andThen(Deferred.await(release)),
+          ),
+        })
+        const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox)
+        sessions.createNew("alpha")
+
+        const executeFiber = yield* Effect.forkChild(
+          sessions.execute({ sessionId: "alpha", code: "noop", createIfMissing: false }),
+        )
+        yield* Deferred.await(started)
+        const closeFiber = yield* Effect.forkChild(sessions.closeAll())
+        for (let i = 0; i < 20; i++) yield* Effect.yieldNow
+        expect(sandbox.closes()).toBe(0)
+
+        yield* Deferred.succeed(release, undefined)
+        yield* Fiber.join(executeFiber)
+        yield* Fiber.join(closeFiber)
+        expect(sandbox.closes()).toBe(1)
+        expect(sessions.listSummaries()).toEqual([])
+      }),
+    )
+  })
+
+  it("closeAll preserves a session when its execute permit times out", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const started = yield* Deferred.make<void>()
+        const never = yield* Deferred.make<void>()
+        const sandbox = makeFakeSandbox({
+          onExecute: Deferred.succeed(started, undefined).pipe(
+            Effect.andThen(Deferred.await(never)),
+          ),
+        })
+        const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox, {
+          lifecycleTimeoutMs: 20,
+        })
+        sessions.createNew("alpha")
+        yield* Effect.forkChild(
+          sessions.execute({ sessionId: "alpha", code: "wedged", createIfMissing: false }),
+        )
+        yield* Deferred.await(started)
+
+        yield* sessions.closeAll()
+
+        expect(sandbox.closes()).toBe(0)
+        expect(sessions.listSummaries().map((session) => session.id)).toEqual(["alpha"])
+      }),
+    )
+  })
+
   it("delete times out without closing when an execute still owns the permit", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {
@@ -261,6 +326,21 @@ describe("BrowserControlSessions", () => {
     expect(second.session.created).toBeUndefined()
   })
 
+  it("marks the exact crashed target on active sandboxes", () => {
+    const sandboxes = new Map<string, FakeSandbox>()
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", (id) => {
+      const sandbox = makeFakeSandbox({ defaultTargetId: id === "alpha" ? "target-9" : "target-10" })
+      sandboxes.set(id, sandbox)
+      return sandbox
+    })
+    sessions.createNew("alpha")
+    sessions.createNew("beta")
+
+    expect(sessions.markTargetCrashed("target-9")).toEqual(["alpha"])
+    expect(sandboxes.get("alpha")?.crashedTargets()).toEqual(["target-9"])
+    expect(sandboxes.get("beta")?.crashedTargets()).toEqual(["target-9"])
+  })
+
   it("tracks read-only sessions and preserves the flag across reset", async () => {
     const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox())
     sessions.createNew("locked", { readOnly: true })
@@ -317,6 +397,7 @@ describe("BrowserControlSessions", () => {
   })
 
   it("hook failures do not fail execute", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
     const sessions = new BrowserControlSessions(
       "http://127.0.0.1:0",
       () => makeFakeSandbox(),
@@ -330,10 +411,15 @@ describe("BrowserControlSessions", () => {
       },
     )
     sessions.createNew("alpha")
-    const { result } = await Effect.runPromise(
-      sessions.execute({ sessionId: "alpha", code: "noop", createIfMissing: false }),
-    )
-    expect(result.text).toBe("ok")
+    try {
+      const { result } = await Effect.runPromise(
+        sessions.execute({ sessionId: "alpha", code: "noop", createIfMissing: false }),
+      )
+      expect(result.text).toBe("ok")
+      expect(consoleError).toHaveBeenCalledTimes(3)
+    } finally {
+      consoleError.mockRestore()
+    }
   })
 
   it("adopts a selected page while serializing on the session execute permit", async () => {

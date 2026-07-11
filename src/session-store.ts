@@ -28,8 +28,6 @@ const StoreFile = Schema.Struct({
   }))),
 })
 
-const decodeStoreFile = Schema.decodeUnknownOption(StoreFile)
-
 export interface Interface {
   readonly endpoint: string
   readonly filePath: string
@@ -44,15 +42,21 @@ export const defaultFilePath = (): string => {
   return `${os.homedir()}/.browser-control/session.json`
 }
 
-export const make = Effect.fnUntraced(function* (options?: {
+export const make = Effect.fn("SessionStore.make")(function* (options?: {
   readonly filePath?: string
   readonly endpoint?: string
 }) {
   const fs = yield* FileSystem.FileSystem
   const path = yield* Path.Path
-  const port = yield* Effect.orDie(portConfig)
-  const endpoint = options?.endpoint ?? endpointForPort(port)
   const filePath = options?.filePath ?? defaultFilePath()
+  const port = yield* portConfig.pipe(
+    Effect.mapError((cause) => new SessionStoreError({
+      message: `Invalid BROWSER_CONTROL_PORT configuration: ${cause.message}`,
+      operation: "configure",
+      cause,
+    })),
+  )
+  const endpoint = options?.endpoint ?? endpointForPort(port)
   const defaultEndpoint = endpointForPort(19989)
 
   const storeError = (operation: string) => (cause: unknown) =>
@@ -65,14 +69,20 @@ export const make = Effect.fnUntraced(function* (options?: {
   const readStore: Effect.Effect<Schema.Schema.Type<typeof StoreFile>, SessionStoreError> = fs
     .readFileString(filePath)
     .pipe(
-      Effect.map((text) => {
-        const parsed = parseJson(text)
-        const decoded = decodeStoreFile(parsed)
-        return Option.isSome(decoded) ? decoded.value : {}
-      }),
+      Effect.map(Option.some),
       Effect.catchTag("PlatformError", (error) =>
-        error.reason._tag === "NotFound" ? Effect.succeed({}) : Effect.fail(error)),
+        error.reason._tag === "NotFound" ? Effect.succeed(Option.none<string>()) : Effect.fail(error)),
       Effect.mapError(storeError("read")),
+      Effect.flatMap(Option.match({
+        onNone: () => Effect.succeed({}),
+        onSome: (text) => Effect.try({
+          try: () => JSON.parse(text) as unknown,
+          catch: (cause) => cause,
+        }).pipe(
+          Effect.flatMap(Schema.decodeUnknownEffect(StoreFile)),
+          Effect.mapError(storeError("decode")),
+        ),
+      })),
     )
 
   const currentEntries = (store: Schema.Schema.Type<typeof StoreFile>): Record<string, { readonly id: string }> => {
@@ -114,12 +124,4 @@ export const make = Effect.fnUntraced(function* (options?: {
   return Service.of({ endpoint, filePath, read, write, clear })
 })
 
-const parseJson = (text: string): unknown => {
-  try {
-    return JSON.parse(text) as unknown
-  } catch {
-    return undefined
-  }
-}
-
-export const layer: Layer.Layer<Service, never, FileSystem.FileSystem | Path.Path> = Layer.effect(Service, make())
+export const layer: Layer.Layer<Service, SessionStoreError, FileSystem.FileSystem | Path.Path> = Layer.effect(Service, make())

@@ -70,6 +70,19 @@ export const SessionAdoptRequest = Schema.Struct({
 
 export interface SessionAdoptRequest extends Schema.Schema.Type<typeof SessionAdoptRequest> {}
 
+export const SessionNewRequest = Schema.Struct({
+  id: Schema.optionalKey(Schema.String),
+  readOnly: Schema.optionalKey(Schema.Boolean),
+})
+
+export interface SessionNewRequest extends Schema.Schema.Type<typeof SessionNewRequest> {}
+
+export const SessionIdRequest = Schema.Struct({
+  id: Schema.String,
+})
+
+export interface SessionIdRequest extends Schema.Schema.Type<typeof SessionIdRequest> {}
+
 export const SessionAdoptResponse = Schema.Struct({
   session: ExecuteSessionSummary,
   adoptedUrl: Schema.String,
@@ -154,6 +167,7 @@ export const TargetSummary = Schema.Struct({
   sessionId: Schema.optionalKey(Schema.String),
   browserControlSessionId: Schema.optionalKey(Schema.String),
   owner: Schema.optionalKey(Schema.Literals(["relay", "user"])),
+  crashed: Schema.optionalKey(Schema.Boolean),
 })
 
 export interface TargetSummary extends Schema.Schema.Type<typeof TargetSummary> {}
@@ -180,6 +194,27 @@ export const RelayVersion = Schema.Struct({
 export interface RelayVersion extends Schema.Schema.Type<typeof RelayVersion> {}
 
 export const RecordingMode = Schema.Literals(["tab-capture", "cdp"])
+
+export const RecordingRequestedMode = Schema.Literals(["auto", "tab-capture", "cdp"])
+
+export const RecordingTargetRequest = Schema.Struct({
+  sessionId: Schema.optionalKey(Schema.String),
+  tabId: Schema.optionalKey(Schema.Number),
+})
+
+export interface RecordingTargetRequest extends Schema.Schema.Type<typeof RecordingTargetRequest> {}
+
+export const RecordingStartRequest = RecordingTargetRequest.pipe(Schema.fieldsAssign({
+  outputPath: Schema.String,
+  mode: Schema.optionalKey(RecordingRequestedMode),
+  audio: Schema.optionalKey(Schema.Boolean),
+  frameRate: Schema.optionalKey(Schema.Number),
+  videoBitsPerSecond: Schema.optionalKey(Schema.Number),
+  audioBitsPerSecond: Schema.optionalKey(Schema.Number),
+  maxDurationMs: Schema.optionalKey(Schema.Number),
+}))
+
+export interface RecordingStartRequest extends Schema.Schema.Type<typeof RecordingStartRequest> {}
 
 export const RecordingArtifactType = Schema.Literals(["webm", "mp4"])
 

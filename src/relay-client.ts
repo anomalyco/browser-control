@@ -6,9 +6,11 @@ import {
   ExecuteResponse,
   ExtensionStatus,
   RecordingCancelResponse,
+  type RecordingStartRequest,
   RecordingStartResponse,
   RecordingStatusResponse,
   RecordingStopResponse,
+  type RecordingTargetRequest,
   RelayVersion,
   SessionAdoptResponse,
   SessionContainer,
@@ -59,20 +61,24 @@ export class RelayDecodeFailed extends Schema.TaggedErrorClass<RelayDecodeFailed
   },
 ) {}
 
-export type RelayClientError = RelayUnreachable | RelayRejected | RelayDecodeFailed
+export class RelayEncodeFailed extends Schema.TaggedErrorClass<RelayEncodeFailed>()(
+  "RelayClient.RelayEncodeFailed",
+  {
+    message: Schema.String,
+    path: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {}
 
-export type RecordingTargetRequest = {
-  readonly sessionId?: string | undefined
-  readonly tabId?: number | undefined
-}
+export class RelayConfigInvalid extends Schema.TaggedErrorClass<RelayConfigInvalid>()(
+  "RelayClient.RelayConfigInvalid",
+  {
+    message: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {}
 
-export type RecordingStartRequest = RecordingTargetRequest & {
-  readonly outputPath: string
-  readonly mode?: "auto" | "tab-capture" | "cdp" | undefined
-  readonly audio?: boolean | undefined
-  readonly frameRate?: number | undefined
-  readonly maxDurationMs?: number | undefined
-}
+export type RelayClientError = RelayUnreachable | RelayRejected | RelayDecodeFailed | RelayEncodeFailed
 
 export interface Interface {
   readonly endpoint: string
@@ -95,8 +101,13 @@ export class Service extends Context.Service<Service, Interface>()("browser-cont
 
 const decodeErrorEnvelope = Schema.decodeUnknownOption(ErrorEnvelope)
 
-export const make = Effect.fnUntraced(function* (options?: { readonly endpoint?: string }) {
-  const port = yield* Effect.orDie(portConfig)
+export const make = Effect.fn("RelayClient.make")(function* (options?: { readonly endpoint?: string }) {
+  const port = yield* portConfig.pipe(
+    Effect.mapError((cause) => new RelayConfigInvalid({
+      message: `Invalid BROWSER_CONTROL_PORT configuration: ${cause.message}`,
+      cause,
+    })),
+  )
   const endpoint = options?.endpoint ?? endpointForPort(port)
   const httpClient = yield* HttpClient.HttpClient
 
@@ -158,13 +169,18 @@ export const make = Effect.fnUntraced(function* (options?: { readonly endpoint?:
     path: string,
     body: Record<string, unknown>,
     schema: Schema.ConstraintDecoder<A>,
-  ): Effect.Effect<A, RelayClientError> =>
-    httpClient.execute(
-      HttpClientRequest.post(new URL(path, endpoint)).pipe(HttpClientRequest.bodyJsonUnsafe(body)),
-    ).pipe(
+  ): Effect.Effect<A, RelayClientError> => HttpClientRequest.post(new URL(path, endpoint)).pipe(
+    HttpClientRequest.bodyJson(body),
+    Effect.mapError((cause) => new RelayEncodeFailed({
+      message: `Could not encode relay request for ${path}`,
+      path,
+      cause,
+    })),
+    Effect.flatMap((request) => httpClient.execute(request).pipe(
       Effect.mapError(transportError(path)),
       Effect.flatMap((response) => handleResponse(response, path, schema)),
-    )
+    )),
+  )
 
   const recordingTargetBody = (target: RecordingTargetRequest): Record<string, unknown> => ({
     ...(target.sessionId ? { sessionId: target.sessionId } : {}),
@@ -225,7 +241,7 @@ export const make = Effect.fnUntraced(function* (options?: { readonly endpoint?:
   })
 })
 
-export const layer: Layer.Layer<Service, never, HttpClient.HttpClient> = Layer.effect(Service, make())
+export const layer: Layer.Layer<Service, RelayConfigInvalid, HttpClient.HttpClient> = Layer.effect(Service, make())
 
 /** RelayClient backed by the global `fetch`, for standalone CLI/MCP wiring. */
-export const layerFetch: Layer.Layer<Service> = layer.pipe(Layer.provide(FetchHttpClient.layer))
+export const layerFetch: Layer.Layer<Service, RelayConfigInvalid> = layer.pipe(Layer.provide(FetchHttpClient.layer))

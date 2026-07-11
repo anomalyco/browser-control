@@ -70,6 +70,17 @@ export class ExtensionRpc {
     }
   }
 
+  rejectDebuggerCommandsForTab(tabId: number, error: Error): void {
+    for (const [id, pending] of this.pendingRequests.entries()) {
+      if (pending.debuggerTabId !== tabId) {
+        continue
+      }
+      clearTimeout(pending.timeout)
+      this.pendingRequests.delete(id)
+      pending.reject(error)
+    }
+  }
+
   handleResponse(response: ExtensionResponse): boolean {
     const pending = this.pendingRequests.get(response.id)
     if (!pending) {
@@ -114,6 +125,9 @@ export class ExtensionRpc {
         this.probeLiveness(socket)
         finish(Effect.fail(new Error(`Extension command timed out after ${timeoutMs}ms: ${command.method}`)))
       }, timeoutMs)
+      const debuggerTabId = command.method === "debugger.sendCommand" && typeof command.params?.tabId === "number"
+        ? command.params.tabId
+        : undefined
       this.pendingRequests.set(id, {
         resolve: (value) => {
           finish(Effect.succeed(value))
@@ -122,6 +136,7 @@ export class ExtensionRpc {
           finish(Effect.fail(error))
         },
         timeout,
+        ...(debuggerTabId === undefined ? {} : { debuggerTabId }),
       })
       try {
         socket.send(JSON.stringify(message), (error) => {

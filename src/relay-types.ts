@@ -14,6 +14,7 @@ export type ConnectedTarget = {
   readonly browserControlSessionId?: string
   readonly targetInfo: TargetInfo
   readonly owner: "relay" | "user"
+  readonly crashed?: boolean
 }
 
 export type ChildTarget = {
@@ -34,6 +35,7 @@ export type PendingExtensionRequest = {
   readonly resolve: (value: JsonObject) => void
   readonly reject: (error: Error) => void
   readonly timeout: NodeJS.Timeout
+  readonly debuggerTabId?: number
 }
 
 /**
@@ -44,6 +46,7 @@ export interface ExecuteSandboxLike {
   execute(code: string, options?: ExecuteOptions): Effect.Effect<ExecuteResult>
   adoptPage(target: AdoptTarget): Effect.Effect<string, Error>
   close(): Effect.Effect<void, Error>
+  markTargetCrashed(targetId: string): boolean
   getStatus(): {
     readonly sessionId?: string
     readonly connected: boolean

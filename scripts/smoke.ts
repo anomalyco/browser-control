@@ -473,6 +473,49 @@ const cases: SmokeCase[] = [
     }),
   },
   {
+    name: "execute-page-recovery",
+    run: Effect.fnUntraced(function* () {
+      const smokeSession = `bc-recovery-${Date.now()}`
+      return yield* Effect.gen(function* () {
+        yield* runBrowserControl(["session", "new", smokeSession])
+        yield* runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          "await page.setContent('<title>Recovery fixture</title>'); return await page.title()",
+        ])
+        const crashStartedAt = yield* Clock.currentTimeMillis
+        const crashResult = yield* Effect.result(runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          "const cdp = await context.newCDPSession(page); await cdp.send('Page.crash'); return 'unexpected'",
+        ]))
+        const crashDurationMs = (yield* Clock.currentTimeMillis) - crashStartedAt
+        if (crashResult._tag !== "Failure" || !crashResult.failure.message.toLowerCase().includes("target crashed")) {
+          return yield* Effect.fail(new Error(`crash execute did not report the target crash: ${formatValue(crashResult)}`))
+        }
+        if (crashDurationMs > 10_000) {
+          return yield* Effect.fail(new Error(`crash execute took ${crashDurationMs}ms instead of failing promptly`))
+        }
+        const statusOutput = yield* runBrowserControl(["status"])
+        if (!statusOutput.includes("crashed=true")) {
+          return yield* Effect.fail(new Error(`status did not expose the crashed target: ${statusOutput}`))
+        }
+        const output = yield* runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          "return { url: page.url(), title: await page.title() }",
+        ])
+        if (!output.includes("session default page") || !output.includes("about:blank")) {
+          return yield* Effect.fail(new Error(`execute did not recover the crashed session page: ${output}`))
+        }
+        return output.trim()
+      }).pipe(Effect.ensuring(runBrowserControl(["session", "delete", smokeSession]).pipe(Effect.ignore)))
+    }),
+  },
+  {
     name: "execute-fill-helpers",
     run: Effect.fnUntraced(function* () {
       const marker = `bc-fill-${Date.now()}`

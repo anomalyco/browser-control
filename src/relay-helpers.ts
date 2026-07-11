@@ -1,5 +1,5 @@
 import http from "node:http"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import { WebSocket, WebSocketServer } from "ws"
 import type { ExecuteTargetSelection } from "./execute.ts"
 import type { CdpEvent, CdpResponse, JsonObject, TargetInfo } from "./protocol.ts"
@@ -11,11 +11,10 @@ export const defaultPort = 19989
 
 const maxCliBodyBytes = 1_000_000
 
-export class HttpRouteError extends Error {
-  constructor(message: string, readonly status: number) {
-    super(message)
-  }
-}
+export class HttpRouteError extends Schema.TaggedErrorClass<HttpRouteError>()(
+  "HttpApi.HttpRouteError",
+  { message: Schema.String, status: Schema.Number },
+) {}
 
 export function formatHostForUrl(host: string): string {
   if (host.includes(":") && !host.startsWith("[")) {
@@ -202,7 +201,7 @@ export function readJsonBody(request: http.IncomingMessage): Effect.Effect<JsonO
   const contentType = request.headers["content-type"]
   const contentTypeValue = Array.isArray(contentType) ? contentType[0] : contentType
   if (!contentTypeValue?.toLowerCase().includes("application/json")) {
-    return Effect.fail(new HttpRouteError("Content-Type must be application/json", 415))
+    return Effect.fail(new HttpRouteError({ message: "Content-Type must be application/json", status: 415 }))
   }
   return Effect.callback<JsonObject, Error>((resume) => {
     const chunks: Buffer[] = []
@@ -216,7 +215,7 @@ export function readJsonBody(request: http.IncomingMessage): Effect.Effect<JsonO
       if (totalBytes > maxCliBodyBytes) {
         completed = true
         request.destroy(new Error(`Request body exceeds ${maxCliBodyBytes} bytes`))
-        resume(Effect.fail(new HttpRouteError(`Request body exceeds ${maxCliBodyBytes} bytes`, 413)))
+        resume(Effect.fail(new HttpRouteError({ message: `Request body exceeds ${maxCliBodyBytes} bytes`, status: 413 })))
         return
       }
       chunks.push(chunk)
@@ -255,7 +254,7 @@ export function readJsonBody(request: http.IncomingMessage): Effect.Effect<JsonO
       try {
         resume(Effect.succeed(parseJsonObject(text)))
       } catch (error) {
-        resume(Effect.fail(new HttpRouteError("Invalid JSON body", 400)))
+        resume(Effect.fail(new HttpRouteError({ message: "Invalid JSON body", status: 400 })))
       }
     }
     request.on("data", onData)

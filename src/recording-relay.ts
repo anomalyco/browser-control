@@ -240,14 +240,17 @@ export class RecordingRelay {
       return this.stopCdpRecording(recording)
     }
 
+    let stopTimeout: ReturnType<typeof setTimeout> | undefined
     const finalResult = new Promise<RecordingStopResult>((resolve) => {
-      const timeout = setTimeout(() => {
+      stopTimeout = setTimeout(() => {
         delete recording.resolveStop
-        this.cleanupRecording(recording.tabId)
+        if (this.activeRecordings.get(recording.tabId) === recording) {
+          this.cleanupRecording(recording.tabId)
+        }
         resolve({ success: false, error: "Timeout waiting for recording data" })
       }, 30_000)
       recording.resolveStop = (result) => {
-        clearTimeout(timeout)
+        if (stopTimeout) clearTimeout(stopTimeout)
         resolve(result)
       }
     })
@@ -258,12 +261,14 @@ export class RecordingRelay {
         params: { tabId: recording.tabId },
       }))
       if (!result.success) {
+        if (stopTimeout) clearTimeout(stopTimeout)
         delete recording.resolveStop
         this.cleanupRecording(recording.tabId)
         return result
       }
       return await finalResult
     } catch (error) {
+      if (stopTimeout) clearTimeout(stopTimeout)
       delete recording.resolveStop
       this.cleanupRecording(recording.tabId)
       return { success: false, error: error instanceof Error ? error.message : String(error) }

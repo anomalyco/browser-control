@@ -103,6 +103,19 @@ describe("ExtensionRpc", () => {
     expect(socket.closes[0]?.code).toBe(4002)
   })
 
+  it("rejects only debugger commands for a crashed tab", async () => {
+    const rpc = new ExtensionRpc()
+    const socket = connect(rpc)
+    const crashed = Effect.runPromise(rpc.send({ method: "debugger.sendCommand", params: { tabId: 7, method: "Page.crash" } }))
+    const healthy = Effect.runPromise(rpc.send({ method: "debugger.sendCommand", params: { tabId: 8, method: "Runtime.evaluate" } }))
+
+    rpc.rejectDebuggerCommandsForTab(7, new Error("Target crashed"))
+    await expect(crashed).rejects.toThrow("Target crashed")
+    const healthyRequest = socket.sent[1]
+    rpc.handleResponse({ id: healthyRequest?.id ?? 0, result: {} })
+    await expect(healthy).resolves.toEqual({})
+  })
+
   it("rejects pending commands when the socket is replaced", async () => {
     const rpc = new ExtensionRpc()
     const first = connect(rpc)

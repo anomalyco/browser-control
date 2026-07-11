@@ -83,6 +83,7 @@ export type DoctorReport = {
     readonly active: number | null
     readonly child: number | null
     readonly relayOwned: readonly TargetSummary[]
+    readonly unhealthy: readonly TargetSummary[]
     readonly all: readonly TargetSummary[]
     readonly error: string | null
   }
@@ -192,6 +193,9 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
   const relayOwnedTargets = targets.filter((target) => {
     return target.owner === "relay"
   })
+  const unhealthyTargets = targets.filter((target) => {
+    return target.crashed === true || target.url.startsWith("chrome-error://")
+  })
   const possibleLeakedSessions = sessions.filter((session) => {
     return session.connected && session.id !== current
   })
@@ -214,6 +218,7 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
     currentResult,
     staleCurrent,
     relayOwnedTargets,
+    unhealthyTargets,
     possibleLeakedSessions,
     targetsResult,
     sessionsResult,
@@ -250,6 +255,7 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
       active: extensionResult.ok ? extensionResult.value.activeTargets : null,
       child: extensionResult.ok ? extensionResult.value.childTargets ?? null : null,
       relayOwned: relayOwnedTargets,
+      unhealthy: unhealthyTargets,
       all: targets,
       error: targetsResult.ok ? null : targetsResult.error,
     },
@@ -270,6 +276,7 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
       staleCurrent,
       current,
       relayOwnedTargets,
+      unhealthyTargets,
       possibleLeakedSessions,
     }),
   }
@@ -286,6 +293,7 @@ function buildDoctorChecks(options: {
   readonly currentResult: ProbeResult<string | undefined>
   readonly staleCurrent: boolean
   readonly relayOwnedTargets: readonly TargetSummary[]
+  readonly unhealthyTargets: readonly TargetSummary[]
   readonly possibleLeakedSessions: readonly SessionSummary[]
   readonly targetsResult: ProbeResult<readonly TargetSummary[]>
   readonly sessionsResult: ProbeResult<readonly SessionSummary[]>
@@ -347,6 +355,10 @@ function buildDoctorChecks(options: {
       status: options.targetsResult.ok ? "ok" : "fail",
       message: options.targetsResult.ok ? `${options.targetsResult.value.length} active root target(s)` : options.targetsResult.error,
     },
+    unhealthyTargetsCheck({
+      targetsResult: options.targetsResult,
+      unhealthyTargets: options.unhealthyTargets,
+    }),
     {
       id: "sessions-readable",
       label: "sessions readable",
@@ -379,6 +391,26 @@ function buildDoctorChecks(options: {
     },
     ...artifactChecks,
   ]
+}
+
+export function unhealthyTargetsCheck(options: {
+  readonly targetsResult: ProbeResult<readonly TargetSummary[]>
+  readonly unhealthyTargets: readonly TargetSummary[]
+}): DoctorCheck {
+  if (!options.targetsResult.ok) {
+    return {
+      id: "unhealthy-targets",
+      label: "crashed or browser-error targets",
+      status: "warn",
+      message: `target health unknown: ${options.targetsResult.error}`,
+    }
+  }
+  return {
+    id: "unhealthy-targets",
+    label: "crashed or browser-error targets",
+    status: options.unhealthyTargets.length ? "warn" : "ok",
+    message: options.unhealthyTargets.length ? `${options.unhealthyTargets.length} unhealthy target(s)` : "none",
+  }
 }
 
 export function relayBuildCheck(options: {
@@ -457,6 +489,7 @@ function buildDoctorRecommendations(options: {
   readonly staleCurrent: boolean
   readonly current: string | null
   readonly relayOwnedTargets: readonly TargetSummary[]
+  readonly unhealthyTargets: readonly TargetSummary[]
   readonly possibleLeakedSessions: readonly SessionSummary[]
 }): readonly string[] {
   const relayRecommendations = options.relayResult.ok ? [] : [
@@ -477,6 +510,9 @@ function buildDoctorRecommendations(options: {
   const relayOwnedTargetRecommendations = options.relayOwnedTargets.length ? [
     "Relay-owned targets are still attached; close the visible tab, run `browser-control session reset`, or detach with the toolbar if they are no longer needed.",
   ] : []
+  const unhealthyTargetRecommendations = options.unhealthyTargets.length ? [
+    "A target is crashed or showing a browser error page. Run the owning session once to trigger relay-owned recovery, or reset/re-adopt a user-owned tab.",
+  ] : []
   const leakedSessionRecommendations = options.possibleLeakedSessions.length ? [
     "Connected non-current sessions may belong to another agent; delete or reset only the sessions you recognize as stale.",
   ] : []
@@ -487,6 +523,7 @@ function buildDoctorRecommendations(options: {
     ...artifactRecommendations,
     ...staleSessionRecommendations,
     ...relayOwnedTargetRecommendations,
+    ...unhealthyTargetRecommendations,
     ...leakedSessionRecommendations,
   ]
 }
@@ -514,7 +551,7 @@ export function formatDoctorReport(report: DoctorReport): string {
     `Package: ${report.package.name && report.package.version ? `${report.package.name} ${report.package.version}` : report.package.error ?? "unknown"}`,
     `Relay: ${report.relay.reachable ? `reachable (${report.relay.version ?? "unknown"}, ${report.relay.buildId ?? "unknown build"})` : `unreachable (${report.relay.error ?? "unknown error"})`}`,
     `Extension: ${formatExtensionSummary(report)}`,
-    `Targets: active=${formatNullableNumber(report.targets.active)} child=${formatNullableNumber(report.targets.child)} relay-owned=${report.targets.relayOwned.length}`,
+    `Targets: active=${formatNullableNumber(report.targets.active)} child=${formatNullableNumber(report.targets.child)} relay-owned=${report.targets.relayOwned.length} unhealthy=${report.targets.unhealthy.length}`,
     `Sessions: current=${report.sessions.current ?? "none"} total=${report.sessions.all.length} connected=${report.sessions.all.filter((session) => {
       return session.connected
     }).length}`,
@@ -527,11 +564,15 @@ export function formatDoctorReport(report: DoctorReport): string {
   const targetLines = report.targets.relayOwned.map((target) => {
     return `- ${formatTargetSummary(target)}`
   })
+  const unhealthyTargetLines = report.targets.unhealthy.map((target) => {
+    return `- ${formatTargetSummary(target)}`
+  })
   const sessionLines = report.sessions.possibleLeaked.map((session) => {
     return `- ${session.id} ${session.pageUrl ?? "no page yet"}`
   })
   const details = [
     ...(targetLines.length ? ["", "Relay-owned targets:", ...targetLines] : []),
+    ...(unhealthyTargetLines.length ? ["", "Unhealthy targets:", ...unhealthyTargetLines] : []),
     ...(sessionLines.length ? ["", "Possible leaked sessions:", ...sessionLines] : []),
     ...(report.recommendations.length ? ["", "Next steps:", ...report.recommendations.map((item) => {
       return `- ${item}`
@@ -553,8 +594,9 @@ function formatNullableNumber(value: number | null): string {
   return value === null ? "unknown" : String(value)
 }
 
-function formatTargetSummary(target: TargetSummary): string {
+export function formatTargetSummary(target: TargetSummary): string {
   const tab = target.tabId === undefined ? "" : ` tab=${target.tabId}`
   const owner = target.owner ? ` owner=${target.owner}` : ""
-  return `${target.type} ${target.id}${tab}${owner} ${target.url || "about:blank"}`
+  const health = target.crashed ? " crashed=true" : ""
+  return `${target.type} ${target.id}${tab}${owner}${health} ${target.url || "about:blank"}`
 }

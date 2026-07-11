@@ -1,9 +1,8 @@
 import { NodeStdio } from "@effect/platform-node"
-import { Context, Effect, Layer } from "effect"
+import { Config, Context, Effect, Layer, Option } from "effect"
 import { McpSchema, McpServer } from "effect/unstable/ai"
 import fs from "node:fs/promises"
 import path from "node:path"
-import process from "node:process"
 import { fileURLToPath } from "node:url"
 import { getObject } from "./relay-helpers.ts"
 import * as RelayClient from "./relay-client.ts"
@@ -12,10 +11,7 @@ import { startRelay } from "./relay.ts"
 import { browserControlVersion } from "./version.ts"
 
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
-const currentSession = {
-  id: process.env.BROWSER_CONTROL_SESSION || `mcp-${crypto.randomUUID().slice(0, 8)}`,
-  established: Boolean(process.env.BROWSER_CONTROL_SESSION),
-}
+type CurrentSession = { id: string; established: boolean }
 
 type JsonObject = Record<string, unknown>
 
@@ -44,7 +40,7 @@ type AdoptArguments = {
 
 const emptyInputSchema = objectSchema({})
 
-function makeToolSpecs(relay: RelayClient.Interface): readonly ToolSpec[] {
+function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSession): readonly ToolSpec[] {
   return [
     {
       name: "execute",
@@ -232,7 +228,7 @@ function makeToolSpecs(relay: RelayClient.Interface): readonly ToolSpec[] {
 const relayLayer = Layer.effectDiscard(
   Effect.gen(function* () {
     const relay = yield* RelayClient.Service
-    const port = yield* Effect.orDie(RelayClient.portConfig)
+    const port = yield* RelayClient.portConfig
     yield* startRelay({ port }).pipe(
       Effect.catch((error) => {
         if (isAddressInUse(error)) {
@@ -255,7 +251,12 @@ const relayLayer = Layer.effectDiscard(
 const registerTools = Effect.gen(function* () {
   const server = yield* McpServer.McpServer
   const relay = yield* RelayClient.Service
-  yield* Effect.forEach(makeToolSpecs(relay), (spec) => {
+  const configuredSession = Option.getOrUndefined(yield* Config.option(Config.string("BROWSER_CONTROL_SESSION")))
+  const currentSession: CurrentSession = {
+    id: configuredSession || `mcp-${crypto.randomUUID().slice(0, 8)}`,
+    established: Boolean(configuredSession),
+  }
+  yield* Effect.forEach(makeToolSpecs(relay, currentSession), (spec) => {
     return server.addTool({
       tool: new McpSchema.Tool({
         name: spec.name,

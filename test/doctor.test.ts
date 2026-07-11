@@ -1,5 +1,42 @@
 import { describe, expect, it } from "vitest"
-import { relayBuildCheck } from "../src/doctor.ts"
+import { formatTargetSummary, relayBuildCheck, unhealthyTargetsCheck } from "../src/doctor.ts"
+
+describe("formatTargetSummary", () => {
+  it("shows crashed target state", () => {
+    expect(formatTargetSummary({
+      id: "target-1",
+      type: "page",
+      title: "Crashed",
+      url: "chrome-error://chromewebdata/",
+      tabId: 7,
+      owner: "relay",
+      crashed: true,
+    })).toContain("crashed=true chrome-error://chromewebdata/")
+  })
+})
+
+describe("unhealthyTargetsCheck", () => {
+  it("warns when target health cannot be read", () => {
+    expect(unhealthyTargetsCheck({
+      targetsResult: { ok: false, error: "relay target request failed" },
+      unhealthyTargets: [],
+    })).toMatchObject({ status: "warn", message: "target health unknown: relay target request failed" })
+  })
+
+  it("warns when a target is unhealthy", () => {
+    const target = {
+      id: "target-1",
+      type: "page",
+      title: "Crashed",
+      url: "chrome-error://chromewebdata/",
+      crashed: true,
+    }
+    expect(unhealthyTargetsCheck({
+      targetsResult: { ok: true, value: [target] },
+      unhealthyTargets: [target],
+    })).toMatchObject({ status: "warn", message: "1 unhealthy target(s)" })
+  })
+})
 
 describe("relayBuildCheck", () => {
   it("accepts the running relay built with the current CLI", () => {

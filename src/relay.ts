@@ -1,16 +1,19 @@
 import http from "node:http"
 import stream from "node:stream"
-import { Effect, Fiber } from "effect"
+import { Config, Effect, Fiber } from "effect"
 import { WebSocket, WebSocketServer, type RawData } from "ws"
 import {
+  chromeSessionIdForClientRequest,
   createClientTargetAnnouncements,
   hasAnnouncedSession,
   removeAnnouncedSession,
+  removeClientTargetAliases,
   replayChildFrameNavigation,
   replayChildTargetsForParent,
   replayTargetCreated,
   sendAttachedToChildTarget,
   sendAttachedToTarget,
+  type ClientCdpSessionAlias,
 } from "./cdp-shims.ts"
 import { canClientSeeTarget } from "./cdp-visibility.ts"
 import { ExtensionRpc } from "./extension-rpc.ts"
@@ -48,23 +51,12 @@ import { TargetRegistry } from "./target-registry.ts"
 
 export type { RelayServer } from "./relay-types.ts"
 
-type ClientCdpSessionAlias =
-  | { readonly kind: "browser" }
-  | {
-    readonly kind: "target"
-    readonly tabId: number
-    readonly targetId: string
-    readonly chromeSessionId?: string
-  }
-
-export function startRelay(options: { readonly host?: string; readonly port?: number } = {}) {
-  return Effect.gen(function* () {
-    yield* installRelayProcessGuard
-    return yield* Effect.acquireRelease(makeRelay(options), (server) => {
-      return server.close()
-    })
+export const startRelay = Effect.fn("Relay.start")(function* (options: { readonly host?: string; readonly port?: number } = {}) {
+  yield* installRelayProcessGuard
+  return yield* Effect.acquireRelease(makeRelay(options), (server) => {
+    return server.close()
   })
-}
+})
 
 type RelayProcessFaultKind = "uncaughtException" | "unhandledRejection"
 
@@ -118,9 +110,13 @@ function rethrowProcessFault(cause: unknown): never {
 function logProcessFault(kind: RelayProcessFaultKind, cause: unknown, detail: Record<string, unknown>, disposition: string): void {
   const errorText = cause instanceof Error ? cause.stack ?? cause.message : String(cause)
   console.error(`[browser-control relay] ${kind}; ${disposition}\n${errorText}`)
-  if (process.env.BROWSER_CONTROL_DEBUG) {
+  if (debugEnvironmentEnabled(process.env.BROWSER_CONTROL_DEBUG)) {
     console.error(`[browser-control relay] ${kind} detail`, detail)
   }
+}
+
+function debugEnvironmentEnabled(value: string | undefined): boolean {
+  return value !== undefined && ["1", "true", "yes", "on"].includes(value.toLowerCase())
 }
 
 const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string; readonly port?: number } = {}) {
@@ -359,7 +355,8 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     },
   }))
 
-  const debugLog = process.env.BROWSER_CONTROL_DEBUG ? (line: string) => console.error(`[bc ${new Date().toISOString().slice(11, 23)}] ${line}`) : undefined
+  const debugEnabled = yield* Config.boolean("BROWSER_CONTROL_DEBUG").pipe(Config.withDefault(false))
+  const debugLog = debugEnabled ? (line: string) => console.error(`[bc ${new Date().toISOString().slice(11, 23)}] ${line}`) : undefined
   const contextDebugLog = debugLog ? (line: string) => debugLog(`[bc:ctx] ${line}`) : undefined
   const websocketServer = new WebSocketServer({ noServer: true })
   const cdpClients = new Set<WebSocket>()
@@ -651,6 +648,14 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     let shouldBroadcast = true
     let attachedChildTarget: ChildTarget | undefined
 
+    if ((method === "Inspector.targetCrashed" || method === "Target.targetCrashed") && (sourceSessionId === undefined || sourceSessionId === target.sessionId)) {
+      const crashedTarget = registry.markRootTargetCrashed(tabId)
+      if (crashedTarget) {
+        const affectedSessions = sessions.markTargetCrashed(crashedTarget.targetInfo.targetId)
+        extensionRpc.rejectDebuggerCommandsForTab(tabId, new Error(`Target crashed: ${crashedTarget.targetInfo.targetId}`))
+        contextDebugLog?.(`target-crashed ${targetDiagnosticIdentity(crashedTarget)} affectedSessions=${affectedSessions.length}`)
+      }
+    }
     if (method === "Target.attachedToTarget") {
       const childSessionId = typeof params?.sessionId === "string" ? params.sessionId : undefined
       const targetInfo = getTargetInfo(params?.targetInfo)
@@ -989,7 +994,11 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
         return yield* Effect.fail(new Error(`Unknown CDP session ${sessionId} for ${message.method}`))
       }
       const rootSessionId = registry.tabTargets.get(tabId)?.sessionId
-      const routedSessionId = alias?.chromeSessionId ?? (sessionId !== rootSessionId ? sessionId : undefined)
+      const routedSessionId = chromeSessionIdForClientRequest({
+        alias,
+        requestedSessionId: sessionId,
+        rootSessionId,
+      })
       const chromeSessionId = routedSessionId ? { sessionId: routedSessionId } : {}
       const contextSessionId = routedSessionId ?? rootSessionId ?? sessionId
       contextDebugLog?.(`runtime-enable phase=client-request ${targetDiagnosticIdentity(targetForCdpSession(tabId, sessionId))}`)
@@ -1026,7 +1035,11 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       return yield* Effect.fail(new Error(message.sessionId ? `Unknown CDP session ${message.sessionId} for ${message.method}` : `No attached tab for ${message.method}`))
     }
     const rootSessionId = registry.tabTargets.get(tabId)?.sessionId
-    const chromeSessionId = alias?.chromeSessionId ?? (message.sessionId && message.sessionId !== rootSessionId ? message.sessionId : undefined)
+    const chromeSessionId = chromeSessionIdForClientRequest({
+      alias,
+      requestedSessionId: message.sessionId,
+      rootSessionId,
+    })
     const result = yield* sendDebuggerCommand({
       tabId,
       method: normalizedMessage.method,
@@ -1201,6 +1214,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       return
     }
     sessions.releaseAdoptedTarget(detached.target.targetInfo.targetId)
+    removeClientTargetAliases(cdpClientSessionAliases.values(), (alias) => alias.tabId === tabId)
     mainFrameIdsByTab.delete(tabId)
     ghostCursorPositionsByTab.delete(tabId)
     contextDebugLog?.(`target-detached kind=root ${targetDiagnosticIdentity(detached.target)}`)
@@ -1221,7 +1235,10 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
   }
 
   function detachChildTargetState(sessionId: string): void {
-    registry.detachChildTargetState(sessionId)
+    const detached = registry.detachChildTargetState(sessionId)
+    if (detached) {
+      removeClientTargetAliases(cdpClientSessionAliases.values(), (alias) => alias.targetId === detached.targetInfo.targetId)
+    }
     for (const announcements of cdpClientAnnouncements.values()) {
       removeAnnouncedSession(announcements, sessionId)
     }

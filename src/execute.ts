@@ -1,4 +1,4 @@
-import { Effect, Scope } from "effect"
+import { Effect, Schema, Scope } from "effect"
 import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type Frame, type Locator, type Page } from "playwright-core"
 import * as acorn from "acorn"
 import fs from "node:fs"
@@ -21,22 +21,102 @@ const nodeModules = { fs, path, os, crypto, url, util, events, stream, buffer, h
 
 const playwrightCloseTimeoutMs = 2_000
 const playwrightConnectTimeoutMs = 15_000
+const sessionPageHealthCheckTimeoutMs = 1_000
 
-export const runPlaywrightOperation = <A>(options: {
+export class PlaywrightOperationError extends Schema.TaggedErrorClass<PlaywrightOperationError>()(
+  "Execute.PlaywrightOperationError",
+  {
+    message: Schema.String,
+    operation: Schema.String,
+    reason: Schema.Literals(["failed", "timeout"]),
+    cause: Schema.optionalKey(Schema.Defect()),
+  },
+) {}
+
+export class SessionPageRecoveryError extends Schema.TaggedErrorClass<SessionPageRecoveryError>()(
+  "Execute.SessionPageRecoveryError",
+  {
+    message: Schema.String,
+    reason: Schema.Literals(["adopted-unresponsive", "close-failed"]),
+    cause: Schema.Defect(),
+  },
+) {}
+
+export const runPlaywrightOperation = Effect.fn("Execute.playwrightOperation")(<A>(options: {
   readonly label: string
   readonly timeoutMs: number
   readonly run: () => Promise<A>
-}): Effect.Effect<A, Error> => {
-  return Effect.tryPromise({
+}): Effect.Effect<A, Error> => Effect.tryPromise({
     try: options.run,
-    catch: (cause) => cause instanceof Error ? cause : new Error(options.label, { cause }),
+    catch: (cause) => new PlaywrightOperationError({
+      message: cause instanceof Error ? cause.message : options.label,
+      operation: options.label,
+      reason: "failed",
+      cause,
+    }),
   }).pipe(
     Effect.timeoutOrElse({
       duration: options.timeoutMs,
-      orElse: () => Effect.fail(new Error(`${options.label} timed out after ${options.timeoutMs}ms`)),
+      orElse: () => Effect.fail(new PlaywrightOperationError({
+        message: `${options.label} timed out after ${options.timeoutMs}ms`,
+        operation: options.label,
+        reason: "timeout",
+      })),
     }),
   )
-}
+)
+
+export const recoverSessionPage = Effect.fn("Execute.recoverSessionPage")(function* (options: {
+  readonly ownsPage: boolean
+  readonly url: string
+  readonly timeoutMs: number
+  readonly healthCheck: () => Promise<void>
+  readonly close: () => Promise<void>
+}) {
+  let healthFailure: Error | undefined
+  if (!options.url.startsWith("chrome-error://")) {
+    healthFailure = yield* runPlaywrightOperation({
+      label: "Session page health check",
+      timeoutMs: options.timeoutMs,
+      run: options.healthCheck,
+    }).pipe(
+      Effect.match({
+        onFailure: (error) => error,
+        onSuccess: () => undefined,
+      }),
+    )
+  } else {
+    healthFailure = new Error(`Session page is showing ${options.url}`)
+  }
+  if (!healthFailure) {
+    return "use" as const
+  }
+  if (!options.ownsPage) {
+    return yield* Effect.fail(new SessionPageRecoveryError({
+      message: "The adopted session page is unresponsive and was not replaced. Release it with `browser-control session reset` or adopt another attached tab.",
+      reason: "adopted-unresponsive",
+      cause: healthFailure,
+    }))
+  }
+  const closeFailure = yield* runPlaywrightOperation({
+    label: "Close unhealthy session page",
+    timeoutMs: options.timeoutMs,
+    run: options.close,
+  }).pipe(
+    Effect.match({
+      onFailure: (error) => error,
+      onSuccess: () => undefined,
+    }),
+  )
+  if (closeFailure) {
+    return yield* Effect.fail(new SessionPageRecoveryError({
+      message: "The unhealthy relay-owned session page could not be closed. Run `browser-control session reset` before continuing.",
+      reason: "close-failed",
+      cause: closeFailure,
+    }))
+  }
+  return "recreate" as const
+})
 
 type SandboxGlobals = {
   readonly browser: Browser
@@ -199,6 +279,8 @@ export type AdoptTarget = {
 }
 
 export const defaultPageClosedWarning = "The session default page was closed; created a new page. References to the old page in state are stale."
+export const defaultPageRecoveredWarning = "The session default page was unresponsive; created a new page. References to the old page in state are stale."
+export const defaultPageCrashedWarning = "The session default page target crashed; checking it before the next execute."
 
 export const shouldCloseCurrentPageOnAdopt = (options: {
   readonly hasCurrentPage: boolean
@@ -250,7 +332,9 @@ export type ExecuteOptions = {
 export class ExecuteSandbox {
   private browser: Browser | undefined
   private page: Page | undefined
+  private defaultPageTargetId: string | undefined
   private ownsPage = false
+  private pageHealthCheckRequired = false
   private readonly state: Record<string, unknown> = {}
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private pendingWarnings: string[] = []
@@ -297,11 +381,15 @@ export class ExecuteSandbox {
         return cause instanceof Error ? cause : new Error("execute sandbox code", { cause })
       },
     }).pipe(
+      Effect.uninterruptible,
       Effect.match({
         onFailure: (error): ExecuteResult => {
           const logSummary = error instanceof ExecuteCodeError ? error.logSummary : emptyExecuteLogSummary()
           const aftermath = error instanceof ExecuteCodeError ? error.aftermath : undefined
           const diagnostic = executionContextFailureDiagnostic(error, aftermath)
+          if (diagnostic?.startsWith("execution-context/") || diagnostic === "target/cross-extension-page") {
+            this.pageHealthCheckRequired = true
+          }
           const warnings = this.drainWarnings()
           const logCompactionWarning = formatLogCompactionWarning(logSummary)
           if (logCompactionWarning) {
@@ -339,7 +427,9 @@ export class ExecuteSandbox {
       const ownsOpenPage = page !== undefined && sandbox.ownsPage && !page.isClosed()
       sandbox.browser = undefined
       sandbox.page = undefined
+      sandbox.defaultPageTargetId = undefined
       sandbox.ownsPage = false
+      sandbox.pageHealthCheckRequired = false
 
       if (ownsOpenPage) {
         yield* runPlaywrightOperation({
@@ -380,7 +470,9 @@ export class ExecuteSandbox {
         })
         sandbox.browser = browser
         sandbox.page = undefined
+        sandbox.defaultPageTargetId = undefined
         sandbox.ownsPage = false
+        sandbox.pageHealthCheckRequired = false
       }
       const browser = sandbox.browser
       if (!browser) {
@@ -413,7 +505,9 @@ export class ExecuteSandbox {
         }).pipe(Effect.ignore)
       }
       sandbox.page = selected
+      sandbox.defaultPageTargetId = target.targetId
       sandbox.ownsPage = false
+      sandbox.pageHealthCheckRequired = false
       return selected.url()
     })
   }
@@ -434,7 +528,9 @@ export class ExecuteSandbox {
         ...(this.options.sessionId ? { headers: { "Browser-Control-Session-Id": this.options.sessionId } } : {}),
       })
       this.page = undefined
+      this.defaultPageTargetId = undefined
       this.ownsPage = false
+      this.pageHealthCheckRequired = false
       if (hadBrowser) {
         this.pendingWarnings.push("Relay connection was lost and re-established; the session default page was re-resolved.")
       }
@@ -497,6 +593,17 @@ export class ExecuteSandbox {
     }
   }
 
+  markTargetCrashed(targetId: string): boolean {
+    if (this.defaultPageTargetId !== targetId) {
+      return false
+    }
+    this.pageHealthCheckRequired = true
+    if (!this.pendingWarnings.includes(defaultPageCrashedWarning)) {
+      this.pendingWarnings.push(defaultPageCrashedWarning)
+    }
+    return true
+  }
+
   getStatus(): { readonly sessionId?: string; readonly connected: boolean; readonly pageUrl: string | null; readonly stateKeys: string[] } {
     return {
       ...(this.options.sessionId ? { sessionId: this.options.sessionId } : {}),
@@ -517,12 +624,36 @@ export class ExecuteSandbox {
       return selected
     }
     if (this.page && !this.page.isClosed()) {
-      return this.page
+      if (this.pageHealthCheckRequired || this.page.url().startsWith("chrome-error://")) {
+        const page = this.page
+        const recovery = await Effect.runPromise(recoverSessionPage({
+          ownsPage: this.ownsPage,
+          url: page.url(),
+          timeoutMs: sessionPageHealthCheckTimeoutMs,
+          healthCheck: async () => {
+            await page.evaluate(() => true)
+          },
+          close: () => page.close(),
+        }))
+        if (recovery === "use") {
+          this.pageHealthCheckRequired = false
+          return page
+        }
+        this.page = undefined
+        this.defaultPageTargetId = undefined
+        this.ownsPage = false
+        this.pageHealthCheckRequired = false
+        this.pendingWarnings.push(defaultPageRecoveredWarning)
+      } else {
+        return this.page
+      }
     }
     if (this.page?.isClosed()) {
+      this.defaultPageTargetId = undefined
       this.pendingWarnings.push(defaultPageClosedWarning)
     }
     this.page = await context.newPage()
+    this.defaultPageTargetId = await resolvePageTargetId(this.page)
     this.ownsPage = true
     return this.page
   }
@@ -586,6 +717,21 @@ export function selectTargetById<T>({
   readonly getTargetId: (target: T) => string | undefined
 }): T | undefined {
   return targets.find((target) => getTargetId(target) === targetId)
+}
+
+async function resolvePageTargetId(page: Page): Promise<string | undefined> {
+  return await Effect.runPromise(
+    runPlaywrightOperation({
+      label: "Resolve session page target id",
+      timeoutMs: playwrightCloseTimeoutMs,
+      run: () => pageTargetId(page),
+    }).pipe(
+      Effect.match({
+        onFailure: () => undefined,
+        onSuccess: (targetId) => targetId,
+      }),
+    ),
+  )
 }
 
 export async function pageTargetId(page: Page): Promise<string> {

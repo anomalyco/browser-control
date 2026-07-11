@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest"
 import type { WebSocket } from "ws"
 import {
+  chromeSessionIdForClientRequest,
   createClientTargetAnnouncements,
   hasAnnouncedSession,
+  removeClientTargetAliases,
   replayChildTargetsForParent,
   sendAttachedToChildTarget,
   sendAttachedToTarget,
+  type ClientCdpSessionAlias,
 } from "../src/cdp-shims.ts"
 import type { ChildTarget, ConnectedTarget } from "../src/relay-types.ts"
 import type { CdpEvent, TargetInfo } from "../src/protocol.ts"
@@ -30,6 +33,52 @@ function root(sessionId: string, targetId = "target-1"): ConnectedTarget {
 function child(sessionId: string, targetId = "child-target-1", parentSessionId = "bc-tab-1"): ChildTarget {
   return { tabId: 1, sessionId, parentSessionId, targetInfo: { ...targetInfo(targetId), type: "iframe" }, waitingForDebugger: false }
 }
+
+describe("chromeSessionIdForClientRequest", () => {
+  it("does not forward a client alias for a root target to Chrome", () => {
+    expect(chromeSessionIdForClientRequest({
+      alias: {},
+      requestedSessionId: "bc-client-session-1",
+      rootSessionId: "bc-tab-1",
+    })).toBeUndefined()
+  })
+
+  it("forwards the real Chrome session behind a child-target alias", () => {
+    expect(chromeSessionIdForClientRequest({
+      alias: { chromeSessionId: "chrome-child-1" },
+      requestedSessionId: "bc-client-session-2",
+      rootSessionId: "bc-tab-1",
+    })).toBe("chrome-child-1")
+  })
+})
+
+describe("removeClientTargetAliases", () => {
+  it("removes aliases for a detached tab without touching other tabs", () => {
+    const aliases = new Map<string, ClientCdpSessionAlias>([
+      ["browser", { kind: "browser" }],
+      ["detached-root", { kind: "target", tabId: 7, targetId: "root-7" }],
+      ["detached-child", { kind: "target", tabId: 7, targetId: "child-7", chromeSessionId: "chrome-child-7" }],
+      ["other-root", { kind: "target", tabId: 8, targetId: "root-8" }],
+    ])
+
+    removeClientTargetAliases([aliases], (alias) => alias.tabId === 7)
+
+    expect(Array.from(aliases.keys())).toEqual(["browser", "other-root"])
+  })
+})
+
+describe("TargetRegistry crash state", () => {
+  it("marks a root target crashed and clears the marker after navigation", () => {
+    const registry = new TargetRegistry()
+    registry.addRootTarget(root("bc-tab-1"))
+
+    expect(registry.markRootTargetCrashed(1)?.crashed).toBe(true)
+    expect(registry.getRootTargetByTabId(1)?.crashed).toBe(true)
+
+    registry.updateTargetUrl(1, "https://example.com/recovered")
+    expect(registry.getRootTargetByTabId(1)?.crashed).toBe(false)
+  })
+})
 
 describe("sendAttachedToTarget", () => {
   it("does not re-announce the same target id and session id", () => {

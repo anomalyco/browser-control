@@ -1,4 +1,4 @@
-import { Effect, Option, Semaphore } from "effect"
+import { Effect, Option, Schema, Semaphore } from "effect"
 import { defaultPageClosedWarning, ExecuteSandbox, hasExplicitTargetSelection, type ExecuteResult, type ExecuteTargetSelection } from "./execute.ts"
 import { generateSessionId } from "./relay-helpers.ts"
 import type { BrowserControlSession, ExecuteSandboxLike, SessionSummary } from "./relay-types.ts"
@@ -20,6 +20,29 @@ export type SessionHooks = {
   /** Current user-owned attached page URLs, used for relay-side adoption hints. */
   readonly getUserAttachedPageUrls?: () => readonly string[]
 }
+
+export class SessionError extends Schema.TaggedErrorClass<SessionError>()(
+  "BrowserControlSessions.SessionError",
+  {
+    message: Schema.String,
+    reason: Schema.Literals([
+      "already-exists",
+      "inactive",
+      "invalid-request",
+      "not-found",
+      "setup-failed",
+      "target-owned",
+      "timeout",
+    ]),
+    sessionId: Schema.optionalKey(Schema.String),
+  },
+) {}
+
+const sessionError = (
+  reason: SessionError["reason"],
+  message: string,
+  sessionId?: string,
+): SessionError => new SessionError({ message, reason, ...(sessionId ? { sessionId } : {}) })
 
 export const adoptionTipForUrl = (url: string): string => {
   const selector = targetUrlHintSelector(url)
@@ -70,7 +93,7 @@ export class BrowserControlSessions {
   createNew(id: string | undefined, options?: { readonly readOnly?: boolean }): BrowserControlSession {
     const sessionId = id ?? generateSessionId(this.sessions)
     if (this.sessions.has(sessionId)) {
-      throw new Error(`Session already exists: ${sessionId}`)
+      throw sessionError("already-exists", `Session already exists: ${sessionId}`, sessionId)
     }
     const session = this.createBrowserControlSession(sessionId, options?.readOnly === true)
     this.sessions.set(sessionId, session)
@@ -93,6 +116,16 @@ export class BrowserControlSessions {
 
   isExecuting(id: string): boolean {
     return this.executing.has(id)
+  }
+
+  markTargetCrashed(targetId: string): string[] {
+    const affectedSessionIds: string[] = []
+    for (const session of this.sessions.values()) {
+      if (session.sandbox.markTargetCrashed(targetId)) {
+        affectedSessionIds.push(session.id)
+      }
+    }
+    return affectedSessionIds
   }
 
   delete(id: string): Effect.Effect<boolean, Error> {
@@ -123,7 +156,7 @@ export class BrowserControlSessions {
       }
       return yield* manager.withLifecyclePermit(existing, "reset", Effect.gen(function* () {
         if (manager.sessions.get(id) !== existing) {
-          return yield* Effect.fail(new Error(`Session is no longer active: ${id}`))
+          return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${id}`, id))
         }
         yield* manager.closeBrowserControlSession(existing)
         manager.releaseSessionAdoptedTarget(existing)
@@ -160,7 +193,7 @@ export class BrowserControlSessions {
     const manager = this
     return Effect.gen(function* () {
       if (options.sessionId === undefined && !options.createIfMissing) {
-        return yield* Effect.fail(new Error("sessionId is required when createIfMissing is false"))
+        return yield* Effect.fail(sessionError("invalid-request", "sessionId is required when createIfMissing is false"))
       }
       const resolved = options.sessionId === undefined
         ? { session: manager.createNew(undefined), created: true }
@@ -169,12 +202,12 @@ export class BrowserControlSessions {
         : { session: manager.sessions.get(options.sessionId), created: false }
       const session = resolved.session
       if (!session) {
-        return yield* Effect.fail(new Error(`Session not found: ${options.sessionId}`))
+        return yield* Effect.fail(sessionError("not-found", `Session not found: ${options.sessionId}`, options.sessionId))
       }
       const execution = session.executeSemaphore.withPermit(
         Effect.gen(function* () {
           if (manager.sessions.get(session.id) !== session) {
-            return yield* Effect.fail(new Error(`Session is no longer active: ${session.id}`))
+            return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${session.id}`, session.id))
           }
           session.updatedAt = new Date().toISOString()
           manager.setExecuting(session.id, true)
@@ -183,7 +216,7 @@ export class BrowserControlSessions {
             .execute(options.code, { ...(options.targetSelection ? { targetSelection: options.targetSelection } : {}) })
             .pipe(Effect.ensuring(Effect.sync(() => manager.setExecuting(session.id, false))))
           if (resolved.created && result.setupFailed) {
-            return yield* Effect.fail(new Error(result.text))
+            return yield* Effect.fail(sessionError("setup-failed", result.text, session.id))
           }
           const userAttachedPageUrls = manager.userAttachedPageUrlsProvider?.() ?? []
           const resultWithHint = shouldAppendAdoptionTip({
@@ -217,7 +250,7 @@ export class BrowserControlSessions {
     const manager = this
     return manager.adoptSemaphore.withPermit(Effect.gen(function* () {
       if (options.sessionId === undefined && !options.createIfMissing) {
-        return yield* Effect.fail(new Error("sessionId is required when createIfMissing is false"))
+        return yield* Effect.fail(sessionError("invalid-request", "sessionId is required when createIfMissing is false"))
       }
       const resolved = options.sessionId === undefined
         ? { session: manager.createNew(undefined), created: true }
@@ -226,17 +259,17 @@ export class BrowserControlSessions {
         : { session: manager.sessions.get(options.sessionId), created: false }
       const session = resolved.session
       if (!session) {
-        return yield* Effect.fail(new Error(`Session not found: ${options.sessionId}`))
+        return yield* Effect.fail(sessionError("not-found", `Session not found: ${options.sessionId}`, options.sessionId))
       }
       const adoption = Effect.gen(function* () {
         const targetOwner = manager.adoptedTargetOwners.get(options.targetId)
         if (targetOwner && targetOwner !== session.id) {
-          return yield* Effect.fail(new Error(`Target is already adopted by session ${targetOwner}`))
+          return yield* Effect.fail(sessionError("target-owned", `Target is already adopted by session ${targetOwner}`, targetOwner))
         }
         return yield* manager.withLifecyclePermit(session, "adopt",
           Effect.gen(function* () {
           if (manager.sessions.get(session.id) !== session) {
-            return yield* Effect.fail(new Error(`Session is no longer active: ${session.id}`))
+            return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${session.id}`, session.id))
           }
           const previousAdoptedTargetId = session.adoptedTargetId
           const adoptedUrl = yield* manager.withLifecycleTimeout(
@@ -268,11 +301,25 @@ export class BrowserControlSessions {
   closeAll(): Effect.Effect<void> {
     const manager = this
     return Effect.gen(function* () {
-      yield* Effect.forEach(Array.from(manager.sessions.values()), (session) => {
-        return manager.closeBrowserControlSession(session).pipe(Effect.ignore)
+      const closedSessionIds = yield* Effect.forEach(Array.from(manager.sessions.values()), (session) => {
+        return manager.withLifecyclePermit(
+          session,
+          "close",
+          manager.closeBrowserControlSession(session),
+        ).pipe(
+          Effect.match({
+            onFailure: () => undefined,
+            onSuccess: () => session.id,
+          }),
+        )
       })
-      manager.sessions.clear()
-      manager.adoptedTargetOwners.clear()
+      for (const id of closedSessionIds) {
+        if (!id) continue
+        const session = manager.sessions.get(id)
+        if (!session) continue
+        manager.releaseSessionAdoptedTarget(session)
+        manager.sessions.delete(id)
+      }
     })
   }
 
@@ -348,7 +395,7 @@ export class BrowserControlSessions {
     const acquire = session.executeSemaphore.take(1).pipe(
       Effect.timeoutOption(this.hooks.lifecycleTimeoutMs ?? 10_000),
       Effect.flatMap(Option.match({
-        onNone: () => Effect.fail(new Error(`Session ${operation} timed out waiting for active execute in ${session.id}`)),
+        onNone: () => Effect.fail(sessionError("timeout", `Session ${operation} timed out waiting for active execute in ${session.id}`, session.id)),
         onSome: () => Effect.void,
       })),
     )
@@ -364,7 +411,7 @@ export class BrowserControlSessions {
     return effect.pipe(
       Effect.timeoutOrElse({
         duration: timeoutMs,
-        orElse: () => Effect.fail(new Error(`${label} timed out after ${timeoutMs}ms`)),
+        orElse: () => Effect.fail(sessionError("timeout", `${label} timed out after ${timeoutMs}ms`)),
       }),
     )
   }

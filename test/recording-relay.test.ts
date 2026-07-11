@@ -1,12 +1,13 @@
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { RecordingRelay, type VideoEncoder } from "../src/recording-relay.ts"
 
 const temporaryPaths: string[] = []
 
 afterEach(async () => {
+  vi.useRealTimers()
   await Promise.all(temporaryPaths.splice(0).map((temporaryPath) => fs.rm(temporaryPath, { force: true, recursive: true })))
 })
 
@@ -230,6 +231,41 @@ describe("RecordingRelay CDP screencast", () => {
       outputPath: "/tmp/browser-control.mp4",
       mode: "auto",
     })).resolves.toEqual({ success: false, error: "tabCapture recording output path must end in .webm; use --mode cdp for MP4" })
+  })
+
+  it("clears a failed tabCapture stop timer before a later recording starts", async () => {
+    vi.useFakeTimers()
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "browser-control-recording-"))
+    temporaryPaths.push(directory)
+    const outputPath = path.join(directory, "timer.webm")
+    let stopAttempts = 0
+    const relay = new RecordingRelay({
+      isExtensionConnected: () => true,
+      sendToExtension: async (command) => {
+        if (command.method === "recording.start") {
+          return { success: true, tabId: 7, startedAt: Date.now(), mimeType: "video/webm" }
+        }
+        if (command.method === "recording.stop") {
+          stopAttempts += 1
+          return { success: false, error: "extension stop failed" }
+        }
+        if (command.method === "recording.status") {
+          return { isRecording: true, tabId: 7, startedAt: Date.now(), mimeType: "video/webm" }
+        }
+        return {}
+      },
+      sendDebuggerCommand: async () => ({}),
+    })
+
+    await expect(relay.startRecording({ tabId: 7, owner: "user", outputPath, mode: "tab-capture" })).resolves.toMatchObject({ success: true })
+    await expect(relay.stopRecording({ tabId: 7 })).resolves.toEqual({ success: false, error: "extension stop failed" })
+    await expect(relay.startRecording({ tabId: 7, owner: "user", outputPath, mode: "tab-capture" })).resolves.toMatchObject({ success: true })
+
+    await vi.advanceTimersByTimeAsync(30_000)
+
+    await expect(relay.statusRecording({ tabId: 7 })).resolves.toMatchObject({ isRecording: true, tabId: 7 })
+    expect(stopAttempts).toBe(1)
+    await relay.cancelRecording({ tabId: 7 })
   })
 
   it("reserves a tab while its encoder is starting", async () => {

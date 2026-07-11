@@ -2,12 +2,15 @@ import crypto from "node:crypto"
 import type { ExecuteAftermath } from "./relay-schema.ts"
 import type { JsonObject } from "./protocol.ts"
 
-export type RuntimeFailureKind = "context-destroyed" | "context-missing" | "target-closed" | "timeout" | "other"
+export type RuntimeFailureKind = "context-destroyed" | "context-missing" | "cross-extension-page" | "target-closed" | "timeout" | "other"
 
 const maxDiagnosticTokenLength = 48
 
 export function runtimeFailureKind(cause: unknown): RuntimeFailureKind {
   for (const message of errorMessages(cause)) {
+    if (/cannot access a chrome-extension:\/\/ url of different extension/i.test(message)) {
+      return "cross-extension-page"
+    }
     if (/execution context was destroyed|context.*destroyed/i.test(message)) {
       return "context-destroyed"
     }
@@ -26,6 +29,9 @@ export function runtimeFailureKind(cause: unknown): RuntimeFailureKind {
 
 export function executionContextFailureDiagnostic(cause: unknown, aftermath: ExecuteAftermath | undefined): string | undefined {
   const kind = runtimeFailureKind(cause)
+  if (kind === "cross-extension-page") {
+    return "target/cross-extension-page"
+  }
   if (kind !== "context-destroyed" && kind !== "context-missing") {
     return undefined
   }

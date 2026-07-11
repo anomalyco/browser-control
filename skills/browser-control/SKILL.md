@@ -44,12 +44,13 @@ browser-control session list
 `status` and `doctor` are read-only and never start the relay. A stopped `status`
 prints one concise next step instead of a stack trace. When running, `status`
 reports relay build compatibility, extension connectivity, sessions, targets,
-and child target counts.
+child target counts, and `crashed=true` for known crashed targets.
 
 Use `browser-control doctor` before deeper debugging. It is read-only and checks
 the package/bin metadata, relay HTTP endpoint, extension connection/version,
-current and stale sessions, active and relay-owned targets, whether the running
-relay matches the current CLI build, and built artifacts such as `dist/cli.js`,
+current and stale sessions, active, relay-owned, crashed, and browser-error
+targets, whether the running relay matches the current CLI build, and built
+artifacts such as `dist/cli.js`,
 `dist/mcp.js`, and `extension/dist/manifest.json`. Relay-backed commands reject
 a stale relay build with a concise restart message.
 
@@ -150,10 +151,16 @@ and results whose JSON exceeds 32KB are withheld: `value` is `null` and
 Recurring permissions-policy warnings and blocked analytics resources are folded
 into representative log entries, while application errors stay distinct and
 aftermath error counts continue to include every event. Warnings are delivered
-with the call that caused them, for example when the
-session default page was closed and recreated. Failed execution-context calls
-also carry a short fixed diagnostic classification with page/navigation counts;
-it never includes evaluation arguments or results.
+with the call that caused them, for example when the session default page was
+closed, crashed, or recreated. After an execution-context failure or crash,
+the next normal execute gives the default page a one-second health check. An
+unhealthy relay-owned page is recreated after it closes; a close failure gives
+reset guidance instead of leaking the old tab. An unhealthy adopted tab is
+preserved and the call fails quickly with reset/adopt guidance. Failed
+execution-context calls also carry a short fixed diagnostic classification with page/navigation
+counts; cross-extension navigation failures use
+`target/cross-extension-page`. Diagnostics never include evaluation arguments
+or results.
 
 ## Guardrails And Read-Only Sessions
 
@@ -520,11 +527,12 @@ language changes, update `CONTEXT.md` too.
 - Missing iframe after reconnect: run `SMOKE_CASE=oopif-reconnect pnpm smoke`.
   Browser Control should replay stored child target attaches and current child
   frame navigation for the current OOPIF canary.
-- Repeated `Execution context was destroyed` failures: use an already-authenticated
-  attached tab with `--target-url` or `session adopt`, verify the expected URL or
-  element after navigation/handoff, and restart the relay with
-  `BROWSER_CONTROL_DEBUG=1` before reproducing. `[bc:ctx]` lines contain bounded
-  metadata only: target/context IDs, ownership, loader changes, URL origin/shape
+- Repeated `Execution context was destroyed` failures: run one short follow-up
+  execute so Browser Control can health-check the default page. A relay-owned
+  page is recreated automatically; reset or re-adopt an unhealthy user-owned
+  tab because Browser Control will not replace it. If failures continue,
+  restart the relay with `BROWSER_CONTROL_DEBUG=1` before reproducing. `[bc:ctx]`
+  lines contain bounded metadata only: target/context IDs, ownership, loader changes, URL origin/shape
   plus fingerprint, reset outcomes, and evaluate shape/failure class. They never
   include expressions, arguments, results, headers, cookies, or form values.
 - Long-running relay testing: use `termctrl start browser-control-relay --cwd

@@ -1,4 +1,4 @@
-import type { ExtensionCommand as ShimCommand, JsonObject } from "../../src/protocol.ts"
+import { parseExtensionCommand, type ExtensionCommand as ShimCommand, type JsonObject } from "../../src/protocol.ts"
 import type {
   OffscreenCancelRecordingResult,
   OffscreenOutgoingMessage,
@@ -162,7 +162,13 @@ async function reannounceAttachedTabsAndReconcileGroups(): Promise<void> {
 }
 
 async function handleSocketMessage(data: unknown): Promise<void> {
-  const command = JSON.parse(String(data)) as ShimCommand
+  let command: ShimCommand
+  try {
+    command = parseExtensionCommand(String(data))
+  } catch (error) {
+    sendMessage({ method: "log", params: { level: "error", message: error instanceof Error ? error.message : String(error) } })
+    return
+  }
   try {
     const result = await handleCommand(command)
     sendMessage({ id: command.id, result })
