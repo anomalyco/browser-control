@@ -4,6 +4,7 @@ import {
   ExecuteRequest,
   ExecuteResponse,
   ExecuteSessionSummary,
+  ErrorEnvelope,
   ExtensionStatus,
   RecordingStartRequest,
   RecordingStartResponse,
@@ -35,6 +36,7 @@ const decodeRecordingStartRequest = Schema.decodeUnknownSync(RecordingStartReque
 const decodeSessionNewRequest = Schema.decodeUnknownSync(SessionNewRequest)
 const decodeRecordingStatus = Schema.decodeUnknownSync(RecordingStatusResponse)
 const decodeRelayVersion = Schema.decodeUnknownSync(RelayVersion)
+const decodeErrorEnvelope = Schema.decodeUnknownSync(ErrorEnvelope)
 
 const session = {
   id: "rapid-otter-633",
@@ -78,6 +80,16 @@ describe("relay-schema", () => {
     }).sessionId).toBeUndefined()
     const response = { session: { ...session, created: true }, adoptedUrl: "https://example.com/", adoptedTargetId: "target-2" }
     expect(encodeAdoptResponse(decodeAdoptResponse(response))).toEqual(response)
+  })
+
+  it("requires exactly one valid target selector", () => {
+    expect(() => decodeAdoptRequest({ createIfMissing: true, targetSelection: {} })).toThrow()
+    expect(() => decodeAdoptRequest({ createIfMissing: true, targetSelection: { urlIncludes: "" } })).toThrow()
+    expect(() => decodeAdoptRequest({ createIfMissing: true, targetSelection: { urlIncludes: "example.com", index: 0 } })).toThrow()
+    expect(() => decodeAdoptRequest({ createIfMissing: true, targetSelection: { index: -1 } })).toThrow()
+    expect(() => decodeAdoptRequest({ createIfMissing: true, targetSelection: { index: 1.5 } })).toThrow()
+    expect(decodeAdoptRequest({ createIfMissing: true, targetSelection: { urlIncludes: "example.com" } }).targetSelection).toEqual({ urlIncludes: "example.com" })
+    expect(decodeAdoptRequest({ createIfMissing: true, targetSelection: { index: 0 } }).targetSelection).toEqual({ index: 0 })
   })
 
   it("decodes execute requests with atomic or explicit session ownership", () => {
@@ -243,5 +255,11 @@ describe("relay-schema", () => {
       tabId: 7,
       audio: "yes",
     })).toThrow()
+  })
+
+  it("decodes current coded and legacy relay error envelopes", () => {
+    expect(decodeErrorEnvelope({ error: "missing", code: "target-not-found" })).toEqual({ error: "missing", code: "target-not-found" })
+    expect(decodeErrorEnvelope({ error: "legacy" })).toEqual({ error: "legacy" })
+    expect(() => decodeErrorEnvelope({ error: "bad", code: "made-up" })).toThrow()
   })
 })

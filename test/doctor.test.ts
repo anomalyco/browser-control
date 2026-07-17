@@ -59,4 +59,11 @@ describe("relayBuildCheck", () => {
       relayResult: { ok: true, value: { version: "0.1.0" } },
     })).toMatchObject({ status: "warn", message: "running relay does not report a build id" })
   })
+
+  it("skips relay build comparison for a development CLI", () => {
+    expect(relayBuildCheck({
+      cliBuildId: "dev",
+      relayResult: { ok: true, value: { version: "0.1.0", buildId: "build-from-dist" } },
+    })).toMatchObject({ status: "ok", message: "CLI is a development build; build comparison skipped" })
+  })
 })

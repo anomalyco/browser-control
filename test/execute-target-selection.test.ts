@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest"
 import { selectAdoptCandidateByUrl, selectTarget, shouldCloseCurrentPageOnAdopt } from "../src/execute.ts"
-import { releaseSessionTargets } from "../src/http-api.ts"
 import { TargetRegistry } from "../src/target-registry.ts"
 
 describe("target selection", () => {
@@ -83,9 +82,9 @@ describe("target selection", () => {
       },
     })
 
-    const affectedTabIds = releaseSessionTargets(registry, "adopted-session", ["target-1"])
+    const change = registry.releaseTargetOwnership("target-1", "adopted-session")
 
-    expect(affectedTabIds).toEqual([1])
+    expect(change.tabIds).toEqual([1])
     expect(registry.listRootTargets()[0]?.browserControlSessionId).toBeUndefined()
     expect(registry.getRootTargetBySessionId("adopted-session")?.targetInfo.targetId).toBeUndefined()
   })
@@ -107,7 +106,7 @@ describe("target selection", () => {
       },
     })
 
-    releaseSessionTargets(registry, "relay-session", [])
+    registry.releaseTargetOwnership("not-the-adopted-target", "relay-session")
 
     expect(registry.listRootTargets()[0]?.browserControlSessionId).toBe("relay-session")
     expect(registry.getRootTargetBySessionId("relay-session")?.targetInfo.targetId).toBe("relay-created-target")
@@ -129,7 +128,43 @@ describe("target selection", () => {
       },
     })
 
-    expect(releaseSessionTargets(registry, "adopted-session", ["user-target"])).toEqual([9])
+    const reservation = registry.reserveTargetOwnership("user-target", "adopted-session")
+    expect(registry.rollbackTargetOwnership(reservation).tabIds).toEqual([9])
     expect(registry.targetsByTargetId.get("user-target")?.owner).toBe("user")
+  })
+
+  it("rolls back only the exact reserved target generation", () => {
+    const registry = new TargetRegistry()
+    registry.addRootTarget({
+      tabId: 9,
+      sessionId: "bc-tab-old",
+      owner: "user",
+      targetInfo: {
+        targetId: "user-target",
+        type: "page",
+        title: "Old",
+        url: "https://example.com/old",
+        attached: true,
+        canAccessOpener: false,
+      },
+    })
+    const reservation = registry.reserveTargetOwnership("user-target", "alpha")
+    registry.addRootTarget({
+      tabId: 9,
+      sessionId: "bc-tab-new",
+      owner: "user",
+      targetInfo: {
+        targetId: "user-target",
+        type: "page",
+        title: "New",
+        url: "https://example.com/new",
+        attached: true,
+        canAccessOpener: false,
+      },
+    })
+
+    expect(registry.rollbackTargetOwnership(reservation)).toEqual({ targetIds: [], tabIds: [] })
+    expect(registry.targetsByTargetId.get("user-target")?.sessionId).toBe("bc-tab-new")
+    expect(registry.targetsByTargetId.get("user-target")?.browserControlSessionId).toBeUndefined()
   })
 })

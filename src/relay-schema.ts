@@ -47,9 +47,13 @@ export const SessionDeleted = Schema.Struct({
 export interface SessionDeleted extends Schema.Schema.Type<typeof SessionDeleted> {}
 
 export const TargetSelection = Schema.Struct({
-  urlIncludes: Schema.optionalKey(Schema.String),
-  index: Schema.optionalKey(Schema.Number),
-})
+  urlIncludes: Schema.optionalKey(Schema.NonEmptyString),
+  index: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+}).check(Schema.makeFilter((selection) => {
+  const hasUrl = selection.urlIncludes !== undefined
+  const hasIndex = selection.index !== undefined
+  return hasUrl !== hasIndex ? undefined : "targetSelection must contain exactly one of urlIncludes or index"
+}))
 
 export interface TargetSelection extends Schema.Schema.Type<typeof TargetSelection> {}
 
@@ -265,8 +269,25 @@ export const RecordingCancelResponse = Schema.Struct({
 
 export interface RecordingCancelResponse extends Schema.Schema.Type<typeof RecordingCancelResponse> {}
 
+export const RelayErrorCode = Schema.Literals([
+  "invalid-request",
+  "session-already-exists",
+  "session-inactive",
+  "session-not-found",
+  "session-timeout",
+  "setup-failed",
+  "target-ambiguous",
+  "target-changed",
+  "target-not-found",
+  "target-owned",
+  "internal",
+])
+
+export type RelayErrorCode = Schema.Schema.Type<typeof RelayErrorCode>
+
 export const ErrorEnvelope = Schema.Struct({
   error: Schema.String,
+  code: Schema.optionalKey(RelayErrorCode),
 })
 
 export interface ErrorEnvelope extends Schema.Schema.Type<typeof ErrorEnvelope> {}

@@ -167,8 +167,12 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
     probe(store.read),
   ])
   const relayResult = yield* probe(relay.version)
-  const relayBuildMatches = relayResult.ok && relayResult.value.buildId
-    ? relayResult.value.buildId === browserControlBuildId
+  const relayBuildMatches = relayResult.ok
+    ? browserControlBuildId === "dev"
+      ? true
+      : relayResult.value.buildId
+        ? relayResult.value.buildId === browserControlBuildId
+        : null
     : null
   const [extensionResult, targetsResult, sessionsResult] = relayResult.ok
     ? yield* Effect.all([
@@ -380,13 +384,13 @@ function buildDoctorChecks(options: {
     {
       id: "relay-owned-targets",
       label: "relay-owned active targets",
-      status: options.relayOwnedTargets.length ? "warn" : "ok",
-      message: options.relayOwnedTargets.length ? `${options.relayOwnedTargets.length} relay-owned target(s) still attached` : "none",
+      status: "ok",
+      message: options.relayOwnedTargets.length ? `${options.relayOwnedTargets.length} persistent relay-owned target(s)` : "none",
     },
     {
       id: "possible-leaked-sessions",
-      label: "possible leaked sessions",
-      status: options.possibleLeakedSessions.length ? "warn" : "ok",
+      label: "connected non-current sessions",
+      status: "ok",
       message: options.possibleLeakedSessions.length ? `${options.possibleLeakedSessions.length} connected non-current session(s)` : "none",
     },
     ...artifactChecks,
@@ -423,6 +427,14 @@ export function relayBuildCheck(options: {
       label: "relay build",
       status: "warn",
       message: "relay unreachable; cannot compare builds",
+    }
+  }
+  if (options.cliBuildId === "dev") {
+    return {
+      id: "relay-build",
+      label: "relay build",
+      status: "ok",
+      message: "CLI is a development build; build comparison skipped",
     }
   }
   const relayBuildId = options.relayResult.value.buildId
@@ -493,7 +505,7 @@ function buildDoctorRecommendations(options: {
   readonly possibleLeakedSessions: readonly SessionSummary[]
 }): readonly string[] {
   const relayRecommendations = options.relayResult.ok ? [] : [
-    "Start the relay with `browser-control serve`, then reload or click the Browser Control extension toolbar button.",
+    "Run a relay-backed command to start the detached relay automatically; use `browser-control serve` only for foreground debugging.",
   ]
   const relayBuildRecommendations = options.relayResult.ok && options.relayBuildMatches !== true ? [
     "Restart the relay with `browser-control serve` so it uses the current CLI build.",
@@ -507,14 +519,8 @@ function buildDoctorRecommendations(options: {
   const staleSessionRecommendations = options.staleCurrent && options.current ? [
     `Current session ${options.current} is stale; run \`browser-control session new\` or \`browser-control session use <id>\` after the relay is running.`,
   ] : []
-  const relayOwnedTargetRecommendations = options.relayOwnedTargets.length ? [
-    "Relay-owned targets are still attached; close the visible tab, run `browser-control session reset`, or detach with the toolbar if they are no longer needed.",
-  ] : []
   const unhealthyTargetRecommendations = options.unhealthyTargets.length ? [
     "A target is crashed or showing a browser error page. Run the owning session once to trigger relay-owned recovery, or reset/re-adopt a user-owned tab.",
-  ] : []
-  const leakedSessionRecommendations = options.possibleLeakedSessions.length ? [
-    "Connected non-current sessions may belong to another agent; delete or reset only the sessions you recognize as stale.",
   ] : []
   return [
     ...relayRecommendations,
@@ -522,9 +528,7 @@ function buildDoctorRecommendations(options: {
     ...extensionRecommendations,
     ...artifactRecommendations,
     ...staleSessionRecommendations,
-    ...relayOwnedTargetRecommendations,
     ...unhealthyTargetRecommendations,
-    ...leakedSessionRecommendations,
   ]
 }
 
@@ -573,7 +577,7 @@ export function formatDoctorReport(report: DoctorReport): string {
   const details = [
     ...(targetLines.length ? ["", "Relay-owned targets:", ...targetLines] : []),
     ...(unhealthyTargetLines.length ? ["", "Unhealthy targets:", ...unhealthyTargetLines] : []),
-    ...(sessionLines.length ? ["", "Possible leaked sessions:", ...sessionLines] : []),
+    ...(sessionLines.length ? ["", "Connected non-current sessions:", ...sessionLines] : []),
     ...(report.recommendations.length ? ["", "Next steps:", ...report.recommendations.map((item) => {
       return `- ${item}`
     })] : []),

@@ -50,7 +50,9 @@ local Node relay.
   reloading the extension.
 - Relay HTTP wire shapes live in `src/relay-schema.ts` (Effect Schema). Both the
   HTTP responders and clients must derive types from those schemas; do not
-  hand-roll relay JSON parsers.
+  hand-roll relay JSON parsers. Error responses use the shared coded
+  `ErrorEnvelope`; keep the relay message top-level while mapping tagged domain
+  errors to stable codes and HTTP statuses.
 - Tie relay HTTP effects to the response lifetime with an `AbortSignal`.
   Browser execute itself is uninterruptible at the underlying Playwright
   Promise boundary so interruption cannot release its session permit while the
@@ -73,11 +75,16 @@ local Node relay.
   target/tab/session. The relay resolves only a matching handoff id from that
   tab's in-page completion control. Toolbar clicks never resolve handoffs or
   detach a tab whose session is mid-execute.
-- Session adopt/reset/delete HTTP handlers immediately refresh page status for
-  both selected and released target ids; do not rely on navigation or a later
-  content-script ready event to clear stale session context.
-- Adopted targets are exclusive to one Browser Control session. Serialize adopts,
-  reject competing owners, and release ownership on detach, reset, or delete.
+- `TargetRegistry` is the sole production target-ownership authority. Session
+  state keeps only the adopted default-page pointer. Adoption reserves,
+  commits, or rolls back registry ownership transactionally and reconciles CDP
+  visibility, grouping, and page status for every changed target.
+- Adopted targets are exclusive to one Browser Control session. Serialize
+  adopts, reject competing owners, and release ownership on detach, reset, or
+  delete. If adoption times out, roll back visibility immediately but retain
+  the execute and adopt permits until uncancellable Playwright work settles.
+  Relay shutdown must close the adoption gate and drain those workers rather
+  than interrupting them.
 - Execute results carry per-call `warnings` and an `aftermath` summary
   (URL movement, navigations, error counts, handoffs). After an execution-context
   diagnostic or target crash, the next normal execute performs a bounded page
@@ -163,7 +170,7 @@ local Node relay.
 - Extension shim changes require reloading the unpacked extension once in Brave.
 - Relay-only changes should not require reloading the extension.
 - Use `termctrl` for long-running relay sessions during testing.
-- Run `SMOKE_CASE=local-forms,local-cart,local-checkout,reconnect-evaluate,redirect-reconnect-evaluate,execute-target-url,execute-page-recovery,execute-fill-helpers,execute-snapshot-refs,handoff-navigation,handoff-cross-tab,oopif-reconnect,dedicated-worker,session-download-capability,execute-ghost-cursor,session-isolation,multi-client,stale-client-checkout,raw-first-checkout pnpm smoke`
+- Run `SMOKE_CASE=local-forms,local-cart,local-checkout,reconnect-evaluate,redirect-reconnect-evaluate,execute-target-url,execute-page-recovery,execute-fill-helpers,execute-snapshot-refs,handoff-navigation,handoff-cross-tab,handoff-target-detach,oopif-reconnect,dedicated-worker,session-download-capability,execute-ghost-cursor,session-isolation,multi-client,stale-client-checkout,raw-first-checkout pnpm smoke`
   before claiming the current smoke set is green.
 - CDP target visibility is scoped per client (`src/cdp-visibility.ts`):
   session-owned tabs are announced and their events delivered only to that

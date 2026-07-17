@@ -5,6 +5,7 @@ import type { ExecuteTargetSelection } from "./execute.ts"
 import type { CdpEvent, CdpResponse, JsonObject, TargetInfo } from "./protocol.ts"
 import { parseJsonObject } from "./protocol.ts"
 import type { BrowserControlSession } from "./relay-types.ts"
+import { RelayErrorCode } from "./relay-schema.ts"
 
 export const defaultHost = "127.0.0.1"
 export const defaultPort = 19989
@@ -13,7 +14,7 @@ const maxCliBodyBytes = 1_000_000
 
 export class HttpRouteError extends Schema.TaggedErrorClass<HttpRouteError>()(
   "HttpApi.HttpRouteError",
-  { message: Schema.String, status: Schema.Number },
+  { message: Schema.String, status: Schema.Number, code: RelayErrorCode },
 ) {}
 
 export function formatHostForUrl(host: string): string {
@@ -201,7 +202,7 @@ export function readJsonBody(request: http.IncomingMessage): Effect.Effect<JsonO
   const contentType = request.headers["content-type"]
   const contentTypeValue = Array.isArray(contentType) ? contentType[0] : contentType
   if (!contentTypeValue?.toLowerCase().includes("application/json")) {
-    return Effect.fail(new HttpRouteError({ message: "Content-Type must be application/json", status: 415 }))
+    return Effect.fail(new HttpRouteError({ message: "Content-Type must be application/json", status: 415, code: "invalid-request" }))
   }
   return Effect.callback<JsonObject, Error>((resume) => {
     const chunks: Buffer[] = []
@@ -215,7 +216,7 @@ export function readJsonBody(request: http.IncomingMessage): Effect.Effect<JsonO
       if (totalBytes > maxCliBodyBytes) {
         completed = true
         request.destroy(new Error(`Request body exceeds ${maxCliBodyBytes} bytes`))
-        resume(Effect.fail(new HttpRouteError({ message: `Request body exceeds ${maxCliBodyBytes} bytes`, status: 413 })))
+        resume(Effect.fail(new HttpRouteError({ message: `Request body exceeds ${maxCliBodyBytes} bytes`, status: 413, code: "invalid-request" })))
         return
       }
       chunks.push(chunk)
@@ -254,7 +255,7 @@ export function readJsonBody(request: http.IncomingMessage): Effect.Effect<JsonO
       try {
         resume(Effect.succeed(parseJsonObject(text)))
       } catch (error) {
-        resume(Effect.fail(new HttpRouteError({ message: "Invalid JSON body", status: 400 })))
+        resume(Effect.fail(new HttpRouteError({ message: "Invalid JSON body", status: 400, code: "invalid-request" })))
       }
     }
     request.on("data", onData)
@@ -278,7 +279,11 @@ export function optionalSessionId(value: JsonObject[string] | undefined): string
   }
   const id = value.trim()
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(id)) {
-    throw new Error("Session ids must use lowercase letters, numbers, and dashes, and be at most 63 characters")
+    throw new HttpRouteError({
+      message: "Session ids must use lowercase letters, numbers, and dashes, and be at most 63 characters",
+      status: 400,
+      code: "invalid-request",
+    })
   }
   return id
 }
@@ -286,7 +291,7 @@ export function optionalSessionId(value: JsonObject[string] | undefined): string
 export function requiredSessionId(value: JsonObject[string] | undefined): string {
   const id = optionalSessionId(value)
   if (!id) {
-    throw new Error("sessionId is required")
+    throw new HttpRouteError({ message: "sessionId is required", status: 400, code: "invalid-request" })
   }
   return id
 }
@@ -311,18 +316,18 @@ export function parseTargetSelection(value: JsonObject[string] | undefined): Exe
   }
   const object = getObject(value)
   if (!object) {
-    throw new Error("targetSelection must be an object")
+    throw new HttpRouteError({ message: "targetSelection must be an object", status: 400, code: "invalid-request" })
   }
   const urlIncludes = typeof object.urlIncludes === "string" && object.urlIncludes ? object.urlIncludes : undefined
   if (object.index !== undefined && (typeof object.index !== "number" || !Number.isInteger(object.index))) {
-    throw new Error("targetSelection.index must be a non-negative integer")
+    throw new HttpRouteError({ message: "targetSelection.index must be a non-negative integer", status: 400, code: "invalid-request" })
   }
   const index = typeof object.index === "number" ? object.index : undefined
   if (index !== undefined && index < 0) {
-    throw new Error("targetSelection.index must be a non-negative integer")
+    throw new HttpRouteError({ message: "targetSelection.index must be a non-negative integer", status: 400, code: "invalid-request" })
   }
   if (urlIncludes && index !== undefined) {
-    throw new Error("Use only one target selector")
+    throw new HttpRouteError({ message: "Use only one target selector", status: 400, code: "invalid-request" })
   }
   return {
     ...(urlIncludes ? { urlIncludes } : {}),

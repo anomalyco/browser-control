@@ -20,6 +20,22 @@ describe("HTTP request schemas", () => {
     if (!address || typeof address === "string") throw new Error("test server did not bind a TCP port")
     const port = address.port
     const registry = new TargetRegistry()
+    registry.addRootTarget({
+      tabId: 7,
+      sessionId: "bc-tab-7",
+      browserControlSessionId: "alpha",
+      owner: "user",
+      targetInfo: {
+        targetId: "target-7",
+        type: "page",
+        title: "Owned",
+        url: "https://owned.example/",
+        attached: true,
+        canAccessOpener: false,
+      },
+    })
+    const sessions = new BrowserControlSessions(`http://127.0.0.1:${port}`, undefined, undefined, registry)
+    sessions.createNew("beta")
     handler = createHttpRequestHandler({
       host: "127.0.0.1",
       port,
@@ -31,17 +47,53 @@ describe("HTTP request schemas", () => {
         sendDebuggerCommand: async () => ({}),
       }),
       registry,
-      sessions: new BrowserControlSessions(`http://127.0.0.1:${port}`),
+      sessions,
     })
 
     try {
       await expect(postJson(port, "/cli/session/new", { id: "alpha", readOnly: "yes" })).resolves.toMatchObject({
         status: 400,
-        body: { error: expect.stringContaining("Invalid session new request") },
+        body: { error: expect.stringContaining("Invalid session new request"), code: "invalid-request" },
+      })
+      await expect(postJson(port, "/cli/session/new", { id: "beta" })).resolves.toMatchObject({
+        status: 409,
+        body: { error: "Session already exists: beta", code: "session-already-exists" },
+      })
+      await expect(postJson(port, "/cli/session/new", { id: "INVALID" })).resolves.toMatchObject({
+        status: 400,
+        body: { error: expect.stringContaining("Session ids must use lowercase"), code: "invalid-request" },
       })
       await expect(postJson(port, "/recording/start", { outputPath: "/tmp/demo.webm", audio: "yes" })).resolves.toMatchObject({
         status: 400,
-        body: { error: expect.stringContaining("Invalid recording start request") },
+        body: { error: expect.stringContaining("Invalid recording start request"), code: "invalid-request" },
+      })
+      await expect(postJson(port, "/cli/execute", { code: 42, createIfMissing: true })).resolves.toMatchObject({
+        status: 400,
+        body: { error: expect.stringContaining("Invalid execute request"), code: "invalid-request" },
+      })
+      await expect(postJson(port, "/cli/session/adopt", { createIfMissing: true, targetSelection: {} })).resolves.toMatchObject({
+        status: 400,
+        body: { error: expect.stringContaining("Invalid session adopt request"), code: "invalid-request" },
+      })
+      await expect(postJson(port, "/cli/execute", { sessionId: "ghost", code: "1", createIfMissing: false })).resolves.toMatchObject({
+        status: 404,
+        body: { error: "Session not found: ghost", code: "session-not-found" },
+      })
+      await expect(postJson(port, "/cli/session/adopt", {
+        sessionId: "beta",
+        createIfMissing: false,
+        targetSelection: { urlIncludes: "missing.example" },
+      })).resolves.toMatchObject({
+        status: 404,
+        body: { code: "target-not-found" },
+      })
+      await expect(postJson(port, "/cli/session/adopt", {
+        sessionId: "beta",
+        createIfMissing: false,
+        targetSelection: { urlIncludes: "owned.example" },
+      })).resolves.toMatchObject({
+        status: 409,
+        body: { error: expect.stringContaining("already adopted by session alpha"), code: "target-owned" },
       })
     } finally {
       await close(server)

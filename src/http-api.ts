@@ -12,7 +12,7 @@ import {
   validateBrowserFetchSite,
   validateHostHeader,
 } from "./relay-helpers.ts"
-import { selectTarget } from "./execute.ts"
+import { selectTarget, TargetSelectionError } from "./execute.ts"
 import {
   ExecuteRequest,
   RecordingStartRequest,
@@ -22,9 +22,9 @@ import {
   SessionNewRequest,
   type TargetSummary,
 } from "./relay-schema.ts"
-import type { BrowserControlSessions } from "./session-manager.ts"
+import { SessionError, type BrowserControlSessions } from "./session-manager.ts"
 import type { RecordingRelay, RecordingStartOptions, RecordingTargetOptions } from "./recording-relay.ts"
-import type { TargetRegistry } from "./target-registry.ts"
+import { TargetOwnershipError, type TargetRegistry } from "./target-registry.ts"
 import { browserControlBuildId, browserControlVersion } from "./version.ts"
 
 export function createHttpRequestHandler(options: {
@@ -35,7 +35,6 @@ export function createHttpRequestHandler(options: {
   readonly recordingRelay: RecordingRelay
   readonly registry: TargetRegistry
   readonly sessions: BrowserControlSessions
-  readonly refreshPageStatuses?: (tabIds: readonly number[]) => void
 }): (request: http.IncomingMessage, response: http.ServerResponse) => void {
   options.sessions.setUserAttachedPageUrlsProvider(() =>
     options.registry.listRootTargets()
@@ -100,7 +99,6 @@ export function createHttpRequestHandler(options: {
         pathname,
         sessions: options.sessions,
         registry: options.registry,
-        ...(options.refreshPageStatuses ? { refreshPageStatuses: options.refreshPageStatuses } : {}),
       }))
       return
     }
@@ -115,9 +113,11 @@ function runRequestEffect(response: http.ServerResponse, effect: Effect.Effect<v
   response.once("close", onClose)
   Effect.runPromise(effect, { signal: controller.signal }).catch((error: unknown) => {
     if (response.destroyed || response.writableEnded) return
+    const routeError = relayHttpError(error)
     sendJson(response, {
-      error: error instanceof Error ? error.message : String(error),
-    }, error instanceof HttpRouteError ? error.status : 500)
+      error: routeError.message,
+      code: routeError.code,
+    }, routeError.status)
   }).finally(() => {
     response.off("close", onClose)
   })
@@ -207,7 +207,6 @@ function handleCliRequest(options: {
   readonly pathname: string
   readonly sessions: BrowserControlSessions
   readonly registry: TargetRegistry
-  readonly refreshPageStatuses?: (tabIds: readonly number[]) => void
 }): Effect.Effect<void, Error> {
   return Effect.gen(function* () {
     if (options.pathname === "/cli/sessions" && options.request.method === "GET") {
@@ -225,13 +224,11 @@ function handleCliRequest(options: {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(SessionIdRequest, body, "session delete")
       const id = requiredSessionId(request.id)
-      const adoptedTargetId = options.sessions.adoptedTargetId(id)
       const deleted = yield* options.sessions.delete(id)
       if (!deleted) {
-        sendJson(options.response, { error: `Session not found: ${id}` }, 404)
+        sendJson(options.response, { error: `Session not found: ${id}`, code: "session-not-found" }, 404)
         return
       }
-      options.refreshPageStatuses?.(releaseSessionTargets(options.registry, id, adoptedTargetId ? [adoptedTargetId] : []))
       sendJson(options.response, { deleted: true, id })
       return
     }
@@ -239,21 +236,17 @@ function handleCliRequest(options: {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(SessionIdRequest, body, "session reset")
       const id = requiredSessionId(request.id)
-      const adoptedTargetId = options.sessions.adoptedTargetId(id)
       const session = yield* options.sessions.reset(id)
       if (!session) {
-        sendJson(options.response, { error: `Session not found: ${id}` }, 404)
+        sendJson(options.response, { error: `Session not found: ${id}`, code: "session-not-found" }, 404)
         return
       }
-      options.refreshPageStatuses?.(releaseSessionTargets(options.registry, id, adoptedTargetId ? [adoptedTargetId] : []))
       sendJson(options.response, { session })
       return
     }
     if (options.pathname === "/cli/session/adopt" && options.request.method === "POST") {
       const body = yield* readJsonBody(options.request)
-      const request = yield* Schema.decodeUnknownEffect(SessionAdoptRequest)(body).pipe(
-        Effect.mapError((cause) => new Error(`Invalid session adopt request: ${cause.message}`)),
-      )
+      const request = yield* decodeRequest(SessionAdoptRequest, body, "session adopt")
       const requestedSessionId = optionalSessionId(request.sessionId)
       const targetSelection = parseTargetSelection(request.targetSelection)
       if (!targetSelection) {
@@ -267,27 +260,19 @@ function handleCliRequest(options: {
       if (!selectedTarget) {
         throw new Error("No page matched target selection")
       }
-      if (selectedTarget.browserControlSessionId && selectedTarget.browserControlSessionId !== requestedSessionId) {
-        throw new Error(`Target is already owned by session ${selectedTarget.browserControlSessionId}. Use that session, or reset/delete it to release the tab before adopting it elsewhere.`)
-      }
       const adoptedTargetId = selectedTarget.targetInfo.targetId
-      const { session, adoptedUrl, releasedTargetIds } = yield* options.sessions.adopt({
+      const { session, adoptedUrl } = yield* options.sessions.adopt({
         ...(requestedSessionId ? { sessionId: requestedSessionId } : {}),
         createIfMissing: request.createIfMissing,
         targetId: adoptedTargetId,
         targetUrl: selectedTarget.targetInfo.url,
       })
-      const releasedTabIds = releaseSessionTargets(options.registry, session.id, releasedTargetIds)
-      const adoptedTabId = options.registry.targetsByTargetId.get(adoptedTargetId)?.tabId
-      options.refreshPageStatuses?.(uniqueTabIds(releasedTabIds, adoptedTabId))
       sendJson(options.response, { session, adoptedUrl, adoptedTargetId })
       return
     }
     if (options.pathname === "/cli/execute" && options.request.method === "POST") {
       const body = yield* readJsonBody(options.request)
-      const request = yield* Schema.decodeUnknownEffect(ExecuteRequest)(body).pipe(
-        Effect.mapError((cause) => new Error(`Invalid execute request: ${cause.message}`)),
-      )
+      const request = yield* decodeRequest(ExecuteRequest, body, "execute")
       const requestedSessionId = optionalSessionId(request.sessionId)
       const targetSelection = parseTargetSelection(request.targetSelection)
       const { result, session } = yield* options.sessions.execute({
@@ -326,32 +311,9 @@ function decodeRequest<A>(schema: Schema.ConstraintDecoder<A>, body: unknown, la
     Effect.mapError((cause) => new HttpRouteError({
       message: `Invalid ${label} request: ${cause.message}`,
       status: 400,
+      code: "invalid-request",
     })),
   )
-}
-
-export function releaseSessionTargets(registry: TargetRegistry, browserControlSessionId: string, targetIds: readonly string[]): number[] {
-  const releaseTargetIds = new Set(targetIds)
-  if (releaseTargetIds.size === 0) {
-    return []
-  }
-  const affectedTabIds: number[] = []
-  for (const target of registry.listRootTargets()) {
-    if (!releaseTargetIds.has(target.targetInfo.targetId)) {
-      continue
-    }
-    affectedTabIds.push(target.tabId)
-    if (target.browserControlSessionId !== browserControlSessionId) {
-      continue
-    }
-    const { browserControlSessionId: _released, ...releasedTarget } = target
-    registry.addRootTarget(releasedTarget)
-  }
-  return affectedTabIds
-}
-
-function uniqueTabIds(tabIds: readonly number[], additionalTabId: number | undefined): number[] {
-  return Array.from(new Set(additionalTabId === undefined ? tabIds : [...tabIds, additionalTabId]))
 }
 
 function resolveAttachedRecordingTarget(options: {
@@ -363,7 +325,7 @@ function resolveAttachedRecordingTarget(options: {
   if (tabId !== undefined) {
     const target = options.registry.getRootTargetByTabId(tabId)
     if (!target) {
-      throw new HttpRouteError({ message: `No attached tab found for tabId ${tabId}`, status: 404 })
+      throw new HttpRouteError({ message: `No attached tab found for tabId ${tabId}`, status: 404, code: "target-not-found" })
     }
     return { tabId, sessionId: target.sessionId, owner: target.owner }
   }
@@ -371,20 +333,20 @@ function resolveAttachedRecordingTarget(options: {
   if (sessionId) {
     const target = options.registry.getRootTargetBySessionId(sessionId)
     if (!target) {
-      throw new HttpRouteError({ message: `No attached tab found for sessionId ${sessionId}`, status: 404 })
+      throw new HttpRouteError({ message: `No attached tab found for sessionId ${sessionId}`, status: 404, code: "target-not-found" })
     }
     return { tabId: target.tabId, sessionId: target.sessionId, owner: target.owner }
   }
   const targets = options.registry.listRootTargets()
   if (targets.length === 0) {
-    throw new HttpRouteError({ message: "No attached tab available for recording", status: 404 })
+    throw new HttpRouteError({ message: "No attached tab available for recording", status: 404, code: "target-not-found" })
   }
   if (targets.length > 1) {
-    throw new HttpRouteError({ message: "Multiple attached tabs available; provide sessionId or tabId", status: 400 })
+    throw new HttpRouteError({ message: "Multiple attached tabs available; provide sessionId or tabId", status: 409, code: "target-ambiguous" })
   }
   const target = targets[0]
   if (!target) {
-    throw new HttpRouteError({ message: "No attached tab available for recording", status: 404 })
+    throw new HttpRouteError({ message: "No attached tab available for recording", status: 404, code: "target-not-found" })
   }
   return { tabId: target.tabId, sessionId: target.sessionId, owner: target.owner }
 }
@@ -415,7 +377,50 @@ function optionalInteger(value: unknown, field: string): number | undefined {
     return undefined
   }
   if (typeof value !== "number" || !Number.isInteger(value)) {
-    throw new HttpRouteError({ message: `${field} must be an integer`, status: 400 })
+    throw new HttpRouteError({ message: `${field} must be an integer`, status: 400, code: "invalid-request" })
   }
   return value
+}
+
+export function relayHttpError(error: unknown): HttpRouteError {
+  if (error instanceof HttpRouteError) {
+    return error
+  }
+  if (error instanceof SessionError) {
+    switch (error.reason) {
+      case "already-exists":
+        return new HttpRouteError({ message: error.message, status: 409, code: "session-already-exists" })
+      case "inactive":
+        return new HttpRouteError({ message: error.message, status: 409, code: "session-inactive" })
+      case "invalid-request":
+        return new HttpRouteError({ message: error.message, status: 400, code: "invalid-request" })
+      case "not-found":
+        return new HttpRouteError({ message: error.message, status: 404, code: "session-not-found" })
+      case "target-owned":
+        return new HttpRouteError({ message: error.message, status: 409, code: "target-owned" })
+      case "timeout":
+        return new HttpRouteError({ message: error.message, status: 409, code: "session-timeout" })
+      case "setup-failed":
+        return new HttpRouteError({ message: error.message, status: 500, code: "setup-failed" })
+    }
+  }
+  if (error instanceof TargetSelectionError) {
+    return new HttpRouteError({
+      message: error.message,
+      status: error.reason === "invalid" ? 400 : error.reason === "not-found" ? 404 : 409,
+      code: error.reason === "invalid" ? "invalid-request" : error.reason === "not-found" ? "target-not-found" : "target-ambiguous",
+    })
+  }
+  if (error instanceof TargetOwnershipError) {
+    return new HttpRouteError({
+      message: error.message,
+      status: error.reason === "not-found" ? 404 : 409,
+      code: error.reason === "not-found" ? "target-not-found" : error.reason === "owned" ? "target-owned" : "target-changed",
+    })
+  }
+  return new HttpRouteError({
+    message: error instanceof Error ? error.message : String(error),
+    status: 500,
+    code: "internal",
+  })
 }

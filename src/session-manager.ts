@@ -1,7 +1,13 @@
-import { Effect, Option, Schema, Semaphore } from "effect"
+import { Deferred, Effect, Option, Schema, Semaphore } from "effect"
 import { defaultPageClosedWarning, ExecuteSandbox, hasExplicitTargetSelection, type ExecuteResult, type ExecuteTargetSelection } from "./execute.ts"
 import { generateSessionId } from "./relay-helpers.ts"
 import type { BrowserControlSession, ExecuteSandboxLike, SessionSummary } from "./relay-types.ts"
+import {
+  MemoryTargetOwnership,
+  type TargetOwnership,
+  type TargetOwnershipChange,
+  type TargetOwnershipReservation,
+} from "./target-registry.ts"
 
 export type SessionExecuteRecord = {
   readonly sessionId: string
@@ -19,6 +25,8 @@ export type SessionHooks = {
   readonly lifecycleTimeoutMs?: number
   /** Current user-owned attached page URLs, used for relay-side adoption hints. */
   readonly getUserAttachedPageUrls?: () => readonly string[]
+  /** Reconcile relay visibility and presentation after authoritative ownership changes. */
+  readonly onTargetOwnershipChange?: (change: TargetOwnershipChange) => void
 }
 
 export class SessionError extends Schema.TaggedErrorClass<SessionError>()(
@@ -67,16 +75,19 @@ export class BrowserControlSessions {
   private readonly hooks: SessionHooks
   private readonly executing = new Set<string>()
   private readonly adoptSemaphore = Semaphore.makeUnsafe(1)
-  private readonly adoptedTargetOwners = new Map<string, string>()
+  private readonly targetOwnership: TargetOwnership
+  private closing = false
   private userAttachedPageUrlsProvider: (() => readonly string[]) | undefined
 
   constructor(
     private readonly endpointUrl: string,
     createSandbox?: (id: string) => ExecuteSandboxLike,
     hooks?: SessionHooks,
+    targetOwnership?: TargetOwnership,
   ) {
     this.createSandbox = createSandbox ?? ((id) => new ExecuteSandbox({ endpointUrl: this.endpointUrl, sessionId: id }))
     this.hooks = hooks ?? {}
+    this.targetOwnership = targetOwnership ?? new MemoryTargetOwnership()
     this.userAttachedPageUrlsProvider = this.hooks.getUserAttachedPageUrls
   }
 
@@ -91,6 +102,9 @@ export class BrowserControlSessions {
   }
 
   createNew(id: string | undefined, options?: { readonly readOnly?: boolean }): BrowserControlSession {
+    if (this.closing) {
+      throw sessionError("inactive", "Browser Control sessions are closing")
+    }
     const sessionId = id ?? generateSessionId(this.sessions)
     if (this.sessions.has(sessionId)) {
       throw sessionError("already-exists", `Session already exists: ${sessionId}`, sessionId)
@@ -101,6 +115,9 @@ export class BrowserControlSessions {
   }
 
   getOrCreate(id: string): { readonly session: BrowserControlSession; readonly created: boolean } {
+    if (this.closing) {
+      throw sessionError("inactive", "Browser Control sessions are closing", id)
+    }
     const existing = this.sessions.get(id)
     if (existing) {
       return { session: existing, created: false }
@@ -131,6 +148,9 @@ export class BrowserControlSessions {
   delete(id: string): Effect.Effect<boolean, Error> {
     const manager = this
     return Effect.gen(function* () {
+      if (manager.closing) {
+        return yield* Effect.fail(sessionError("inactive", "Browser Control sessions are closing", id))
+      }
       const session = manager.sessions.get(id)
       if (!session) {
         return false
@@ -140,7 +160,7 @@ export class BrowserControlSessions {
           return false
         }
         yield* manager.closeBrowserControlSession(session)
-        manager.releaseSessionAdoptedTarget(session)
+        manager.releaseSessionTargetOwnership(session)
         manager.sessions.delete(id)
         return true
       }))
@@ -150,6 +170,9 @@ export class BrowserControlSessions {
   reset(id: string): Effect.Effect<SessionSummary | undefined, Error> {
     const manager = this
     return Effect.gen(function* () {
+      if (manager.closing) {
+        return yield* Effect.fail(sessionError("inactive", "Browser Control sessions are closing", id))
+      }
       const existing = manager.sessions.get(id)
       if (!existing) {
         return undefined
@@ -159,7 +182,7 @@ export class BrowserControlSessions {
           return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${id}`, id))
         }
         yield* manager.closeBrowserControlSession(existing)
-        manager.releaseSessionAdoptedTarget(existing)
+        manager.releaseSessionTargetOwnership(existing)
         const session = manager.createBrowserControlSession(id, existing.readOnly)
         manager.sessions.set(id, session)
         return manager.sessionSummary(session)
@@ -172,16 +195,14 @@ export class BrowserControlSessions {
   }
 
   releaseAdoptedTarget(targetId: string): string | undefined {
-    const owner = this.adoptedTargetOwners.get(targetId)
-    if (!owner) {
-      return undefined
+    for (const session of this.sessions.values()) {
+      if (session.adoptedTargetId === targetId) {
+        this.notifyTargetOwnershipChange(this.targetOwnership.releaseTargetOwnership(targetId, session.id))
+        delete session.adoptedTargetId
+        return session.id
+      }
     }
-    const session = this.sessions.get(owner)
-    if (session?.adoptedTargetId === targetId) {
-      delete session.adoptedTargetId
-    }
-    this.adoptedTargetOwners.delete(targetId)
-    return owner
+    return undefined
   }
 
   execute(options: {
@@ -192,6 +213,9 @@ export class BrowserControlSessions {
   }): Effect.Effect<{ readonly result: ExecuteResult; readonly session: SessionSummary & { readonly created?: boolean } }, Error> {
     const manager = this
     return Effect.gen(function* () {
+      if (manager.closing) {
+        return yield* Effect.fail(sessionError("inactive", "Browser Control sessions are closing"))
+      }
       if (options.sessionId === undefined && !options.createIfMissing) {
         return yield* Effect.fail(sessionError("invalid-request", "sessionId is required when createIfMissing is false"))
       }
@@ -248,7 +272,10 @@ export class BrowserControlSessions {
     readonly targetUrl: string
   }): Effect.Effect<{ readonly adoptedUrl: string; readonly session: SessionSummary & { readonly created?: boolean }; readonly releasedTargetIds: readonly string[] }, Error> {
     const manager = this
-    return manager.adoptSemaphore.withPermit(Effect.gen(function* () {
+    return Effect.gen(function* () {
+      if (manager.closing) {
+        return yield* Effect.fail(sessionError("inactive", "Browser Control sessions are closing"))
+      }
       if (options.sessionId === undefined && !options.createIfMissing) {
         return yield* Effect.fail(sessionError("invalid-request", "sessionId is required when createIfMissing is false"))
       }
@@ -261,65 +288,123 @@ export class BrowserControlSessions {
       if (!session) {
         return yield* Effect.fail(sessionError("not-found", `Session not found: ${options.sessionId}`, options.sessionId))
       }
-      const adoption = Effect.gen(function* () {
-        const targetOwner = manager.adoptedTargetOwners.get(options.targetId)
-        if (targetOwner && targetOwner !== session.id) {
-          return yield* Effect.fail(sessionError("target-owned", `Target is already adopted by session ${targetOwner}. Use that session, or reset/delete it to release the tab before adopting it elsewhere.`, targetOwner))
+      type AdoptionResult = {
+        readonly adoptedUrl: string
+        readonly session: SessionSummary & { readonly created?: boolean }
+        readonly releasedTargetIds: readonly string[]
+      }
+      const result = yield* Deferred.make<AdoptionResult, Error>()
+      let state: "pending" | "cancelled" | "committed" = "pending"
+      let reservation: TargetOwnershipReservation | undefined
+      const timeoutMs = manager.hooks.lifecycleTimeoutMs ?? 10_000
+      const timeoutError = sessionError("timeout", `Session adopt for ${session.id} timed out after ${timeoutMs}ms`, session.id)
+      const adoptionCancelled = () => state === "cancelled"
+      const cancel = Effect.sync(() => {
+        if (state !== "pending") {
+          return
         }
-        return yield* manager.withLifecyclePermit(session, "adopt",
-          Effect.gen(function* () {
+        state = "cancelled"
+        if (reservation) {
+          manager.notifyTargetOwnershipChange(manager.targetOwnership.rollbackTargetOwnership(reservation))
+        }
+      })
+      const operation = Effect.gen(function* () {
           if (manager.sessions.get(session.id) !== session) {
             return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${session.id}`, session.id))
           }
-          const previousAdoptedTargetId = session.adoptedTargetId
-          const adoptedUrl = yield* manager.withLifecycleTimeout(
-            session.sandbox.adoptPage({ targetId: options.targetId, url: options.targetUrl }),
-            `Session adopt for ${session.id}`,
-          )
-          if (previousAdoptedTargetId && previousAdoptedTargetId !== options.targetId) {
-            manager.adoptedTargetOwners.delete(previousAdoptedTargetId)
+          if (adoptionCancelled()) {
+            if (resolved.created) {
+              yield* manager.cleanupSettledAdoption(session, true)
+            }
+            return yield* Effect.fail(timeoutError)
           }
-          manager.adoptedTargetOwners.set(options.targetId, session.id)
-          session.adoptedTargetId = options.targetId
-          session.updatedAt = new Date().toISOString()
-          const summary = manager.sessionSummary(session)
-          const releasedTargetIds = previousAdoptedTargetId && previousAdoptedTargetId !== options.targetId
-            ? [previousAdoptedTargetId]
-            : []
-          return { adoptedUrl, releasedTargetIds, session: { ...summary, ...(resolved.created ? { created: true } : {}) } }
-          }),
-        )
-      })
-      return yield* adoption.pipe(
-        Effect.catch((error) => resolved.created
-          ? manager.delete(session.id).pipe(Effect.ignore, Effect.andThen(Effect.fail(error)))
-          : Effect.fail(error)),
+          const previousAdoptedTargetId = session.adoptedTargetId
+          reservation = yield* Effect.try({
+            try: () => manager.targetOwnership.reserveTargetOwnership(options.targetId, session.id),
+            catch: (cause) => cause instanceof Error ? cause : new Error("Reserve target ownership", { cause }),
+          })
+          manager.notifyTargetOwnershipChange({ targetIds: [options.targetId], tabIds: reservation.tabId < 0 ? [] : [reservation.tabId] })
+          const adoptedUrl = yield* session.sandbox.adoptPage({ targetId: options.targetId, url: options.targetUrl })
+          if (adoptionCancelled()) {
+            manager.notifyTargetOwnershipChange(manager.targetOwnership.rollbackTargetOwnership(reservation))
+            yield* manager.cleanupSettledAdoption(session, resolved.created)
+            return yield* Effect.fail(timeoutError)
+          }
+          const activeReservation = reservation
+          return yield* Effect.try({
+            try: () => {
+              state = "committed"
+              manager.notifyTargetOwnershipChange(manager.targetOwnership.commitTargetOwnership({
+                reservation: activeReservation,
+                ...(previousAdoptedTargetId ? { previousAdoptedTargetId } : {}),
+              }))
+              session.adoptedTargetId = options.targetId
+              session.updatedAt = new Date().toISOString()
+              const summary = manager.sessionSummary(session)
+              const releasedTargetIds = previousAdoptedTargetId && previousAdoptedTargetId !== options.targetId
+                ? [previousAdoptedTargetId]
+                : []
+              const value = { adoptedUrl, releasedTargetIds, session: { ...summary, ...(resolved.created ? { created: true } : {}) } }
+              Deferred.doneUnsafe(result, Effect.succeed(value))
+              return value
+            },
+            catch: (cause) => cause instanceof Error ? cause : new Error("Commit target ownership", { cause }),
+          }).pipe(
+            Effect.catch((error) => manager.cleanupSettledAdoption(session, resolved.created).pipe(
+              Effect.andThen(Effect.fail(error)),
+            )),
+          )
+        })
+      const transaction = session.executeSemaphore.withPermit(operation.pipe(Effect.matchEffect({
+        onFailure: (error) => Effect.gen(function* () {
+          if (reservation) {
+            manager.notifyTargetOwnershipChange(manager.targetOwnership.rollbackTargetOwnership(reservation))
+          }
+          if (resolved.created && manager.sessions.get(session.id) === session) {
+            yield* manager.closeBrowserControlSessionSettled(session)
+            manager.sessions.delete(session.id)
+          }
+          yield* Deferred.fail(result, error)
+        }),
+        onSuccess: () => Effect.void,
+      })))
+      const worker = manager.adoptSemaphore.withPermit(transaction)
+      yield* worker.pipe(Effect.forkDetach({ startImmediately: true }))
+      return yield* Deferred.await(result).pipe(
+        Effect.timeoutOrElse({
+          duration: timeoutMs,
+          orElse: () => cancel.pipe(Effect.andThen(Effect.fail(timeoutError))),
+        }),
+        Effect.onInterrupt(() => cancel),
       )
-    }))
+    })
   }
 
   closeAll(): Effect.Effect<void> {
     const manager = this
     return Effect.gen(function* () {
-      const closedSessionIds = yield* Effect.forEach(Array.from(manager.sessions.values()), (session) => {
-        return manager.withLifecyclePermit(
-          session,
-          "close",
-          manager.closeBrowserControlSession(session),
-        ).pipe(
-          Effect.match({
-            onFailure: () => undefined,
-            onSuccess: () => session.id,
-          }),
-        )
-      })
-      for (const id of closedSessionIds) {
-        if (!id) continue
-        const session = manager.sessions.get(id)
-        if (!session) continue
-        manager.releaseSessionAdoptedTarget(session)
-        manager.sessions.delete(id)
-      }
+      manager.closing = true
+      yield* manager.adoptSemaphore.withPermit(Effect.gen(function* () {
+        const closedSessionIds = yield* Effect.forEach(Array.from(manager.sessions.values()), (session) => {
+          return manager.withLifecyclePermit(
+            session,
+            "close",
+            manager.closeBrowserControlSession(session),
+          ).pipe(
+            Effect.match({
+              onFailure: () => undefined,
+              onSuccess: () => session.id,
+            }),
+          )
+        })
+        for (const id of closedSessionIds) {
+          if (!id) continue
+          const session = manager.sessions.get(id)
+          if (!session) continue
+          manager.releaseSessionTargetOwnership(session)
+          manager.sessions.delete(id)
+        }
+      }))
     })
   }
 
@@ -381,10 +466,46 @@ export class BrowserControlSessions {
     return this.withLifecycleTimeout(session.sandbox.close(), `Close session ${session.id}`).pipe(Effect.ignore)
   }
 
-  private releaseSessionAdoptedTarget(session: BrowserControlSession): void {
-    if (session.adoptedTargetId && this.adoptedTargetOwners.get(session.adoptedTargetId) === session.id) {
-      this.adoptedTargetOwners.delete(session.adoptedTargetId)
+  private closeBrowserControlSessionSettled(session: BrowserControlSession): Effect.Effect<void> {
+    return session.sandbox.closeSettled().pipe(Effect.ignore)
+  }
+
+  private releaseSessionTargetOwnership(session: BrowserControlSession): void {
+    if (session.adoptedTargetId) {
+      this.notifyTargetOwnershipChange(this.targetOwnership.releaseTargetOwnership(session.adoptedTargetId, session.id))
+      delete session.adoptedTargetId
     }
+  }
+
+  private notifyTargetOwnershipChange(change: TargetOwnershipChange): void {
+    if (change.targetIds.length === 0 && change.tabIds.length === 0) {
+      return
+    }
+    try {
+      this.hooks.onTargetOwnershipChange?.(change)
+    } catch (error) {
+      console.error("Target ownership hook failed", error)
+    }
+  }
+
+  private cleanupSettledAdoption(session: BrowserControlSession, created: boolean): Effect.Effect<void> {
+    const manager = this
+    return Effect.gen(function* () {
+      yield* manager.closeBrowserControlSessionSettled(session)
+      if (manager.sessions.get(session.id) !== session) {
+        return
+      }
+      if (created) {
+        manager.sessions.delete(session.id)
+        return
+      }
+      const replacement = manager.createBrowserControlSession(session.id, session.readOnly)
+      manager.sessions.set(session.id, {
+        ...replacement,
+        createdAt: session.createdAt,
+        ...(session.adoptedTargetId ? { adoptedTargetId: session.adoptedTargetId } : {}),
+      })
+    })
   }
 
   private withLifecyclePermit<A, E, R>(

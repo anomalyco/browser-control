@@ -220,10 +220,14 @@ const execute = Command.make(
         ...(explicitSessionId ? { sessionId: explicitSessionId } : {}),
         code: executeCode,
         createIfMissing: !explicitSessionId,
-        targetSelection: {
-          ...(targetUrlValue ? { urlIncludes: targetUrlValue } : {}),
-          ...(targetIndexValue !== undefined ? { index: targetIndexValue } : {}),
-        },
+        ...(targetUrlValue || targetIndexValue !== undefined
+          ? {
+            targetSelection: {
+              ...(targetUrlValue ? { urlIncludes: targetUrlValue } : {}),
+              ...(targetIndexValue !== undefined ? { index: targetIndexValue } : {}),
+            },
+          }
+          : {}),
       })
       if (!explicitSessionId) {
         yield* Console.error(formatSessionContinuation(result.session.id))

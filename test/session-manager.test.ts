@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 import { Deferred, Effect, Fiber } from "effect"
 import { adoptionTipForUrl, BrowserControlSessions, shouldAppendAdoptionTip } from "../src/session-manager.ts"
 import type { ExecuteSandboxLike } from "../src/relay-types.ts"
+import { TargetRegistry } from "../src/target-registry.ts"
 
 type FakeSandbox = ExecuteSandboxLike & {
   readonly closes: () => number
@@ -14,11 +15,15 @@ const makeFakeSandbox = (options?: {
   readonly setupFailure?: Error
   readonly adoptFailure?: Error
   readonly onAdopt?: ExecuteSandboxLike["adoptPage"]
+  readonly onClose?: Effect.Effect<void>
   readonly defaultTargetId?: string
 }): FakeSandbox => {
   let closes = 0
   const adoptedSelections: unknown[] = []
   const crashedTargets: string[] = []
+  const close = () => Effect.sync(() => {
+    closes += 1
+  }).pipe(Effect.andThen(options?.onClose ?? Effect.void))
   return {
     execute: () =>
       (options?.onExecute ?? Effect.void).pipe(
@@ -39,10 +44,8 @@ const makeFakeSandbox = (options?: {
               warnings: [],
             }),
       ),
-    close: () =>
-      Effect.sync(() => {
-        closes += 1
-      }),
+    close,
+    closeSettled: close,
     adoptPage: (selection) => options?.onAdopt
       ? options.onAdopt(selection)
       : options?.adoptFailure
@@ -221,6 +224,216 @@ describe("BrowserControlSessions", () => {
         expect(sessions.listSummaries().map((session) => session.id)).toEqual(["alpha"])
       }),
     )
+  })
+
+  it("closeAll drains a timed-out adoption worker before closing sessions", async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const started = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const sandboxes: FakeSandbox[] = []
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => {
+        const sandbox = makeFakeSandbox(sandboxes.length === 0
+          ? {
+              onAdopt: () => Deferred.succeed(started, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.as("https://example.com/adopted"),
+              ),
+            }
+          : undefined)
+        sandboxes.push(sandbox)
+        return sandbox
+      }, { lifecycleTimeoutMs: 20 })
+      sessions.createNew("alpha")
+
+      const adoption = yield* Effect.forkChild(sessions.adopt({
+        sessionId: "alpha",
+        createIfMissing: false,
+        targetId: "target-1",
+        targetUrl: "https://example.com/adopted",
+      }).pipe(Effect.flip))
+      yield* Deferred.await(started)
+      expect((yield* Fiber.join(adoption)).message).toContain("timed out")
+
+      const closeFiber = yield* Effect.forkChild(sessions.closeAll())
+      for (let i = 0; i < 20; i++) yield* Effect.yieldNow
+      expect(sandboxes[0]?.closes()).toBe(0)
+      expect(sessions.listSummaries().map((session) => session.id)).toEqual(["alpha"])
+
+      yield* Deferred.succeed(release, undefined)
+      yield* Fiber.join(closeFiber)
+      expect(sandboxes[0]?.closes()).toBe(1)
+      expect(sandboxes[1]?.closes()).toBe(1)
+      expect(sessions.listSummaries()).toEqual([])
+    }))
+  })
+
+  it("closeAll keeps the adoption gate through worker failure cleanup", async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const closeStarted = yield* Deferred.make<void>()
+      const releaseClose = yield* Deferred.make<void>()
+      const sandbox = makeFakeSandbox({
+        adoptFailure: new Error("target detached"),
+        onClose: Deferred.succeed(closeStarted, undefined).pipe(Effect.andThen(Deferred.await(releaseClose))),
+      })
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox)
+
+      const adoption = yield* Effect.forkChild(sessions.adopt({
+        createIfMissing: true,
+        targetId: "target-1",
+        targetUrl: "https://example.com/adopted",
+      }).pipe(Effect.result))
+      yield* Deferred.await(closeStarted)
+
+      const closeFiber = yield* Effect.forkChild(sessions.closeAll())
+      for (let i = 0; i < 20; i++) yield* Effect.yieldNow
+      expect(sandbox.closes()).toBe(1)
+
+      yield* Deferred.succeed(releaseClose, undefined)
+      expect((yield* Fiber.join(adoption))._tag).toBe("Failure")
+      yield* Fiber.join(closeFiber)
+      expect(sandbox.closes()).toBe(1)
+      expect(sessions.listSummaries()).toEqual([])
+    }))
+  })
+
+  it("failed adoption cleanup retains the session permit until settled close finishes", async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const closeStarted = yield* Deferred.make<void>()
+      const releaseClose = yield* Deferred.make<void>()
+      let executed = false
+      const sandbox = makeFakeSandbox({
+        adoptFailure: new Error("target detached"),
+        onClose: Deferred.succeed(closeStarted, undefined).pipe(Effect.andThen(Deferred.await(releaseClose))),
+        onExecute: Effect.sync(() => {
+          executed = true
+        }),
+      })
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox, { lifecycleTimeoutMs: 5_000 })
+
+      const adoption = yield* Effect.forkChild(sessions.adopt({
+        sessionId: "alpha",
+        createIfMissing: true,
+        targetId: "target-1",
+        targetUrl: "https://example.com/adopted",
+      }).pipe(Effect.result))
+      yield* Deferred.await(closeStarted)
+      const execute = yield* Effect.forkChild(sessions.execute({
+        sessionId: "alpha",
+        code: "noop",
+        createIfMissing: false,
+      }).pipe(Effect.result))
+      for (let i = 0; i < 20; i++) yield* Effect.yieldNow
+      expect(executed).toBe(false)
+
+      yield* Deferred.succeed(releaseClose, undefined)
+      expect((yield* Fiber.join(adoption))._tag).toBe("Failure")
+      expect((yield* Fiber.join(execute))._tag).toBe("Failure")
+      expect(executed).toBe(false)
+      expect(sessions.listSummaries()).toEqual([])
+    }))
+  })
+
+  it("closeAll drains an adoption worker accepted immediately before shutdown", async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const firstStarted = yield* Deferred.make<void>()
+      const releaseFirst = yield* Deferred.make<void>()
+      const secondStarted = yield* Deferred.make<void>()
+      const releaseSecond = yield* Deferred.make<void>()
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", (id) => makeFakeSandbox({
+        onAdopt: () => (id === "alpha" ? Deferred.succeed(firstStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseFirst)),
+          Effect.as("https://example.com/alpha"),
+        ) : Deferred.succeed(secondStarted, undefined).pipe(
+          Effect.andThen(Deferred.await(releaseSecond)),
+          Effect.as("https://example.com/beta"),
+        )),
+      }), { lifecycleTimeoutMs: 5_000 })
+      sessions.createNew("alpha")
+      sessions.createNew("beta")
+
+      const first = yield* Effect.forkChild(sessions.adopt({
+        sessionId: "alpha",
+        createIfMissing: false,
+        targetId: "target-alpha",
+        targetUrl: "https://example.com/alpha",
+      }), { startImmediately: true })
+      yield* Deferred.await(firstStarted)
+      const second = yield* Effect.forkChild(sessions.adopt({
+        sessionId: "beta",
+        createIfMissing: false,
+        targetId: "target-beta",
+        targetUrl: "https://example.com/beta",
+      }), { startImmediately: true })
+      const closeFiber = yield* Effect.forkChild(sessions.closeAll(), { startImmediately: true })
+
+      yield* Deferred.succeed(releaseFirst, undefined)
+      yield* Deferred.await(secondStarted)
+      expect(sessions.listSummaries().map((session) => session.id).sort()).toEqual(["alpha", "beta"])
+      yield* Deferred.succeed(releaseSecond, undefined)
+
+      yield* Fiber.join(first)
+      yield* Fiber.join(second)
+      yield* Fiber.join(closeFiber)
+      expect(sessions.listSummaries()).toEqual([])
+    }))
+  })
+
+  it("a timed-out queued adoption waits for its session permit before cleaning a created session", async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const firstStarted = yield* Deferred.make<void>()
+      const releaseFirst = yield* Deferred.make<void>()
+      const executeStarted = yield* Deferred.make<void>()
+      const releaseExecute = yield* Deferred.make<void>()
+      let betaAdopted = false
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", (id) => makeFakeSandbox(id === "alpha"
+        ? {
+            onAdopt: () => Deferred.succeed(firstStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseFirst)),
+              Effect.as("https://example.com/alpha"),
+            ),
+          }
+        : {
+            onExecute: Deferred.succeed(executeStarted, undefined).pipe(Effect.andThen(Deferred.await(releaseExecute))),
+            onAdopt: () => Effect.sync(() => {
+              betaAdopted = true
+              return "https://example.com/beta"
+            }),
+          }), { lifecycleTimeoutMs: 20 })
+      sessions.createNew("alpha")
+
+      const first = yield* Effect.forkChild(sessions.adopt({
+        sessionId: "alpha",
+        createIfMissing: false,
+        targetId: "target-alpha",
+        targetUrl: "https://example.com/alpha",
+      }).pipe(Effect.result), { startImmediately: true })
+      yield* Deferred.await(firstStarted)
+      const second = yield* Effect.forkChild(sessions.adopt({
+        sessionId: "beta",
+        createIfMissing: true,
+        targetId: "target-beta",
+        targetUrl: "https://example.com/beta",
+      }).pipe(Effect.result), { startImmediately: true })
+      const execute = yield* Effect.forkChild(sessions.execute({
+        sessionId: "beta",
+        code: "wait",
+        createIfMissing: false,
+      }), { startImmediately: true })
+      yield* Deferred.await(executeStarted)
+      expect((yield* Fiber.join(second))._tag).toBe("Failure")
+
+      yield* Deferred.succeed(releaseFirst, undefined)
+      yield* Fiber.join(first)
+      for (let i = 0; i < 20; i++) yield* Effect.yieldNow
+      expect(sessions.summary("beta")).toBeDefined()
+      expect(betaAdopted).toBe(false)
+
+      yield* Deferred.succeed(releaseExecute, undefined)
+      yield* Fiber.join(execute)
+      for (let i = 0; i < 100 && sessions.summary("beta"); i++) yield* Effect.sleep("1 millis")
+      expect(sessions.summary("beta")).toBeUndefined()
+      expect(betaAdopted).toBe(false)
+    }))
   })
 
   it("delete times out without closing when an execute still owns the permit", async () => {
@@ -436,6 +649,31 @@ describe("BrowserControlSessions", () => {
     expect(sandbox.adoptedSelections()).toEqual([{ targetId: "target-2", url: "https://example.com/adopted" }])
   })
 
+  it("uses the target registry as adoption ownership authority", async () => {
+    const registry = new TargetRegistry()
+    registry.addRootTarget({
+      tabId: 2,
+      sessionId: "bc-tab-2",
+      owner: "user",
+      targetInfo: {
+        targetId: "target-2",
+        type: "page",
+        title: "Adopt me",
+        url: "https://example.com/adopted",
+        attached: true,
+        canAccessOpener: false,
+      },
+    })
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox(), undefined, registry)
+    sessions.createNew("alpha")
+
+    await Effect.runPromise(sessions.adopt({ sessionId: "alpha", createIfMissing: false, targetId: "target-2", targetUrl: "https://example.com/adopted" }))
+    expect(registry.targetsByTargetId.get("target-2")?.browserControlSessionId).toBe("alpha")
+
+    await Effect.runPromise(sessions.reset("alpha"))
+    expect(registry.targetsByTargetId.get("target-2")?.browserControlSessionId).toBeUndefined()
+  })
+
   it("reports whether adopt created a missing session", async () => {
     const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox())
     const result = await Effect.runPromise(
@@ -516,14 +754,136 @@ describe("BrowserControlSessions", () => {
     }))
   })
 
-  it("adopt fails within the lifecycle timeout when Playwright never settles", async () => {
-    const sandbox = makeFakeSandbox()
-    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => ({
-      ...sandbox,
-      adoptPage: () => Effect.never,
-    }), {
-      lifecycleTimeoutMs: 20,
+  it("rolls back ownership on timeout while retaining the permit until adoption settles", async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const started = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const registry = new TargetRegistry()
+      registry.addRootTarget({
+        tabId: 1,
+        sessionId: "bc-tab-1",
+        owner: "user",
+        targetInfo: {
+          targetId: "target-1",
+          type: "page",
+          title: "Adopt me",
+          url: "https://example.com/adopted",
+          attached: true,
+          canAccessOpener: false,
+        },
+      })
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox({
+        onAdopt: () => Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Deferred.await(release)),
+          Effect.as("https://example.com/adopted"),
+        ),
+      }), { lifecycleTimeoutMs: 20 }, registry)
+      sessions.createNew("alpha")
+
+      const adopt = yield* Effect.forkChild(sessions.adopt({
+        sessionId: "alpha",
+        createIfMissing: false,
+        targetId: "target-1",
+        targetUrl: "https://example.com/adopted",
+      }).pipe(Effect.flip))
+      yield* Deferred.await(started)
+      const error = yield* Fiber.join(adopt)
+      expect(error.message).toBe("Session adopt for alpha timed out after 20ms")
+      expect(registry.targetsByTargetId.get("target-1")?.browserControlSessionId).toBeUndefined()
+
+      const deleteResult = yield* sessions.delete("alpha").pipe(Effect.result)
+      expect(deleteResult._tag).toBe("Failure")
+
+      yield* Deferred.succeed(release, undefined)
+      for (let i = 0; i < 20; i++) yield* Effect.yieldNow
+      expect(sessions.adoptedTargetId("alpha")).toBeUndefined()
+      expect(registry.targetsByTargetId.get("target-1")?.browserControlSessionId).toBeUndefined()
+    }))
+  })
+
+  it("preserves an existing sandbox when adoption times out before starting", async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const started = yield* Deferred.make<void>()
+      const release = yield* Deferred.make<void>()
+      const sandboxes = new Map<string, FakeSandbox>()
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", (id) => {
+        const sandbox = makeFakeSandbox(id === "alpha"
+          ? {
+              onAdopt: () => Deferred.succeed(started, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.as("https://example.com/alpha"),
+              ),
+            }
+          : undefined)
+        sandboxes.set(id, sandbox)
+        return sandbox
+      }, { lifecycleTimeoutMs: 20 })
+      sessions.createNew("alpha")
+      sessions.createNew("beta")
+
+      yield* Effect.forkChild(sessions.adopt({
+        sessionId: "alpha",
+        createIfMissing: false,
+        targetId: "target-alpha",
+        targetUrl: "https://example.com/alpha",
+      }).pipe(Effect.ignore))
+      yield* Deferred.await(started)
+
+      const error = yield* sessions.adopt({
+        sessionId: "beta",
+        createIfMissing: false,
+        targetId: "target-beta",
+        targetUrl: "https://example.com/beta",
+      }).pipe(Effect.flip)
+      expect(error.message).toBe("Session adopt for beta timed out after 20ms")
+      expect(sandboxes.get("beta")?.closes()).toBe(0)
+
+      yield* Deferred.succeed(release, undefined)
+      for (let i = 0; i < 30; i++) yield* Effect.yieldNow
+      expect(sandboxes.get("beta")?.closes()).toBe(0)
+    }))
+  })
+
+  it("resets an existing sandbox when the reserved target generation changes after page adoption", async () => {
+    const registry = new TargetRegistry()
+    registry.addRootTarget({
+      tabId: 1,
+      sessionId: "bc-tab-old",
+      owner: "user",
+      targetInfo: {
+        targetId: "target-1",
+        type: "page",
+        title: "Old generation",
+        url: "https://example.com/adopted",
+        attached: true,
+        canAccessOpener: false,
+      },
     })
+    const sandboxes: FakeSandbox[] = []
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => {
+      const sandbox = makeFakeSandbox(sandboxes.length === 0
+        ? {
+            onAdopt: () => Effect.sync(() => {
+              registry.addRootTarget({
+                tabId: 1,
+                sessionId: "bc-tab-new",
+                owner: "user",
+                targetInfo: {
+                  targetId: "target-1",
+                  type: "page",
+                  title: "New generation",
+                  url: "https://example.com/adopted",
+                  attached: true,
+                  canAccessOpener: false,
+                },
+              })
+              return "https://example.com/adopted"
+            }),
+          }
+        : undefined)
+      sandboxes.push(sandbox)
+      return sandbox
+    }, undefined, registry)
     sessions.createNew("alpha")
 
     const error = await Effect.runPromise(sessions.adopt({
@@ -533,8 +893,11 @@ describe("BrowserControlSessions", () => {
       targetUrl: "https://example.com/adopted",
     }).pipe(Effect.flip))
 
-    expect(error.message).toBe("Session adopt for alpha timed out after 20ms")
+    expect(error.message).toBe("Target detached or changed during adoption: target-1")
+    expect(sandboxes[0]?.closes()).toBe(1)
+    expect(sandboxes).toHaveLength(2)
     expect(sessions.adoptedTargetId("alpha")).toBeUndefined()
+    expect(registry.targetsByTargetId.get("target-1")?.browserControlSessionId).toBeUndefined()
   })
 
   it("appends the adoption tip only for bare fresh-page executes with user-attached tabs", async () => {

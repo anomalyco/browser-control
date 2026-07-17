@@ -46,6 +46,8 @@ export interface ExecuteSandboxLike {
   execute(code: string, options?: ExecuteOptions): Effect.Effect<ExecuteResult>
   adoptPage(target: AdoptTarget): Effect.Effect<string, Error>
   close(): Effect.Effect<void, Error>
+  /** Adoption rollback cleanup does not settle before started Playwright close promises settle. */
+  closeSettled(): Effect.Effect<void, Error>
   markTargetCrashed(targetId: string): boolean
   getStatus(): {
     readonly sessionId?: string
@@ -61,6 +63,7 @@ export type BrowserControlSession = {
   readonly readOnly: boolean
   readonly sandbox: ExecuteSandboxLike
   readonly executeSemaphore: Semaphore.Semaphore
+  /** The adopted default-page pointer. Target ownership lives in TargetRegistry. */
   adoptedTargetId?: string
   updatedAt: string
 }

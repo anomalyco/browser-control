@@ -61,10 +61,14 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
           sessionId,
           code: args.code,
           createIfMissing: !args.session,
-          targetSelection: {
-            ...(args.targetUrl ? { urlIncludes: args.targetUrl } : {}),
-            ...(args.targetIndex !== undefined ? { index: args.targetIndex } : {}),
-          },
+          ...(args.targetUrl || args.targetIndex !== undefined
+            ? {
+              targetSelection: {
+                ...(args.targetUrl ? { urlIncludes: args.targetUrl } : {}),
+                ...(args.targetIndex !== undefined ? { index: args.targetIndex } : {}),
+              },
+            }
+            : {}),
         })
         const recreated = !args.session && currentSession.established && result.session.created === true
         currentSession.id = sessionId

@@ -2,6 +2,7 @@
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
 import { Clock, Console, Effect, Fiber, Option } from "effect"
 import { chromium, type Browser, type BrowserContext, type Frame, type Page } from "playwright-core"
+import { WebSocket } from "ws"
 import cp from "node:child_process"
 import fs from "node:fs/promises"
 import http from "node:http"
@@ -36,6 +37,14 @@ type RecordingMetadata = {
   readonly artifactType: string
   readonly sessionId: string
   readonly frameCount: number
+}
+
+type OwnerCdpPage = {
+  readonly closeTarget: () => Effect.Effect<void, Error>
+  readonly evaluate: <A = unknown>(expression: string) => Effect.Effect<A, Error>
+  readonly navigate: (url: string) => Effect.Effect<void, Error>
+  readonly waitFor: (expression: string) => Effect.Effect<void, Error>
+  readonly close: () => Promise<void>
 }
 
 type CaseRunResult = {
@@ -806,19 +815,20 @@ return await snapshot({ interactive: true })
             smokeSession,
             `await handoff('Navigate and resume ${marker}', { timeoutMs: 30000 }); return { resumed: true, url: page.url() }`,
           ]).pipe(Effect.forkChild)
+          yield* Effect.sleep("500 millis")
+          const ownerPage = yield* scopedOwnerCdpPage({ sessionId: smokeSession, urlIncludes: marker })
 
-          const completion = page.locator("#__browser_control_page_status__ button")
-          yield* playwright("wait for initial handoff completion control", () => completion.waitFor({ timeout: 10_000 }))
-          yield* goto(page, fixture.afterUrl)
-          yield* playwright("wait for restored handoff completion control", () => completion.waitFor({ timeout: 10_000 }))
-          yield* click(page.locator("#decoy"), "handoff decoy")
+          yield* ownerPage.waitFor(`document.querySelector('#__browser_control_page_status__')?.shadowRoot?.querySelector('button') != null`)
+          yield* ownerPage.navigate(fixture.afterUrl)
+          yield* ownerPage.waitFor(`document.querySelector('#__browser_control_page_status__')?.shadowRoot?.querySelector('button') != null`)
+          yield* ownerPage.evaluate(`document.querySelector('#decoy')?.click()`)
 
           const premature = yield* Fiber.join(executeFiber).pipe(Effect.timeoutOption("200 millis"))
           if (Option.isSome(premature)) {
             return yield* Effect.fail(new Error(`handoff resumed from a non-matching page control: ${premature.value}`))
           }
 
-          yield* click(completion, "matching handoff completion control")
+          yield* ownerPage.evaluate(`document.querySelector('#__browser_control_page_status__')?.shadowRoot?.querySelector('button')?.click()`)
           const output = yield* Fiber.join(executeFiber)
           if (!output.includes("resumed: true") || !output.includes(fixture.afterUrl)) {
             return yield* Effect.fail(new Error(`handoff did not resume on the navigated page: ${output}`))
@@ -857,12 +867,12 @@ return await snapshot({ interactive: true })
             waitingSession,
             `await handoff('Resume only from tab A ${marker}', { timeoutMs: 30000 }); return { resumed: true, url: page.url() }`,
           ]).pipe(Effect.forkChild)
+          yield* Effect.sleep("500 millis")
+          const waitingOwnerPage = yield* scopedOwnerCdpPage({ sessionId: waitingSession, urlIncludes: marker })
+          const peerOwnerPage = yield* scopedOwnerCdpPage({ sessionId: peerSession, urlIncludes: peerMarker })
 
-          const completion = page.locator("#__browser_control_page_status__ button")
-          yield* playwright("wait for tab A handoff completion control", () => completion.waitFor({ timeout: 10_000 }))
-          const peerCompletionCount = yield* playwright("inspect tab B handoff completion control", () =>
-            peerPage.locator("#__browser_control_page_status__ button").count(),
-          )
+          yield* waitingOwnerPage.waitFor(`document.querySelector('#__browser_control_page_status__')?.shadowRoot?.querySelector('button') != null`)
+          const peerCompletionCount = yield* peerOwnerPage.evaluate<number>(`document.querySelector('#__browser_control_page_status__')?.shadowRoot?.querySelectorAll('button').length ?? 0`)
           if (peerCompletionCount !== 0) {
             return yield* Effect.fail(new Error(`peer tab exposed ${peerCompletionCount} handoff completion control(s)`))
           }
@@ -877,13 +887,13 @@ return await snapshot({ interactive: true })
             return yield* Effect.fail(new Error(`peer tab execute failed: ${peerOutput}`))
           }
 
-          yield* click(peerPage.locator("#decoy"), "peer tab decoy")
+          yield* peerOwnerPage.evaluate(`document.querySelector('#decoy')?.click()`)
           const premature = yield* Fiber.join(executeFiber).pipe(Effect.timeoutOption("200 millis"))
           if (Option.isSome(premature)) {
             return yield* Effect.fail(new Error(`handoff resumed from peer tab activity: ${premature.value}`))
           }
 
-          yield* click(completion, "tab A handoff completion control")
+          yield* waitingOwnerPage.evaluate(`document.querySelector('#__browser_control_page_status__')?.shadowRoot?.querySelector('button')?.click()`)
           const output = yield* Fiber.join(executeFiber)
           if (!output.includes("resumed: true") || !output.includes(marker)) {
             return yield* Effect.fail(new Error(`handoff did not resume from tab A: ${output}`))
@@ -898,6 +908,42 @@ return await snapshot({ interactive: true })
             ]).pipe(Effect.ignore),
           ),
         ),
+      )
+    }),
+  },
+  {
+    name: "handoff-target-detach",
+    run: Effect.fnUntraced(function* (page) {
+      const marker = `bc-handoff-detach-${Date.now()}`
+      const smokeSession = `${marker}-session`
+      return yield* Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* scopedHandoffFixture(marker)
+          yield* goto(page, fixture.beforeUrl)
+          yield* runBrowserControl(["session", "new", smokeSession])
+          yield* runBrowserControl(["session", "adopt", "--session", smokeSession, "--target-url", marker])
+
+          const executeFiber = yield* runBrowserControl([
+            "execute",
+            "--session",
+            smokeSession,
+            `await handoff('Detach ${marker}', { timeoutMs: 30000 }); return 'unexpected'`,
+          ]).pipe(Effect.forkChild)
+          yield* Effect.sleep("500 millis")
+          const ownerPage = yield* scopedOwnerCdpPage({ sessionId: smokeSession, urlIncludes: marker })
+          yield* ownerPage.waitFor(`document.querySelector('#__browser_control_page_status__')?.shadowRoot?.querySelector('button') != null`)
+          yield* ownerPage.closeTarget()
+
+          const promptOutcome = yield* Effect.result(Fiber.join(executeFiber)).pipe(Effect.timeoutOption("5 seconds"))
+          if (Option.isNone(promptOutcome)) {
+            return yield* Effect.fail(new Error("target detach did not cancel the handoff within 5 seconds"))
+          }
+          const outcome = promptOutcome.value
+          if (outcome._tag === "Success" || !outcome.failure.message.includes("Handoff cancelled because its target detached")) {
+            return yield* Effect.fail(new Error(`target detach did not cancel the handoff promptly: ${outcome._tag === "Success" ? outcome.success : outcome.failure.message}`))
+          }
+          return "handoff cancelled on exact target detach"
+        }).pipe(Effect.ensuring(runBrowserControl(["session", "delete", smokeSession]).pipe(Effect.ignore))),
       )
     }),
   },
@@ -1287,6 +1333,161 @@ const withPage = Effect.fnUntraced(function* <A>(run: (page: Page) => Effect.Eff
     }),
   )
 })
+
+const scopedOwnerCdpPage = Effect.fnUntraced(function* (options: {
+  readonly sessionId: string
+  readonly urlIncludes: string
+}) {
+  return yield* Effect.acquireRelease(
+    Effect.tryPromise({
+      try: () => makeOwnerCdpPage(options),
+      catch: (cause) => new Error(`connect owner CDP page for ${options.sessionId}`, { cause }),
+    }),
+    (page) => Effect.all([
+      page.closeTarget().pipe(Effect.ignore),
+      boundedCleanup("close owner CDP page", page.close),
+    ], { concurrency: 1 }).pipe(Effect.asVoid),
+  )
+})
+
+async function makeOwnerCdpPage(options: { readonly sessionId: string; readonly urlIncludes: string }): Promise<OwnerCdpPage> {
+  const [versionResponse, targetsResponse] = await Promise.all([
+    fetch(new URL("/json/version", endpointUrl)),
+    fetch(new URL("/json/list", endpointUrl)),
+  ])
+  const version = await versionResponse.json() as { readonly webSocketDebuggerUrl?: unknown }
+  const targets = await targetsResponse.json() as Array<{
+    readonly id?: unknown
+    readonly url?: unknown
+    readonly browserControlSessionId?: unknown
+  }>
+  if (typeof version.webSocketDebuggerUrl !== "string") {
+    throw new Error("Relay did not provide a browser websocket URL")
+  }
+  const target = targets.find((candidate) => {
+    return candidate.browserControlSessionId === options.sessionId &&
+      typeof candidate.url === "string" && candidate.url.includes(options.urlIncludes)
+  })
+  if (!target || typeof target.id !== "string") {
+    throw new Error(`No target owned by ${options.sessionId} matched ${options.urlIncludes}`)
+  }
+
+  const websocketUrl = new URL(version.webSocketDebuggerUrl)
+  websocketUrl.searchParams.set("browserControlSessionId", options.sessionId)
+  const socket = new WebSocket(websocketUrl)
+  let nextId = 1
+  const pending = new Map<number, {
+    readonly resolve: (value: Record<string, unknown>) => void
+    readonly reject: (error: Error) => void
+    readonly timeout: NodeJS.Timeout
+  }>()
+  socket.on("message", (data) => {
+    const message = JSON.parse(data.toString()) as {
+      readonly id?: unknown
+      readonly result?: unknown
+      readonly error?: { readonly message?: unknown }
+    }
+    if (typeof message.id !== "number") {
+      return
+    }
+    const waiter = pending.get(message.id)
+    if (!waiter) {
+      return
+    }
+    pending.delete(message.id)
+    clearTimeout(waiter.timeout)
+    if (message.error) {
+      waiter.reject(new Error(typeof message.error.message === "string" ? message.error.message : "Owner CDP command failed"))
+      return
+    }
+    waiter.resolve(message.result && typeof message.result === "object" && !Array.isArray(message.result)
+      ? message.result as Record<string, unknown>
+      : {})
+  })
+  await new Promise<void>((resolve, reject) => {
+    socket.once("open", resolve)
+    socket.once("error", reject)
+  })
+
+  const command = (method: string, params: Record<string, unknown>, sessionId?: string): Promise<Record<string, unknown>> => {
+    const id = nextId++
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        pending.delete(id)
+        reject(new Error(`Owner CDP command timed out: ${method}`))
+      }, 10_000)
+      pending.set(id, { resolve, reject, timeout })
+      socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }))
+    })
+  }
+  const announced = await command("Target.attachToTarget", { targetId: target.id, flatten: true })
+  if (typeof announced.sessionId !== "string") {
+    socket.close()
+    throw new Error("Owner CDP target attach did not return a session id")
+  }
+  // The first attach announces the root; the second returns a client-local
+  // alias that remains routable if Chrome re-announces the root generation.
+  const attached = await command("Target.attachToTarget", { targetId: target.id, flatten: true })
+  if (typeof attached.sessionId !== "string") {
+    socket.close()
+    throw new Error("Owner CDP target alias did not return a session id")
+  }
+  const targetSessionId = attached.sessionId
+  const closeTarget = (): Effect.Effect<void, Error> => Effect.tryPromise({
+    try: async () => {
+      await command("Target.closeTarget", { targetId: target.id })
+    },
+    catch: (cause) => cause instanceof Error ? cause : new Error("Close owner CDP target", { cause }),
+  })
+  const evaluate = <A>(expression: string): Effect.Effect<A, Error> => Effect.tryPromise({
+    try: async () => {
+      const response = await command("Runtime.evaluate", { expression, returnByValue: true }, targetSessionId)
+      if (response.exceptionDetails) {
+        throw new Error(`Owner CDP evaluation failed: ${JSON.stringify(response.exceptionDetails)}`)
+      }
+      const result = response.result
+      if (!result || typeof result !== "object" || Array.isArray(result)) {
+        return undefined as A
+      }
+      return (result as { readonly value?: A }).value as A
+    },
+    catch: (cause) => cause instanceof Error ? cause : new Error("Owner CDP evaluation failed", { cause }),
+  })
+  return {
+    closeTarget,
+    evaluate,
+    navigate: (url) => Effect.tryPromise({
+      try: async () => {
+        await command("Page.navigate", { url }, targetSessionId)
+        for (let attempt = 0; attempt < 100; attempt++) {
+          if (await Effect.runPromise(evaluate<string>("location.href")) === url) {
+            return
+          }
+          await new Promise((resolve) => setTimeout(resolve, 50))
+        }
+        throw new Error(`Owner CDP navigation did not reach ${url}`)
+      },
+      catch: (cause) => cause instanceof Error ? cause : new Error(`Owner CDP navigation failed: ${url}`, { cause }),
+    }),
+    waitFor: (expression) => Effect.gen(function* () {
+      for (let attempt = 0; attempt < 200; attempt++) {
+        if (yield* evaluate<boolean>(expression)) {
+          return
+        }
+        yield* Effect.sleep("50 millis")
+      }
+      return yield* Effect.fail(new Error(`Owner CDP condition timed out: ${expression}`))
+    }),
+    close: async () => {
+      for (const waiter of pending.values()) {
+        clearTimeout(waiter.timeout)
+        waiter.reject(new Error("Owner CDP socket closed"))
+      }
+      pending.clear()
+      socket.terminate()
+    },
+  }
+}
 
 const scopedBrowser = Effect.fnUntraced(function* () {
   return yield* Effect.acquireRelease(

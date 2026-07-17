@@ -68,6 +68,38 @@ describe("HandoffRegistry", () => {
     await expect(two.outcome).resolves.toBe("timeout")
     expect(registry.pendingCount).toBe(0)
   })
+
+  it("cancels every waiter bound to an exact target with a structured reason", async () => {
+    const registry = registryWithIds("handoff-1", "handoff-2")
+    const one = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7", message: "one", timeoutMs: 5_000 })
+    const two = registry.wait({ sessionId: "beta", tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7", message: "two", timeoutMs: 5_000 })
+
+    expect(registry.cancelForTarget({
+      targetId: "target-7",
+      targetSessionId: "bc-tab-7",
+      reason: "target-crashed",
+    })).toEqual([
+      expect.objectContaining({ id: one.id, sessionId: "alpha", tabId: 7 }),
+      expect.objectContaining({ id: two.id, sessionId: "beta", tabId: 7 }),
+    ])
+    await expect(one.outcome).resolves.toEqual({ type: "cancelled", reason: "target-crashed" })
+    await expect(two.outcome).resolves.toEqual({ type: "cancelled", reason: "target-crashed" })
+    expect(registry.pendingCount).toBe(0)
+  })
+
+  it("does not cancel a replacement target generation that reused the tab", async () => {
+    const registry = registryWithIds("handoff-1")
+    const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-new", message: "m", timeoutMs: 5_000 })
+
+    expect(registry.cancelForTarget({
+      targetId: "target-7",
+      targetSessionId: "bc-tab-old",
+      reason: "target-detached",
+    })).toEqual([])
+    expect(registry.pendingForSession("alpha")?.id).toBe(wait.id)
+    expect(registry.complete({ id: wait.id, tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-new" })).toBe(true)
+    await expect(wait.outcome).resolves.toBe("resolved")
+  })
 })
 
 describe("resolveExactHandoffTarget", () => {

@@ -14,6 +14,7 @@ import http from "node:http"
 import https from "node:https"
 import zlib from "node:zlib"
 import { hideGhostCursor as hideGhostCursorOnPage, showGhostCursor as showGhostCursorOnPage, type GhostCursorClientOptions } from "./ghost-cursor.ts"
+import type { HandoffOutcome } from "./handoff.ts"
 import type { ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary, ExecuteMedia } from "./relay-schema.ts"
 import { executionContextFailureDiagnostic } from "./runtime-diagnostics.ts"
 
@@ -46,6 +47,14 @@ export class SessionPageRecoveryError extends Schema.TaggedErrorClass<SessionPag
   },
 ) {}
 
+export class TargetSelectionError extends Schema.TaggedErrorClass<TargetSelectionError>()(
+  "Execute.TargetSelectionError",
+  {
+    message: Schema.String,
+    reason: Schema.Literals(["invalid", "not-found", "ambiguous"]),
+  },
+) {}
+
 export const runPlaywrightOperation = Effect.fn("Execute.playwrightOperation")(<A>(options: {
   readonly label: string
   readonly timeoutMs: number
@@ -69,6 +78,19 @@ export const runPlaywrightOperation = Effect.fn("Execute.playwrightOperation")(<
     }),
   )
 )
+
+const runSettledPlaywrightOperation = Effect.fn("Execute.settledPlaywrightOperation")(<A>(options: {
+  readonly label: string
+  readonly run: () => Promise<A>
+}): Effect.Effect<A, Error> => Effect.tryPromise({
+  try: options.run,
+  catch: (cause) => new PlaywrightOperationError({
+    message: cause instanceof Error ? cause.message : options.label,
+    operation: options.label,
+    reason: "failed",
+    cause,
+  }),
+}))
 
 export const recoverSessionPage = Effect.fn("Execute.recoverSessionPage")(function* (options: {
   readonly ownsPage: boolean
@@ -148,8 +170,6 @@ type HandoffCallOptions = {
   readonly timeoutMs?: number
   readonly page?: Page
 }
-
-export type HandoffOutcome = "resolved" | "timeout"
 
 export type HandoffPageTarget = {
   readonly targetId: string
@@ -452,21 +472,46 @@ export class ExecuteSandbox {
     })
   }
 
+  closeSettled(): Effect.Effect<void, Error> {
+    const sandbox = this
+    return Effect.gen(function* () {
+      const page = sandbox.page
+      const browser = sandbox.browser
+      const ownsOpenPage = page !== undefined && sandbox.ownsPage && !page.isClosed()
+      sandbox.browser = undefined
+      sandbox.page = undefined
+      sandbox.defaultPageTargetId = undefined
+      sandbox.ownsPage = false
+      sandbox.pageHealthCheckRequired = false
+
+      if (ownsOpenPage) {
+        yield* runSettledPlaywrightOperation({
+          label: "Close sandbox page after adoption",
+          run: () => page.close(),
+        }).pipe(Effect.ignore)
+      }
+      if (browser) {
+        yield* runSettledPlaywrightOperation({
+          label: "Close sandbox browser connection after adoption",
+          run: () => browser.close(),
+        }).pipe(Effect.ignore)
+      }
+    })
+  }
+
   adoptPage(target: AdoptTarget): Effect.Effect<string, Error> {
     const sandbox = this
     return Effect.gen(function* () {
       if (!sandbox.browser?.isConnected()) {
         const staleBrowser = sandbox.browser
         if (staleBrowser) {
-          yield* runPlaywrightOperation({
+          yield* runSettledPlaywrightOperation({
             label: "Close stale browser connection before adoption",
-            timeoutMs: playwrightCloseTimeoutMs,
             run: () => staleBrowser.close(),
           }).pipe(Effect.ignore)
         }
-        const browser = yield* runPlaywrightOperation({
+        const browser = yield* runSettledPlaywrightOperation({
           label: "Connect to the relay for session adoption",
-          timeoutMs: playwrightConnectTimeoutMs,
           run: () => chromium.connectOverCDP(sandbox.options.endpointUrl, {
             timeout: playwrightConnectTimeoutMs,
             ...(sandbox.options.sessionId ? { headers: { "Browser-Control-Session-Id": sandbox.options.sessionId } } : {}),
@@ -483,9 +528,8 @@ export class ExecuteSandbox {
         return yield* Effect.fail(new Error("Browser connection unavailable for session adoption"))
       }
       const existingContext = browser.contexts()[0]
-      const context = existingContext ?? (yield* runPlaywrightOperation({
+      const context = existingContext ?? (yield* runSettledPlaywrightOperation({
         label: "Create a browser context for session adoption",
-        timeoutMs: playwrightConnectTimeoutMs,
         run: () => browser.newContext(),
       }))
       const selected = yield* Effect.try({
@@ -502,9 +546,8 @@ export class ExecuteSandbox {
         currentPageIsSelected: currentPage === selected,
         currentPageIsClosed: currentPage?.isClosed() ?? true,
       }) && currentPage) {
-        yield* runPlaywrightOperation({
+        yield* runSettledPlaywrightOperation({
           label: "Close the previous session page during adoption",
-          timeoutMs: playwrightCloseTimeoutMs,
           run: () => currentPage.close(),
         }).pipe(Effect.ignore)
       }
@@ -572,6 +615,10 @@ export class ExecuteSandbox {
       })
       if (outcome === "timeout") {
         throw new Error(`Handoff timed out after ${timeoutMs}ms waiting for the user: ${handoffMessage}`)
+      }
+      if (outcome !== "resolved") {
+        const targetEvent = outcome.reason === "target-crashed" ? "crashed" : "detached"
+        throw new Error(`Handoff cancelled because its target ${targetEvent}: ${handoffMessage}`)
       }
       handoffTracker.count += 1
     }
@@ -705,32 +752,44 @@ export function selectTarget<T>({
   readonly getUrl: (target: T) => string
 }): T | undefined {
   if (selection.urlIncludes && selection.index !== undefined) {
-    throw new Error("Use only one target selector: --target-url or --target-index")
+    throw new TargetSelectionError({ reason: "invalid", message: "Use only one target selector: --target-url or --target-index" })
   }
   if (selection.urlIncludes) {
     const matches = targets.filter((candidate) => {
       return getUrl(candidate).includes(selection.urlIncludes ?? "")
     })
     if (matches.length === 0) {
-      throw new Error(`No existing attached page URL includes ${selection.urlIncludes}. Target selectors do not navigate or open pages: use page.goto() in the session page, or attach the intended user tab with the Browser Control toolbar first.`)
+      throw new TargetSelectionError({
+        reason: "not-found",
+        message: `No existing attached page URL includes ${selection.urlIncludes}. Target selectors do not navigate or open pages: use page.goto() in the session page, or attach the intended user tab with the Browser Control toolbar first.`,
+      })
     }
     if (matches.length > 1) {
-      throw new Error(`Multiple attached pages (${matches.length}) match URL ${selection.urlIncludes}; use a more specific --target-url or --target-index`)
+      throw new TargetSelectionError({
+        reason: "ambiguous",
+        message: `Multiple attached pages (${matches.length}) match URL ${selection.urlIncludes}; use a more specific --target-url or --target-index`,
+      })
     }
     return matches[0]
   }
   if (selection.index !== undefined) {
     if (selection.index < 0) {
-      throw new Error("Target index must be a non-negative integer")
+      throw new TargetSelectionError({ reason: "invalid", message: "Target index must be a non-negative integer" })
     }
     const target = targets[selection.index]
     if (!target) {
-      throw new Error(`No existing attached page at index ${selection.index}; ${targets.length} page(s) available. Target selectors do not create pages.`)
+      throw new TargetSelectionError({
+        reason: "not-found",
+        message: `No existing attached page at index ${selection.index}; ${targets.length} page(s) available. Target selectors do not create pages.`,
+      })
     }
     return target
   }
   if (targets.length > 1) {
-    throw new Error(`Multiple attached pages (${targets.length}); use --target-url or --target-index to choose one`)
+    throw new TargetSelectionError({
+      reason: "ambiguous",
+      message: `Multiple attached pages (${targets.length}); use --target-url or --target-index to choose one`,
+    })
   }
   return targets[0]
 }

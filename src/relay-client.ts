@@ -11,6 +11,7 @@ import {
   RecordingStatusResponse,
   RecordingStopResponse,
   type RecordingTargetRequest,
+  RelayErrorCode,
   RelayVersion,
   SessionAdoptResponse,
   SessionContainer,
@@ -49,6 +50,7 @@ export class RelayRejected extends Schema.TaggedErrorClass<RelayRejected>()(
     message: Schema.String,
     status: Schema.Number,
     path: Schema.String,
+    code: Schema.optionalKey(RelayErrorCode),
   },
 ) {}
 
@@ -100,6 +102,7 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("browser-control/RelayClient") {}
 
 const decodeErrorEnvelope = Schema.decodeUnknownOption(ErrorEnvelope)
+const decodeErrorMessage = Schema.decodeUnknownOption(Schema.Struct({ error: Schema.String }))
 
 export const make = Effect.fn("RelayClient.make")(function* (options?: { readonly endpoint?: string }) {
   const port = yield* portConfig.pipe(
@@ -136,8 +139,13 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
           const envelope = decodeErrorEnvelope(body)
           const message = Option.isSome(envelope)
             ? envelope.value.error
-            : `Relay responded with HTTP ${response.status} for ${path}`
-          return Effect.fail(new RelayRejected({ message, status: response.status, path }))
+            : Option.getOrElse(Option.map(decodeErrorMessage(body), (value) => value.error), () => `Relay responded with HTTP ${response.status} for ${path}`)
+          return Effect.fail(new RelayRejected({
+            message,
+            status: response.status,
+            path,
+            ...(Option.isSome(envelope) && envelope.value.code ? { code: envelope.value.code } : {}),
+          }))
         }
         return Schema.decodeUnknownEffect(schema)(body).pipe(
           Effect.mapError((cause) =>
@@ -224,7 +232,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
         ...(request.sessionId ? { sessionId: request.sessionId } : {}),
         code: request.code,
         createIfMissing: request.createIfMissing,
-        targetSelection: request.targetSelection ?? {},
+        ...(request.targetSelection === undefined ? {} : { targetSelection: request.targetSelection }),
       }, ExecuteResponse),
     recordingStart: (request) =>
       postJson("/recording/start", {
@@ -233,6 +241,8 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
         ...(request.mode === undefined ? {} : { mode: request.mode }),
         ...(request.audio === undefined ? {} : { audio: request.audio }),
         ...(request.frameRate === undefined ? {} : { frameRate: request.frameRate }),
+        ...(request.videoBitsPerSecond === undefined ? {} : { videoBitsPerSecond: request.videoBitsPerSecond }),
+        ...(request.audioBitsPerSecond === undefined ? {} : { audioBitsPerSecond: request.audioBitsPerSecond }),
         ...(request.maxDurationMs === undefined ? {} : { maxDurationMs: request.maxDurationMs }),
       }, RecordingStartResponse),
     recordingStop: (target) => postJson("/recording/stop", recordingTargetBody(target), RecordingStopResponse),

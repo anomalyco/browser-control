@@ -7,7 +7,12 @@
  * matching handoff id or the timeout elapses.
  */
 
-export type HandoffOutcome = "resolved" | "timeout"
+export type HandoffCancellationReason = "target-detached" | "target-crashed"
+
+export type HandoffOutcome =
+  | "resolved"
+  | "timeout"
+  | { readonly type: "cancelled"; readonly reason: HandoffCancellationReason }
 
 type PendingHandoff = {
   readonly id: string
@@ -123,6 +128,21 @@ export class HandoffRegistry {
 
   get pendingCount(): number {
     return this.pending.size
+  }
+
+  cancelForTarget(options: {
+    readonly targetId: string
+    readonly targetSessionId: string
+    readonly reason: HandoffCancellationReason
+  }): readonly PendingHandoffView[] {
+    const matching = Array.from(this.pending.values()).filter((pending) => {
+      return pending.targetId === options.targetId && pending.targetSessionId === options.targetSessionId
+    })
+    const cancelled = matching.map((pending) => this.view(pending)).filter((pending) => pending !== undefined)
+    for (const pending of matching) {
+      pending.resolve({ type: "cancelled", reason: options.reason })
+    }
+    return cancelled
   }
 
   /** Cancel every pending handoff, resolving waiters as timeouts. */

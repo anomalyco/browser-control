@@ -12,6 +12,7 @@ type CannedResponse = {
 let server: http.Server
 let endpoint: string
 const routes = new Map<string, CannedResponse>()
+let lastRequestBody: unknown
 
 beforeAll(async () => {
   server = http.createServer((request, response) => {
@@ -22,8 +23,14 @@ beforeAll(async () => {
       response.end(JSON.stringify({ error: `no canned route for ${key}` }))
       return
     }
-    response.writeHead(canned.status, { "content-type": "application/json" })
-    response.end(JSON.stringify(canned.body))
+    const chunks: Buffer[] = []
+    request.on("data", (chunk: Buffer) => chunks.push(chunk))
+    request.on("end", () => {
+      const text = Buffer.concat(chunks).toString("utf8")
+      lastRequestBody = text ? JSON.parse(text) : undefined
+      response.writeHead(canned.status, { "content-type": "application/json" })
+      response.end(JSON.stringify(canned.body))
+    })
   })
   await new Promise<void>((resolve) => {
     server.listen(0, "127.0.0.1", resolve)
@@ -66,10 +73,11 @@ describe("RelayClient", () => {
   })
 
   it("keeps the relay's error message as the top-level failure message", async () => {
-    routes.set("POST /cli/session/delete", { status: 404, body: { error: "Session not found: ghost" } })
+    routes.set("POST /cli/session/delete", { status: 404, body: { error: "Session not found: ghost", code: "session-not-found" } })
     const error = await withClient((client) => client.sessionDelete("ghost").pipe(Effect.flip))
     expect(error._tag).toBe("RelayClient.RelayRejected")
     expect(error.message).toBe("Session not found: ghost")
+    expect(error._tag === "RelayClient.RelayRejected" ? error.code : undefined).toBe("session-not-found")
   })
 
   it("fails with RelayRejected including HTTP status when no error envelope exists", async () => {
@@ -77,6 +85,13 @@ describe("RelayClient", () => {
     const error = await withClient((client) => client.version.pipe(Effect.flip))
     expect(error._tag).toBe("RelayClient.RelayRejected")
     expect(error.message).toContain("HTTP 500")
+  })
+
+  it("preserves the relay message when a newer relay returns an unknown error code", async () => {
+    routes.set("POST /cli/session/delete", { status: 409, body: { error: "specific future conflict", code: "future-code" } })
+    const error = await withClient((client) => client.sessionDelete("ghost").pipe(Effect.flip))
+    expect(error.message).toBe("specific future conflict")
+    expect(error._tag === "RelayClient.RelayRejected" ? error.code : undefined).toBeUndefined()
   })
 
   it("fails with RelayDecodeFailed for shape drift", async () => {
@@ -108,6 +123,7 @@ describe("RelayClient", () => {
     expect(result.text).toBe("42")
     expect(result.logs[0]?.text).toBe("hi")
     expect(result.session.id).toBe(session.id)
+    expect(lastRequestBody).toEqual({ sessionId: session.id, code: "6 * 7", createIfMissing: false })
   })
 
   it("decodes execute image media", async () => {
@@ -137,5 +153,24 @@ describe("RelayClient", () => {
     expect(result.adoptedUrl).toBe("https://example.com/")
     expect(result.adoptedTargetId).toBe("target-2")
     expect(result.session.created).toBe(true)
+  })
+
+  it("preserves recording bitrate options", async () => {
+    routes.set("POST /recording/start", {
+      status: 200,
+      body: { success: true, tabId: 7, startedAt: 1 },
+    })
+    await withClient((client) => client.recordingStart({
+      outputPath: "/tmp/demo.webm",
+      tabId: 7,
+      videoBitsPerSecond: 4_000_000,
+      audioBitsPerSecond: 128_000,
+    }))
+    expect(lastRequestBody).toMatchObject({
+      outputPath: "/tmp/demo.webm",
+      tabId: 7,
+      videoBitsPerSecond: 4_000_000,
+      audioBitsPerSecond: 128_000,
+    })
   })
 })

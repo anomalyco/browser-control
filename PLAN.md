@@ -192,7 +192,12 @@ arbitrary tab from the attached pool.
 - `session adopt` makes an attached user tab the session's default page and
   closes the session's previous relay-created page.
 - Adoption is exclusive: one target can belong to only one Browser Control
-  session.
+  session. `TargetRegistry` is the ownership authority; session state retains
+  only the adopted default-page pointer.
+- Adoption reserves target ownership before Playwright resolves the page, then
+  commits or rolls back as one serialized transaction. A caller timeout rolls
+  back visibility immediately while the worker retains the execute and adopt
+  permits until any uncancellable Playwright work settles.
 - Reset, delete, or detach releases an adopted tab without closing it.
 - Reset and delete acquire the execute permit before closing a sandbox, so they
   cannot interrupt a running script.
@@ -204,7 +209,8 @@ arbitrary tab from the attached pool.
 CDP target visibility is scoped per client. Session-owned tabs and their events
 are visible only to that session's clients; unowned tabs are visible to all
 clients. This prevents concurrent Playwright clients from double-initializing a
-page while retaining explicit attached-tab recovery.
+page while retaining explicit attached-tab recovery. Every ownership change
+reconciles existing client announcements, browser grouping, and page status.
 
 ## Current Capabilities
 
@@ -294,8 +300,10 @@ page while retaining explicit attached-tab recovery.
   JSON checks.
 - CLI and MCP relay access goes through `src/relay-client.ts`; neither maintains
   an ad hoc HTTP client.
-- Boundary failures use tagged schema errors and retain the relay's message as
-  the top-level human-readable message.
+- Boundary failures use tagged schema errors and a shared coded error envelope.
+  The relay retains its message as the top-level human-readable message while
+  clients can branch on stable codes for invalid requests, missing resources,
+  ownership conflicts, lifecycle conflicts, and internal failures.
 - Each HTTP effect is interrupted when its response closes. Execute protects
   the underlying uncancellable Playwright Promise so its session permit remains
   held until browser work actually settles.
@@ -315,6 +323,9 @@ page while retaining explicit attached-tab recovery.
   `Target.detachedFromTarget` before re-announcing it with a new session id.
 - Await HTTP and websocket close callbacks during relay shutdown so tests and
   smoke runs do not leak ports or listeners.
+- Relay shutdown closes the adoption gate and drains active or queued adoption
+  workers before session resources. It never interrupts a worker whose
+  underlying Playwright Promise may still mutate its sandbox.
 
 ### A command timeout does not imply a dead extension
 

@@ -40,14 +40,20 @@ import {
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
 import { ghostCursorClientSource, ghostCursorMouseActionExpression, ghostCursorRestoreExpression, inputDispatchMouseEventToGhostCursorAction } from "./ghost-cursor.ts"
 import { guardCdpMethod } from "./cdp-guardrails.ts"
-import { HandoffRegistry, resolveExactHandoffTarget, toolbarClickAction, type HandoffOutcome } from "./handoff.ts"
+import {
+  HandoffRegistry,
+  resolveExactHandoffTarget,
+  toolbarClickAction,
+  type HandoffCancellationReason,
+  type HandoffOutcome,
+} from "./handoff.ts"
 import { ExecuteSandbox, type HandoffPageTarget } from "./execute.ts"
 import { makePageStatus } from "./page-status.ts"
 import { appendJournalEntry, defaultJournalBaseDir, makeJournalEntry } from "./session-journal.ts"
 import { BrowserControlSessions } from "./session-manager.ts"
 import { RecordingRelay } from "./recording-relay.ts"
 import { boundedToken, runtimeFailureKind, summarizeDiagnosticUrl, summarizeRuntimeEvaluate } from "./runtime-diagnostics.ts"
-import { shouldExposeChildTarget, TargetRegistry } from "./target-registry.ts"
+import { shouldExposeChildTarget, TargetRegistry, type TargetOwnershipChange } from "./target-registry.ts"
 
 export type { RelayServer } from "./relay-types.ts"
 
@@ -186,6 +192,26 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     Effect.runPromise(Effect.ignore(sendToExtension({ method: "action.setBadge", params: { tabId: target.tabId, ...badge } }))).catch(() => {})
     sendPageStatus(target, state, options)
   }
+  const removeActiveHandoffTab = (sessionId: string, tabId: number): void => {
+    const tabIds = activeHandoffTabs.get(sessionId)
+    if (!tabIds) {
+      return
+    }
+    tabIds.delete(tabId)
+    if (tabIds.size === 0) {
+      activeHandoffTabs.delete(sessionId)
+    }
+  }
+  const cancelTargetHandoffs = (target: ConnectedTarget, reason: HandoffCancellationReason): void => {
+    const cancelled = handoffs.cancelForTarget({
+      targetId: target.targetInfo.targetId,
+      targetSessionId: target.sessionId,
+      reason,
+    })
+    for (const pending of cancelled) {
+      removeActiveHandoffTab(pending.sessionId, pending.tabId)
+    }
+  }
   const requestHandoff = async (options: {
     readonly sessionId: string
     readonly message: string
@@ -209,13 +235,22 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       message: options.message,
       handoffId: wait.id,
     })
+    let outcome: HandoffOutcome | undefined
     try {
-      return await wait.outcome
+      outcome = await wait.outcome
+      return outcome
     } finally {
+      if (outcome !== undefined && outcome !== "resolved" && outcome !== "timeout") {
+        removeActiveHandoffTab(options.sessionId, target.tabId)
+      }
       const currentTarget = registry.tabTargets.get(target.tabId)
       if (currentTarget) {
-        const executing = sessions.isExecuting(options.sessionId)
-        setActivityForTarget(currentTarget, executing ? "running" : "attached", executionBadge(options.sessionId, executing), { sessionId: options.sessionId })
+        if (outcome !== undefined && outcome !== "resolved" && outcome !== "timeout") {
+          refreshPageStatus(currentTarget.tabId)
+        } else {
+          const executing = sessions.isExecuting(options.sessionId)
+          setActivityForTarget(currentTarget, executing ? "running" : "attached", executionBadge(options.sessionId, executing), { sessionId: options.sessionId })
+        }
       }
     }
   }
@@ -259,16 +294,15 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
           console.error("Failed to append session journal entry", error)
         })
       },
+      onTargetOwnershipChange: (change) => {
+        reconcileTargetOwnership(change)
+      },
     },
+    registry,
   )
 
   function pageStatusSessionId(target: ConnectedTarget): string | undefined {
-    if (target.browserControlSessionId) {
-      return target.browserControlSessionId
-    }
-    return sessions.listSummaries().find((session) => {
-      return sessions.adoptedTargetId(session.id) === target.targetInfo.targetId
-    })?.id
+    return target.browserControlSessionId
   }
 
   function activeHandoffSessionIdForTab(tabId: number): string | undefined {
@@ -345,11 +379,6 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     registry,
     recordingRelay,
     sessions,
-    refreshPageStatuses: (tabIds) => {
-      for (const tabId of tabIds) {
-        refreshTabPresentation(tabId)
-      }
-    },
     extensionStatus: () => {
       return { connected: extensionRpc.connected, version: extensionRpc.version ?? null, cdpClients: cdpClients.size }
     },
@@ -492,6 +521,10 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       socket.on("close", () => {
         if (extensionRpc.disconnectIfCurrent(socket)) {
           void recordingRelay.cleanupAll("Extension disconnected").catch(() => {})
+          for (const target of registry.listRootTargets()) {
+            cancelTargetHandoffs(target, "target-detached")
+            sessions.releaseAdoptedTarget(target.targetInfo.targetId)
+          }
           registry.clear()
           suppressedChildSessions.clear()
         }
@@ -664,6 +697,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     if ((method === "Inspector.targetCrashed" || method === "Target.targetCrashed") && (sourceSessionId === undefined || sourceSessionId === target.sessionId)) {
       const crashedTarget = registry.markRootTargetCrashed(tabId)
       if (crashedTarget) {
+        cancelTargetHandoffs(crashedTarget, "target-crashed")
         const affectedSessions = sessions.markTargetCrashed(crashedTarget.targetInfo.targetId)
         extensionRpc.rejectDebuggerCommandsForTab(tabId, new Error(`Target crashed: ${crashedTarget.targetInfo.targetId}`))
         contextDebugLog?.(`target-crashed ${targetDiagnosticIdentity(crashedTarget)} affectedSessions=${affectedSessions.length}`)
@@ -1246,6 +1280,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     if (!detached) {
       return
     }
+    cancelTargetHandoffs(detached.target, "target-detached")
     sessions.releaseAdoptedTarget(detached.target.targetInfo.targetId)
     removeClientTargetAliases(cdpClientSessionAliases.values(), (alias) => alias.tabId === tabId)
     mainFrameIdsByTab.delete(tabId)
@@ -1356,6 +1391,29 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       if (childTarget && !canSeeTabId(client, childTarget.tabId)) {
         detachAnnouncedSession(client, announced.sessionId)
       }
+    }
+  }
+
+  function reconcileTargetOwnership(change: TargetOwnershipChange): void {
+    for (const client of cdpClients) {
+      pruneInvisibleAnnouncementsForClient(client)
+    }
+    for (const targetId of change.targetIds) {
+      const target = registry.targetsByTargetId.get(targetId)
+      if (target) {
+        announceAttachedTarget(target)
+      }
+    }
+    for (const tabId of change.tabIds) {
+      const target = registry.tabTargets.get(tabId)
+      if (!target) {
+        continue
+      }
+      Effect.runPromise(Effect.ignore(sendToExtension({
+        method: target.browserControlSessionId ? "tabs.group" : "tabs.ungroup",
+        params: { tabId },
+      }))).catch(() => {})
+      refreshPageStatus(tabId)
     }
   }
 
