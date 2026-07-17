@@ -18,10 +18,14 @@ import type { ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary, ExecuteMedia
 import { executionContextFailureDiagnostic } from "./runtime-diagnostics.ts"
 
 const nodeModules = { fs, path, os, crypto, url, util, events, stream, buffer, http, https, zlib }
+const nodeModuleAliases = Object.keys(nodeModules).join(", ")
 
 const playwrightCloseTimeoutMs = 2_000
 const playwrightConnectTimeoutMs = 15_000
 const sessionPageHealthCheckTimeoutMs = 1_000
+export const downloadCapabilityErrorMessage = "Downloads are unavailable in Browser Control extension-backed tabs: Chromium blocks Browser.setDownloadBehavior and Page.setDownloadBehavior through chrome.debugger, so Playwright cannot retain an artifact for download.saveAs(). Fetch the response in the page and write the returned bytes with fs when the site exposes them."
+const downloadGuardedPages = new WeakSet<Page>()
+const downloadGuardedContexts = new WeakSet<BrowserContext>()
 
 export class PlaywrightOperationError extends Schema.TaggedErrorClass<PlaywrightOperationError>()(
   "Execute.PlaywrightOperationError",
@@ -536,6 +540,7 @@ export class ExecuteSandbox {
       }
     }
     const context = this.browser.contexts()[0] ?? (await this.browser.newContext())
+    installDownloadCapabilityGuards(context)
     const targetSelection = options.targetSelection
     const page = await this.getSessionPage({ context, ...(targetSelection ? { targetSelection } : {}) })
     const showGhostCursor = async (options?: ShowGhostCursorOptions) => {
@@ -615,8 +620,7 @@ export class ExecuteSandbox {
 
   private async getSessionPage({ context, targetSelection }: { readonly context: BrowserContext; readonly targetSelection?: ExecuteTargetSelection }): Promise<Page> {
     const selection = targetSelection ?? {}
-    const hasExplicitSelection = Boolean(selection.urlIncludes) || selection.index !== undefined
-    if (hasExplicitSelection) {
+    if (hasExplicitTargetSelection(selection)) {
       const selected = selectPage({ pages: context.pages(), selection })
       if (!selected) {
         throw new Error("No page matched target selection")
@@ -659,6 +663,34 @@ export class ExecuteSandbox {
   }
 }
 
+export function installDownloadCapabilityGuard(page: Page): void {
+  if (downloadGuardedPages.has(page)) {
+    return
+  }
+  const waitForEvent = page.waitForEvent.bind(page)
+  Object.defineProperty(page, "waitForEvent", {
+    configurable: true,
+    value: (event: string, ...args: unknown[]) => {
+      if (event === "download") {
+        return Promise.reject(new Error(downloadCapabilityErrorMessage))
+      }
+      return Reflect.apply(waitForEvent, page, [event, ...args])
+    },
+  })
+  downloadGuardedPages.add(page)
+}
+
+export function installDownloadCapabilityGuards(context: BrowserContext): void {
+  if (downloadGuardedContexts.has(context)) {
+    return
+  }
+  for (const page of context.pages()) {
+    installDownloadCapabilityGuard(page)
+  }
+  context.on("page", installDownloadCapabilityGuard)
+  downloadGuardedContexts.add(context)
+}
+
 export function hasExplicitTargetSelection(selection: ExecuteTargetSelection | undefined): boolean {
   return Boolean(selection?.urlIncludes) || selection?.index !== undefined
 }
@@ -680,7 +712,7 @@ export function selectTarget<T>({
       return getUrl(candidate).includes(selection.urlIncludes ?? "")
     })
     if (matches.length === 0) {
-      throw new Error(`No attached page URL includes ${selection.urlIncludes}`)
+      throw new Error(`No existing attached page URL includes ${selection.urlIncludes}. Target selectors do not navigate or open pages: use page.goto() in the session page, or attach the intended user tab with the Browser Control toolbar first.`)
     }
     if (matches.length > 1) {
       throw new Error(`Multiple attached pages (${matches.length}) match URL ${selection.urlIncludes}; use a more specific --target-url or --target-index`)
@@ -693,7 +725,7 @@ export function selectTarget<T>({
     }
     const target = targets[selection.index]
     if (!target) {
-      throw new Error(`No attached page at index ${selection.index}; ${targets.length} page(s) available`)
+      throw new Error(`No existing attached page at index ${selection.index}; ${targets.length} page(s) available. Target selectors do not create pages.`)
     }
     return target
   }
@@ -1941,7 +1973,7 @@ export async function runUserCode({ code, globals }: { readonly code: string; re
       "hideGhostCursor",
       "ghostCursor",
       "handoff",
-      `const { fs, path, os, crypto, url, util, events, stream, buffer, http, https, zlib } = modules;\n${wrapCode(code)}`,
+      wrapCodeWithModuleAliases(code),
     )
     const result = await fn(
       sandboxConsole,
@@ -2054,6 +2086,10 @@ export function wrapCode(code: string): string {
     return `return await (${expression})`
   }
   return code
+}
+
+export function wrapCodeWithModuleAliases(code: string): string {
+  return `const { ${nodeModuleAliases} } = modules;\n{\n${wrapCode(code)}\n}`
 }
 
 function stringifyResult(result: unknown): string {

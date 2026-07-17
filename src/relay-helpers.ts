@@ -314,7 +314,10 @@ export function parseTargetSelection(value: JsonObject[string] | undefined): Exe
     throw new Error("targetSelection must be an object")
   }
   const urlIncludes = typeof object.urlIncludes === "string" && object.urlIncludes ? object.urlIncludes : undefined
-  const index = typeof object.index === "number" && Number.isInteger(object.index) ? object.index : undefined
+  if (object.index !== undefined && (typeof object.index !== "number" || !Number.isInteger(object.index))) {
+    throw new Error("targetSelection.index must be a non-negative integer")
+  }
+  const index = typeof object.index === "number" ? object.index : undefined
   if (index !== undefined && index < 0) {
     throw new Error("targetSelection.index must be a non-negative integer")
   }

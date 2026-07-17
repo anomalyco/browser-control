@@ -94,6 +94,18 @@ session: "id" })` must already exist. Each session gets one owned default page
 that persists across named execute calls. MCP keeps its own process-local current
 session because the MCP process itself is the agent boundary.
 
+Create an explicit id with `session_new` first. With MCP, omit the id to let the
+server establish its process-local current session. `targetUrl` and
+`targetIndex` only select pages that already exist in
+the attached page pool; they never navigate or create a page. Use `page.goto()`
+to open a URL in a session-owned page, or attach an existing user tab with the
+toolbar before selecting or adopting it.
+
+The sandbox also exposes Node modules both through `modules` and convenient
+aliases such as `fs` and `path`. Execute code runs in its own lexical scope, so
+scripts may safely declare local names such as `const path = ...` without
+colliding with those aliases.
+
 MCP `execute` extracts returned screenshot buffers, including buffers nested in
 objects and arrays, into ordered native image attachments without temporary
 files. This lets one call return images plus metadata. A screenshot saved to a
@@ -161,6 +173,14 @@ execution-context calls also carry a short fixed diagnostic classification with 
 counts; cross-extension navigation failures use
 `target/cross-extension-page`. Diagnostics never include evaluation arguments
 or results.
+
+Playwright downloads are not available through extension-backed tabs. Chromium
+blocks both `Browser.setDownloadBehavior` and the legacy
+`Page.setDownloadBehavior` through `chrome.debugger`, so
+`page.waitForEvent("download")` rejects immediately with a capability error
+instead of timing out and `download.saveAs()` cannot receive an artifact. When
+the page exposes the payload through fetch or an API response, read those bytes
+in the page and write them with the sandbox's `fs` module instead.
 
 ## Guardrails And Read-Only Sessions
 
@@ -238,6 +258,20 @@ Prefer normal Playwright actions first:
 ```js
 await page.getByRole("textbox", { name: "Email" }).fill("me@example.com")
 ```
+
+Inspect before acting. Start with `snapshot()` and use `ariaSnapshot()` when the
+compact view omits the structure you need; do not spend a default 30-second
+locator timeout testing a guessed role or selector. Use a short exploratory
+timeout, inspect the current page after a miss, and only then choose the stable
+locator. After a click that navigates, verify the destination URL or a stable
+element before filling the next document. If execution-context diagnostics
+repeat, stop changing selectors and investigate page/session health instead.
+
+For visual verification, return screenshot buffers through MCP so the image is
+actually attached and inspectable. Saving a screenshot to a path and returning
+only `"ok"` proves that capture completed, not that the layout looks correct.
+Report exactly the viewport, state, and interaction path tested; do not describe
+a synthetic browser fixture as broad end-to-end or physical-device coverage.
 
 If normal `locator.fill()` hangs on login/password-style fields in the user's
 existing browser, use the explicit DOM-input fallback:
@@ -512,6 +546,10 @@ language changes, update `CONTEXT.md` too.
   or detach it with the toolbar if you want `/extension/status` to return to zero.
 - Clipboard failures on HTTP pages: prefer a secure origin and explicit browser
   permissions. DOM clicking alone may not update or expose clipboard contents.
+- Download waits fail with a direct capability error: Chromium does not expose
+  download artifact control through an extension's `chrome.debugger` tab
+  attachment. Prefer fetching the payload and writing it with `fs`; do not wait
+  for a Playwright download event or retry the click.
 - Login or password field fill timeouts: suspect installed browser extensions
   interfering with Playwright's native fill path. Try selector-based
   `fillInput(selector, value)` first, or `fillInput(locator, value)` after

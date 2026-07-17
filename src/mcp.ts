@@ -4,7 +4,8 @@ import { McpSchema, McpServer } from "effect/unstable/ai"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { getObject } from "./relay-helpers.ts"
+import type { JsonObject } from "./protocol.ts"
+import { getObject, parseTargetSelection } from "./relay-helpers.ts"
 import * as RelayClient from "./relay-client.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"
 import { startRelay } from "./relay.ts"
@@ -12,8 +13,6 @@ import { browserControlVersion } from "./version.ts"
 
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 type CurrentSession = { id: string; established: boolean }
-
-type JsonObject = Record<string, unknown>
 
 type ToolSpec = {
   readonly name: string
@@ -47,8 +46,8 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       description: "Execute trusted Playwright JavaScript against the Browser Control session. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs).",
       inputSchema: objectSchema({
         code: { type: "string", description: "JavaScript code to execute. It receives browser, context, page, state, modules, fillInput, fillInputs, snapshot(options?) for a compact semantic outline or explicit diff against the previous snapshot, ref(id) for the latest snapshot's locator, screenshotWithLabels, ariaSnapshot(target?, { timeout }), ghostCursor (show/hide), and handoff(message, { timeoutMs })." },
-        session: { type: "string", description: "Optional existing Browser Control session id. Defaults to this MCP server's current session, which may be created if missing." },
-        targetUrl: { type: "string", description: "Optional attached page URL substring selector." },
+        session: { type: "string", description: "Optional existing Browser Control session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed." },
+        targetUrl: { type: "string", description: "Optional URL substring selecting an existing attached page. This does not navigate or open a URL; use page.goto() for that." },
         targetIndex: { type: "integer", minimum: 0, description: "Optional zero-based attached page index selector." },
       }, ["code"]),
       readOnly: false,
@@ -182,8 +181,8 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       name: "session_adopt",
       description: "Make an attached tab the Browser Control session's default page for subsequent bare execute calls.",
       inputSchema: objectSchema({
-        session: { type: "string", description: "Optional Browser Control session id. Defaults to this MCP server's current session, which may be created if missing." },
-        targetUrl: { type: "string", description: "Adopt the attached page whose URL contains this text." },
+        session: { type: "string", description: "Optional existing Browser Control session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed." },
+        targetUrl: { type: "string", description: "Adopt an existing attached page whose URL contains this text. This does not navigate or open a URL." },
         targetIndex: { type: "integer", minimum: 0, description: "Adopt the attached page at this zero-based target index." },
       }),
       readOnly: false,
@@ -273,7 +272,7 @@ const registerTools = Effect.gen(function* () {
       handle: (payload: unknown) => {
         return spec.handle(payload).pipe(
           Effect.match({
-            onFailure: (error) => toolResult({ text: error.message, isError: true }),
+            onFailure: (error) => toolResult({ text: mcpErrorMessage(spec.name, error.message), isError: true }),
             onSuccess: (value) => toolResultForValue(value),
           }),
         )
@@ -307,41 +306,35 @@ function parseExecuteArguments(input: unknown): ExecuteArguments {
   const object = requireObject(input)
   const code = requiredStringField(object, "code")
   const session = optionalStringField(object, "session")
-  const targetUrl = optionalStringField(object, "targetUrl")
-  const targetIndex = optionalNumberField(object, "targetIndex")
-  if (targetUrl && targetIndex !== undefined) {
-    throw new Error("Use only one target selector: targetUrl or targetIndex")
-  }
-  if (targetIndex !== undefined && (!Number.isInteger(targetIndex) || targetIndex < 0)) {
-    throw new Error("targetIndex must be a non-negative integer")
-  }
+  const targetSelection = parseMcpTargetSelection(object)
   return {
     code,
     ...(session ? { session } : {}),
-    ...(targetUrl ? { targetUrl } : {}),
-    ...(targetIndex !== undefined ? { targetIndex } : {}),
+    ...(targetSelection.urlIncludes ? { targetUrl: targetSelection.urlIncludes } : {}),
+    ...(targetSelection.index !== undefined ? { targetIndex: targetSelection.index } : {}),
   }
 }
 
 function parseAdoptArguments(input: unknown): AdoptArguments {
   const object = requireObject(input)
   const session = optionalStringField(object, "session")
-  const targetUrl = optionalStringField(object, "targetUrl")
-  const targetIndex = optionalNumberField(object, "targetIndex")
-  if (!targetUrl && targetIndex === undefined) {
+  const targetSelection = parseMcpTargetSelection(object)
+  if (!targetSelection.urlIncludes && targetSelection.index === undefined) {
     throw new Error("session_adopt requires targetUrl or targetIndex")
-  }
-  if (targetUrl && targetIndex !== undefined) {
-    throw new Error("Use only one target selector: targetUrl or targetIndex")
-  }
-  if (targetIndex !== undefined && (!Number.isInteger(targetIndex) || targetIndex < 0)) {
-    throw new Error("targetIndex must be a non-negative integer")
   }
   return {
     ...(session ? { session } : {}),
-    ...(targetUrl ? { targetUrl } : {}),
-    ...(targetIndex !== undefined ? { targetIndex } : {}),
+    ...(targetSelection.urlIncludes ? { targetUrl: targetSelection.urlIncludes } : {}),
+    ...(targetSelection.index !== undefined ? { targetIndex: targetSelection.index } : {}),
   }
+}
+
+function parseMcpTargetSelection(input: JsonObject) {
+  const urlIncludes = optionalStringField(input, "targetUrl")
+  return parseTargetSelection({
+    ...(urlIncludes ? { urlIncludes } : {}),
+    ...(input.targetIndex === undefined ? {} : { index: input.targetIndex }),
+  }) ?? {}
 }
 
 function requiredStringField(input: unknown, field: string): string {
@@ -365,12 +358,6 @@ function optionalBooleanField(input: unknown, field: string): boolean | undefine
   return typeof value === "boolean" ? value : undefined
 }
 
-function optionalNumberField(input: unknown, field: string): number | undefined {
-  const object = requireObject(input)
-  const value = object[field]
-  return typeof value === "number" ? value : undefined
-}
-
 function requireObject(input: unknown): JsonObject {
   const object = getObject(input)
   if (!object) {
@@ -388,6 +375,7 @@ function stringifyResult(value: unknown): string {
 
 export function toolResultForValue(value: unknown): McpSchema.CallToolResult {
   const object = getObject(value)
+  const isError = object?.isError === true
   const media = Array.isArray(object?.media)
     ? object.media.flatMap((item) => {
       const image = getObject(item)
@@ -398,19 +386,30 @@ export function toolResultForValue(value: unknown): McpSchema.CallToolResult {
     : []
   if (media.length > 0) {
     const { media: _media, ...structuredContent } = object ?? {}
+    const text = isError && typeof object?.text === "string" ? object.text : stringifyResult(structuredContent)
     return new McpSchema.CallToolResult({
       content: [
-        McpSchema.TextContent.make({ text: stringifyResult(structuredContent) }),
+        McpSchema.TextContent.make({ text }),
         ...media.map((image) => McpSchema.ImageContent.make({
           data: new Uint8Array(Buffer.from(image.data, "base64")),
           mimeType: image.mimeType,
         })),
       ],
       structuredContent,
-      isError: false,
+      isError,
     })
   }
-  return toolResult({ text: stringifyResult(value), structuredContent: value, isError: false })
+  const text = isError && typeof object?.text === "string" ? object.text : stringifyResult(value)
+  return toolResult({ text, ...(object ? { structuredContent: object } : {}), isError })
+}
+
+export function mcpErrorMessage(tool: string, message: string): string {
+  if (!message.startsWith("Session not found:")) {
+    return message
+  }
+  return tool === "execute" || tool === "session_adopt"
+    ? `${message} Create it with session_new first, or omit the explicit session id to use the MCP current session.`
+    : `${message} Create it with session_new first.`
 }
 
 function toolResult(options: { readonly text: string; readonly structuredContent?: unknown; readonly isError: boolean }): McpSchema.CallToolResult {
@@ -425,7 +424,7 @@ function objectSchema(properties: JsonObject, required: readonly string[] = []):
   return {
     type: "object",
     properties,
-    required,
+    required: [...required],
     additionalProperties: false,
   }
 }

@@ -268,7 +268,7 @@ function handleCliRequest(options: {
         throw new Error("No page matched target selection")
       }
       if (selectedTarget.browserControlSessionId && selectedTarget.browserControlSessionId !== requestedSessionId) {
-        throw new Error(`Target is already owned by session ${selectedTarget.browserControlSessionId}`)
+        throw new Error(`Target is already owned by session ${selectedTarget.browserControlSessionId}. Use that session, or reset/delete it to release the tab before adopting it elsewhere.`)
       }
       const adoptedTargetId = selectedTarget.targetInfo.targetId
       const { session, adoptedUrl, releasedTargetIds } = yield* options.sessions.adopt({

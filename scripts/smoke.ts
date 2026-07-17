@@ -932,6 +932,45 @@ return { answer: await worker.evaluate(() => globalThis.answer), url: worker.url
     }),
   },
   {
+    name: "session-download-capability",
+    run: Effect.fnUntraced(function* () {
+      const marker = `bc-download-${Date.now()}`
+      const smokeSession = `${marker}-session`
+      return yield* Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* scopedDownloadFixture(marker)
+          yield* runBrowserControl(["session", "new", smokeSession])
+          const output = yield* runBrowserControl([
+            "execute",
+            "--session",
+            smokeSession,
+            `
+await page.goto(${JSON.stringify(fixture.url)})
+const startedAt = Date.now()
+let message = ''
+try {
+  await page.waitForEvent('download', { timeout: 10_000 })
+} catch (error) {
+  message = error instanceof Error ? error.message : String(error)
+}
+return { message, durationMs: Date.now() - startedAt, fixtureReady: await page.getByRole('button', { name: 'Download JSON' }).isVisible() }
+          `,
+          ])
+          if (!output.includes("Downloads are unavailable in Browser Control extension-backed tabs") || !output.includes("fixtureReady: true")) {
+            return yield* Effect.fail(new Error(`session download did not return the expected capability error: ${output}`))
+          }
+          return output.trim()
+        }).pipe(
+          Effect.ensuring(
+            Effect.gen(function* () {
+              yield* runBrowserControl(["session", "delete", smokeSession]).pipe(Effect.ignore)
+            }),
+          ),
+        ),
+      )
+    }),
+  },
+  {
     name: "execute-ghost-cursor",
     run: Effect.fnUntraced(function* () {
       const marker = `bc-cursor-${Date.now()}`
@@ -1329,6 +1368,49 @@ const scopedHandoffFixture = Effect.fnUntraced(function* (marker: string) {
       catch: (cause) => new Error("start handoff fixture", { cause }),
     }),
     (fixture) => boundedCleanup("close handoff fixture", () => new Promise<void>((resolve) => fixture.server.close(() => resolve()))),
+  )
+})
+
+const scopedDownloadFixture = Effect.fnUntraced(function* (marker: string) {
+  return yield* Effect.acquireRelease(
+    Effect.tryPromise({
+      try: () => new Promise<{ readonly server: http.Server; readonly url: string }>((resolve, reject) => {
+        const server = http.createServer((request, response) => {
+          if (request.url === "/payload") {
+            response.writeHead(200, { "content-type": "application/json" })
+            response.end(JSON.stringify({ marker }))
+            return
+          }
+          response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
+          response.end(`<!doctype html>
+            <title>Download fixture</title>
+            <button>Download JSON</button>
+            <script>
+              document.querySelector('button').addEventListener('click', async () => {
+                const payload = await fetch('/payload')
+                const blob = await payload.blob()
+                const anchor = document.createElement('a')
+                anchor.href = URL.createObjectURL(blob)
+                anchor.download = 'fixture.json'
+                anchor.click()
+              })
+            </script>`)
+        })
+        server.once("error", reject)
+        server.listen(0, "127.0.0.1", () => {
+          server.off("error", reject)
+          const address = server.address()
+          if (!address || typeof address === "string") {
+            server.close()
+            reject(new Error("download fixture did not receive a TCP address"))
+            return
+          }
+          resolve({ server, url: `http://127.0.0.1:${address.port}/` })
+        })
+      }),
+      catch: (cause) => new Error("start download fixture", { cause }),
+    }),
+    (fixture) => boundedCleanup("close download fixture", () => new Promise<void>((resolve) => fixture.server.close(() => resolve()))),
   )
 })
 

@@ -87,6 +87,8 @@ describe("parseTargetSelection", () => {
   it("rejects combined and invalid selectors", () => {
     expect(() => parseTargetSelection({ urlIncludes: "a", index: 1 })).toThrow()
     expect(() => parseTargetSelection({ index: -1 })).toThrow()
+    expect(() => parseTargetSelection({ index: 1.5 })).toThrow()
+    expect(() => parseTargetSelection({ index: "1" })).toThrow()
     expect(() => parseTargetSelection("nope")).toThrow()
   })
 })

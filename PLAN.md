@@ -115,6 +115,25 @@ The `execute-page-recovery` smoke crashes a relay-owned renderer, asserts prompt
 failure and status visibility, then verifies that the next execute receives a
 fresh page. Unit coverage verifies that adopted pages are preserved.
 
+### Extension child targets stay subordinate
+
+Unknown `Target.targetInfoChanged` events no longer overwrite a tab's root
+target. URL-less child pages are held until their destination is known, and a
+child that resolves to another extension is removed without changing the
+session-owned page. This prevents password-manager UI from becoming the
+session default or producing cross-extension navigation failures.
+
+### Downloads fail with an explicit capability boundary
+
+Chromium rejects both `Browser.setDownloadBehavior` and the legacy
+`Page.setDownloadBehavior` through a tab-scoped `chrome.debugger` attachment.
+Without either command, stock Playwright cannot retain the GUID-named artifact
+that backs `download.saveAs()`. Browser Control therefore rejects
+`page.waitForEvent("download")` immediately with the reason and a fetch-plus-`fs`
+workaround rather than allowing a 30-second timeout. A local blob/fetch fixture
+keeps this failure direct. Supporting native download artifacts later would
+require a new extension capture protocol and permission model.
+
 ## Product Boundaries
 
 - **Driver, not agent**: Browser Control never calls models or plans tasks.
@@ -336,6 +355,9 @@ relay reports both values so `doctor` can identify a stale long-running relay.
   in shadow roots.
 - OOPIF behavior is guaranteed only by the current reconnect smoke scenarios.
 - Clipboard automation on insecure origins is not guaranteed.
+- Playwright download events and `download.saveAs()` are unavailable in
+  extension-backed tabs because Chromium blocks download behavior commands from
+  `chrome.debugger`; download waits return a direct capability error.
 - CDP recording activates its tab to avoid background compositor throttling,
   fits the viewport within 1280x720, requires `ffmpeg` on `PATH`, and does not
   capture audio.
@@ -395,7 +417,8 @@ checkout flows.
 The current smoke matrix covers local forms, cart and checkout, reconnect and
 redirect reconnect, explicit target selection, crashed-page recovery, fill
 helpers, snapshot refs, handoff navigation and cross-tab binding, OOPIF
-reconnect, dedicated workers,
-cursor behavior, session isolation, multi-client visibility, stale-client
-ordering, and raw-client checkout. Historical milestone scope is no longer used
-as the active backlog; `Next Priorities` is authoritative.
+reconnect, dedicated workers, the download capability boundary, cursor behavior,
+session isolation,
+multi-client visibility, stale-client ordering, and raw-client checkout.
+Historical milestone scope is no longer used as the active backlog; `Next
+Priorities` is authoritative.

@@ -2,7 +2,7 @@ import { WebSocket } from "ws"
 import type { CdpEvent, JsonObject, TargetInfo } from "./protocol.ts"
 import { getObject, sendCdpEvent } from "./relay-helpers.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
-import type { TargetRegistry } from "./target-registry.ts"
+import { shouldExposeChildTarget, type TargetRegistry } from "./target-registry.ts"
 
 export type ClientCdpSessionAlias =
   | { readonly kind: "browser" }
@@ -144,7 +144,7 @@ export function replayChildTargetsForParent(options: {
   readonly onDuplicateTarget?: (duplicate: { readonly targetId: string; readonly oldSessionId: string; readonly newSessionId: string }) => void
 }): void {
   for (const target of options.registry.childTargets.values()) {
-    if (target.parentSessionId === options.parentSessionId) {
+    if (target.parentSessionId === options.parentSessionId && shouldExposeChildTarget(target)) {
       replayFrameEventsForChild({ socket: options.socket, registry: options.registry, target })
       sendAttachedToChildTarget({
         socket: options.socket,

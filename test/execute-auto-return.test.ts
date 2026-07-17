@@ -43,4 +43,5 @@ describe("wrapCode", () => {
     const code = "const a = 1\nreturn a"
     expect(wrapCode(code)).toBe(code)
   })
+
 })

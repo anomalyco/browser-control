@@ -18,6 +18,13 @@ describe("target selection", () => {
     expect(selectTarget({ targets, selection: { index: 1 }, getUrl: (target) => target.url })?.url).toBe("https://kit.example/b")
   })
 
+  it("explains that target selectors do not navigate or create pages", () => {
+    expect(() => selectTarget({ targets, selection: { urlIncludes: "missing.example" }, getUrl: (target) => target.url }))
+      .toThrow("Target selectors do not navigate or open pages")
+    expect(() => selectTarget({ targets, selection: { index: 4 }, getUrl: (target) => target.url }))
+      .toThrow("Target selectors do not create pages")
+  })
+
   it("threads the validation target URL so adoption agrees when page order differs", () => {
     const registryTargets = [
       { targetId: "target-a", url: "https://first.example" },

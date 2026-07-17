@@ -264,7 +264,7 @@ export class BrowserControlSessions {
       const adoption = Effect.gen(function* () {
         const targetOwner = manager.adoptedTargetOwners.get(options.targetId)
         if (targetOwner && targetOwner !== session.id) {
-          return yield* Effect.fail(sessionError("target-owned", `Target is already adopted by session ${targetOwner}`, targetOwner))
+          return yield* Effect.fail(sessionError("target-owned", `Target is already adopted by session ${targetOwner}. Use that session, or reset/delete it to release the tab before adopting it elsewhere.`, targetOwner))
         }
         return yield* manager.withLifecyclePermit(session, "adopt",
           Effect.gen(function* () {

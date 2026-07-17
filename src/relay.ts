@@ -47,7 +47,7 @@ import { appendJournalEntry, defaultJournalBaseDir, makeJournalEntry } from "./s
 import { BrowserControlSessions } from "./session-manager.ts"
 import { RecordingRelay } from "./recording-relay.ts"
 import { boundedToken, runtimeFailureKind, summarizeDiagnosticUrl, summarizeRuntimeEvaluate } from "./runtime-diagnostics.ts"
-import { TargetRegistry } from "./target-registry.ts"
+import { shouldExposeChildTarget, TargetRegistry } from "./target-registry.ts"
 
 export type { RelayServer } from "./relay-types.ts"
 
@@ -370,6 +370,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
   let idleRuntimeResetGeneration = 0
   const mainFrameIdsByTab = new Map<number, string>()
   const ghostCursorPositionsByTab = new Map<number, { readonly x: number; readonly y: number }>()
+  const suppressedChildSessions = new Map<string, number>()
 
   function targetDiagnosticIdentity(target: ConnectedTarget | ChildTarget | undefined): string {
     if (!target) {
@@ -492,6 +493,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
         if (extensionRpc.disconnectIfCurrent(socket)) {
           void recordingRelay.cleanupAll("Extension disconnected").catch(() => {})
           registry.clear()
+          suppressedChildSessions.clear()
         }
       })
       return
@@ -600,6 +602,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       const detachedSessionId = typeof message.params?.sessionId === "string" ? message.params.sessionId : undefined
       const reason = typeof message.params?.reason === "string" ? message.params.reason : undefined
       if (detachedSessionId) {
+        suppressedChildSessions.delete(detachedSessionId)
         detachChildTargetState(detachedSessionId)
         return
       }
@@ -642,6 +645,16 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     const params = getObject(message.params?.params)
     const sourceSessionId = typeof message.params?.sessionId === "string" ? message.params.sessionId : undefined
     debugLog?.(`evt tab=${tabId} ${method} src=${sourceSessionId ?? "root"}`)
+    const sourceChild = sourceSessionId ? registry.childTargets.get(sourceSessionId) : undefined
+    if (
+      sourceSessionId &&
+      method !== "Target.attachedToTarget" &&
+      method !== "Target.detachedFromTarget" &&
+      method !== "Target.targetInfoChanged" &&
+      (suppressedChildSessions.has(sourceSessionId) || (sourceChild && !shouldExposeChildTarget(sourceChild)))
+    ) {
+      return
+    }
     if (recordingRelay.handleDebuggerEvent({ tabId, method, params })) {
       return
     }
@@ -676,6 +689,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       }
       if (childSessionId && targetInfo) {
         if (isRestrictedTarget(targetInfo)) {
+          suppressedChildSessions.set(childSessionId, tabId)
           if (params?.waitingForDebugger === true) {
             Effect.runPromise(
               sendDebuggerCommand({
@@ -690,9 +704,10 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
           }
           return
         }
+        suppressedChildSessions.delete(childSessionId)
+        shouldBroadcast = false
         if (registry.childTargets.has(childSessionId)) {
           registry.updateChildTargetInfo(targetInfo)
-          shouldBroadcast = false
         }
         const parentSessionId = sourceSessionId ?? target.sessionId
         if (!registry.childTargets.has(childSessionId)) {
@@ -704,30 +719,48 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
             waitingForDebugger: params?.waitingForDebugger === true,
           }
           registry.addChildTarget(childTarget)
-          attachedChildTarget = childTarget
           contextDebugLog?.(`target-attached kind=child parentSession=${boundedToken(parentSessionId)} ${targetDiagnosticIdentity(childTarget)} ${summarizeDiagnosticUrl(targetInfo.url)}`)
         }
-      }
-    }
-    if (method.startsWith("Target.") && params?.targetInfo !== undefined) {
-      const eventTargetInfo = getTargetInfo(params.targetInfo)
-      if (!eventTargetInfo || isRestrictedTarget(eventTargetInfo)) {
-        return
+        const childTarget = registry.childTargets.get(childSessionId)
+        if (childTarget && shouldExposeChildTarget(childTarget)) {
+          attachedChildTarget = childTarget
+        }
       }
     }
     if (method === "Target.detachedFromTarget") {
       const childSessionId = typeof params?.sessionId === "string" ? params.sessionId : undefined
       if (childSessionId) {
+        suppressedChildSessions.delete(childSessionId)
         contextDebugLog?.(`target-detached kind=child ${targetDiagnosticIdentity(registry.childTargets.get(childSessionId))}`)
         detachChildTargetState(childSessionId)
       }
     }
     if (method === "Target.targetInfoChanged") {
       const targetInfo = getTargetInfo(params?.targetInfo)
-      if (targetInfo) {
-        registry.updateConnectedTargetInfo({ tabId, targetInfo })
-        const changedTarget = registry.targetsByTargetId.get(targetInfo.targetId) ?? registry.childTargetsByTargetId.get(targetInfo.targetId)
-        contextDebugLog?.(`target-info-changed ${targetDiagnosticIdentity(changedTarget)} ${summarizeDiagnosticUrl(targetInfo.url)}`)
+      if (!targetInfo) {
+        return
+      }
+      const childTarget = registry.childTargetsByTargetId.get(targetInfo.targetId)
+      const wasExposed = childTarget ? shouldExposeChildTarget(childTarget) : false
+      if (isRestrictedTarget(targetInfo)) {
+        if (childTarget) {
+          suppressedChildSessions.set(childTarget.sessionId, tabId)
+          detachChildTargetState(childTarget.sessionId, true)
+        }
+        return
+      }
+      const changed = registry.updateConnectedTargetInfo({ tabId, targetInfo })
+      if (!changed) {
+        return
+      }
+      contextDebugLog?.(`target-info-changed ${targetDiagnosticIdentity(changed.target)} ${summarizeDiagnosticUrl(targetInfo.url)}`)
+      if (changed.kind === "child" && !wasExposed && shouldExposeChildTarget(changed.target)) {
+        announceAttachedChildTarget(target.sessionId, changed.target)
+      }
+    } else if (method.startsWith("Target.") && params?.targetInfo !== undefined) {
+      const eventTargetInfo = getTargetInfo(params.targetInfo)
+      if (!eventTargetInfo || isRestrictedTarget(eventTargetInfo)) {
+        return
       }
     }
     if (method === "Page.frameNavigated") {
@@ -1217,6 +1250,11 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     removeClientTargetAliases(cdpClientSessionAliases.values(), (alias) => alias.tabId === tabId)
     mainFrameIdsByTab.delete(tabId)
     ghostCursorPositionsByTab.delete(tabId)
+    for (const [sessionId, childTabId] of suppressedChildSessions) {
+      if (childTabId === tabId) {
+        suppressedChildSessions.delete(sessionId)
+      }
+    }
     contextDebugLog?.(`target-detached kind=root ${targetDiagnosticIdentity(detached.target)}`)
     sendEventToTargetViewers(detached.target.sessionId, {
       method: "Target.targetDestroyed",
@@ -1234,13 +1272,20 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     }
   }
 
-  function detachChildTargetState(sessionId: string): void {
+  function detachChildTargetState(sessionId: string, notifyClients = false): void {
+    if (notifyClients) {
+      for (const client of cdpClients) {
+        detachAnnouncedSession(client, sessionId)
+      }
+    }
     const detached = registry.detachChildTargetState(sessionId)
     if (detached) {
       removeClientTargetAliases(cdpClientSessionAliases.values(), (alias) => alias.targetId === detached.targetInfo.targetId)
     }
-    for (const announcements of cdpClientAnnouncements.values()) {
-      removeAnnouncedSession(announcements, sessionId)
+    if (!notifyClients) {
+      for (const announcements of cdpClientAnnouncements.values()) {
+        removeAnnouncedSession(announcements, sessionId)
+      }
     }
   }
 
@@ -1352,7 +1397,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     return registry.allTargetInfos({
       isRestrictedTarget,
       isVisibleTarget: (target) => {
-        return canSeeTabId(socket, target.tabId)
+        return canSeeTabId(socket, target.tabId) && ("owner" in target || shouldExposeChildTarget(target))
       },
     })
   }

@@ -159,4 +159,23 @@ describe("sendAttachedToChildTarget", () => {
       params: { sessionId: "worker-session", waitingForDebugger: true, targetInfo: { type: "worker" } },
     })
   })
+
+  it("does not replay a held URL-less page child", () => {
+    const events: CdpEvent[] = []
+    const client = socket(events)
+    const registry = new TargetRegistry()
+    registry.addChildTarget({
+      ...child("held-session", "held-target"),
+      targetInfo: { ...targetInfo("held-target"), type: "page", url: "" },
+    })
+
+    replayChildTargetsForParent({
+      socket: client,
+      parentSessionId: "bc-tab-1",
+      registry,
+      clientAnnouncements: new Map([[client, createClientTargetAnnouncements()]]),
+    })
+
+    expect(events).toEqual([])
+  })
 })

@@ -1,6 +1,14 @@
 import type { JsonObject, TargetInfo } from "./protocol.ts"
 import type { ChildTarget, ConnectedTarget, StoredFrameEvents } from "./relay-types.ts"
 
+export type ConnectedTargetInfoUpdate =
+  | { readonly kind: "root"; readonly target: ConnectedTarget }
+  | { readonly kind: "child"; readonly target: ChildTarget }
+
+export function shouldExposeChildTarget(target: ChildTarget): boolean {
+  return target.targetInfo.type !== "page" || target.targetInfo.url !== ""
+}
+
 export class TargetRegistry {
   readonly targets = new Map<string, ConnectedTarget>()
   readonly tabTargets = new Map<number, ConnectedTarget>()
@@ -117,12 +125,19 @@ export class TargetRegistry {
     return crashed
   }
 
-  updateConnectedTargetInfo(options: { readonly tabId: number; readonly targetInfo: TargetInfo }): void {
+  updateConnectedTargetInfo(options: { readonly tabId: number; readonly targetInfo: TargetInfo }): ConnectedTargetInfoUpdate | undefined {
     if (this.childTargetsByTargetId.has(options.targetInfo.targetId)) {
       this.updateChildTargetInfo(options.targetInfo)
-      return
+      const target = this.childTargetsByTargetId.get(options.targetInfo.targetId)
+      return target ? { kind: "child", target } : undefined
+    }
+    const root = this.tabTargets.get(options.tabId)
+    if (root?.targetInfo.targetId !== options.targetInfo.targetId) {
+      return undefined
     }
     this.updateRootTargetInfo(options.tabId, options.targetInfo)
+    const target = this.tabTargets.get(options.tabId)
+    return target ? { kind: "root", target } : undefined
   }
 
   updateRootTargetInfo(tabId: number, targetInfo: TargetInfo): void {

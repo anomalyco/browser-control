@@ -40,6 +40,124 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 describe("relay child target announce dedupe", () => {
+  it("keeps an extension-owned child from replacing the tab root", async () => {
+    const port = await freePort()
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port })
+      yield* Effect.tryPromise(async () => {
+        const extension = await openSocket(`${relay.url.replace("http://", "ws://")}/extension`)
+        const extensionCommands: Array<{ readonly method: string; readonly params?: JsonObject }> = []
+        extension.on("message", (data) => {
+          const command = JSON.parse(data.toString()) as { readonly id: number; readonly method: string; readonly params?: JsonObject }
+          extensionCommands.push(command)
+          const result = command.method === "debugger.sendCommand" && command.params?.method === "Target.getTargetInfo"
+            ? { targetInfo: targetInfo("root-target") }
+            : {}
+          extension.send(JSON.stringify({ id: command.id, result }))
+        })
+        extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.16" } }))
+        extension.send(JSON.stringify({ method: "toolbar.clicked", params: { tabId: 1 } }))
+        await waitFor(() => extensionCommands.some((command) => command.method === "action.setAttached"))
+
+        const client = await openSocket(`${relay.url.replace("http://", "ws://")}/devtools/browser/test`)
+        const messages: Array<CdpEvent | { readonly id: number; readonly result?: JsonObject }> = []
+        client.on("message", (data) => {
+          messages.push(JSON.parse(data.toString()) as CdpEvent | { readonly id: number; readonly result?: JsonObject })
+        })
+        client.send(JSON.stringify({ id: 1, method: "Target.setAutoAttach", params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true } }))
+        await waitFor(() => messages.some((message) => "method" in message && message.method === "Target.attachedToTarget"))
+        const rootAttach = messages.find((message): message is CdpEvent => "method" in message && message.method === "Target.attachedToTarget")
+        const rootSessionId = typeof rootAttach?.params?.sessionId === "string" ? rootAttach.params.sessionId : undefined
+        expect(rootSessionId).toBeDefined()
+
+        extension.send(JSON.stringify({
+          method: "debugger.event",
+          params: {
+            tabId: 1,
+            method: "Target.targetInfoChanged",
+            params: { targetInfo: { ...targetInfo("unknown-extension-child"), title: "", url: "about:blank" } },
+          },
+        }))
+        extension.send(JSON.stringify({
+          method: "debugger.event",
+          params: {
+            tabId: 1,
+            method: "Target.attachedToTarget",
+            params: {
+              sessionId: "password-manager-child-session",
+              targetInfo: { ...targetInfo("password-manager-child"), title: "", url: "" },
+              waitingForDebugger: false,
+            },
+          },
+        }))
+        extension.send(JSON.stringify({
+          method: "debugger.event",
+          params: {
+            tabId: 1,
+            sessionId: "password-manager-child-session",
+            method: "Runtime.executionContextCreated",
+            params: { context: { id: 99, origin: "chrome-extension://password-manager", auxData: { isDefault: true } } },
+          },
+        }))
+        extension.send(JSON.stringify({
+          method: "debugger.event",
+          params: {
+            tabId: 1,
+            sessionId: "password-manager-child-session",
+            method: "Target.targetInfoChanged",
+            params: {
+              targetInfo: {
+                ...targetInfo("password-manager-child"),
+                title: "Password manager",
+                url: "chrome-extension://password-manager/popup.html",
+              },
+            },
+          },
+        }))
+        extension.send(JSON.stringify({
+          method: "debugger.event",
+          params: {
+            tabId: 1,
+            sessionId: "password-manager-child-session",
+            method: "Runtime.executionContextCreated",
+            params: { context: { id: 100, origin: "chrome-extension://password-manager", auxData: { isDefault: true } } },
+          },
+        }))
+
+        client.send(JSON.stringify({ id: 2, sessionId: rootSessionId, method: "Target.getTargetInfo", params: {} }))
+        client.send(JSON.stringify({ id: 3, sessionId: rootSessionId, method: "Page.navigate", params: { url: "https://example.com/after-focus" } }))
+        await waitFor(() => messages.some((message) => "id" in message && message.id === 3))
+
+        const targetInfoResponse = messages.find((message) => "id" in message && message.id === 2)
+        expect(targetInfoResponse && "result" in targetInfoResponse ? targetInfoResponse.result : undefined).toMatchObject({
+          targetInfo: { targetId: "root-target", url: "https://example.com/" },
+        })
+        expect(messages.some((message) => {
+          return "method" in message &&
+            message.method === "Target.attachedToTarget" &&
+            message.params?.sessionId === "password-manager-child-session"
+        })).toBe(false)
+        expect(messages.some((message) => {
+          return "method" in message &&
+            message.method === "Runtime.executionContextCreated" &&
+            message.sessionId === "password-manager-child-session"
+        })).toBe(false)
+        expect(extensionCommands).toContainEqual(expect.objectContaining({
+          method: "debugger.sendCommand",
+          params: expect.objectContaining({
+            method: "Page.navigate",
+            tabId: 1,
+          }),
+        }))
+        const navigateCommand = extensionCommands.find((command) => command.method === "debugger.sendCommand" && command.params?.method === "Page.navigate")
+        expect(navigateCommand?.params?.sessionId).toBeUndefined()
+
+        client.close()
+        extension.close()
+      })
+    })))
+  })
+
   it("suppresses service workers while preserving dedicated worker routing", async () => {
     const port = await freePort()
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {

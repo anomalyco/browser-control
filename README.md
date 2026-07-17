@@ -276,6 +276,13 @@ browser-control recording status --session amazon
 browser-control recording stop --session amazon
 ```
 
+Playwright download artifacts are not available in extension-backed tabs.
+Chromium blocks the download-behavior commands that Playwright needs through
+`chrome.debugger`, so `page.waitForEvent("download")` fails immediately with a
+capability error instead of timing out. If the page exposes the payload through
+fetch or an API response, read those bytes in the page and write them with the
+execute sandbox's `fs` module.
+
 For destructive UI work, use a two-phase approval flow. First inspect and
 return the exact candidate rows/IDs. After explicit approval, run a second
 script that selects by stable row text/ID, reads the confirmation dialog,
@@ -294,8 +301,9 @@ SMOKE_CASE=oopif-reconnect pnpm smoke
 
 The current smoke set covers local action/form fixtures, local cart and
 checkout flows, reconnect/evaluate, a local HTTP redirect followed by reconnect
-and evaluate, explicit target URL selection, execute fill helpers, OOPIF
-reconnect, session isolation, and concurrent multi-client sessions. Run the
+and evaluate, explicit target URL selection, execute fill helpers, the explicit
+download capability boundary, OOPIF reconnect, session isolation, and
+concurrent multi-client sessions. Run the
 focused redirect/context regression with:
 
 ```bash

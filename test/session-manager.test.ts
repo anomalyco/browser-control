@@ -502,7 +502,7 @@ describe("BrowserControlSessions", () => {
       const betaResult = yield* Effect.result(Fiber.join(beta))
       expect(betaResult._tag).toBe("Failure")
       if (betaResult._tag === "Failure") {
-        expect(betaResult.failure.message).toBe("Target is already adopted by session alpha")
+        expect(betaResult.failure.message).toBe("Target is already adopted by session alpha. Use that session, or reset/delete it to release the tab before adopting it elsewhere.")
       }
 
       const implicitResult = yield* Effect.result(

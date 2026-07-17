@@ -85,6 +85,26 @@ describe("execute log capture", () => {
 })
 
 describe("user code execution", () => {
+  it("keeps module aliases available while allowing scripts to shadow them", async () => {
+    const page = {
+      isClosed: vi.fn(() => false),
+      url: vi.fn(() => "https://example.com"),
+      on: vi.fn(),
+      off: vi.fn(),
+      mainFrame: vi.fn(() => ({})),
+    }
+    const globals = {
+      page,
+      handoffTracker: { count: 0 },
+      modules: { path: { resolve: (...parts: string[]) => parts.join("/") }, buffer: {} },
+    } as never
+
+    await expect(runUserCode({ code: 'return path.resolve("tmp", "shot.png")', globals }))
+      .resolves.toMatchObject({ result: "tmp/shot.png" })
+    await expect(runUserCode({ code: 'const path = "local"; const buffer = "value"; return { path, buffer }', globals }))
+      .resolves.toMatchObject({ result: { path: "local", buffer: "value" } })
+  })
+
   it("classifies syntax errors as user-code failures and removes page listeners", async () => {
     const page = {
       isClosed: vi.fn(() => false),
