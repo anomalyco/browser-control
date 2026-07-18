@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { HandoffRegistry, resolveExactHandoffTarget, toolbarClickAction } from "../src/handoff.ts"
+import { detachedHandoffAction, HandoffRegistry, resolveExactHandoffTarget, toolbarClickAction } from "../src/handoff.ts"
 
 function registryWithIds(...ids: string[]): HandoffRegistry {
   return new HandoffRegistry(() => ids.shift() ?? "unexpected-id")
@@ -137,5 +137,17 @@ describe("toolbarClickAction", () => {
   it("ignores any executing tab and otherwise preserves the attach toggle", () => {
     expect(toolbarClickAction({ handoffPending: false, sessionExecuting: true })).toBe("ignore")
     expect(toolbarClickAction({ handoffPending: false, sessionExecuting: false })).toBe("toggle")
+  })
+})
+
+describe("detachedHandoffAction", () => {
+  it("reconnects a pending handoff instead of cancelling it during a transient debugger detach", () => {
+    expect(detachedHandoffAction({ handoffPending: true, reason: "canceled_by_user" })).toBe("reconnect")
+    expect(detachedHandoffAction({ handoffPending: true, reason: "target_closed" })).toBe("reconnect")
+  })
+
+  it("preserves the existing detach behavior without a pending handoff", () => {
+    expect(detachedHandoffAction({ handoffPending: false, reason: "target_closed" })).toBe("ignore")
+    expect(detachedHandoffAction({ handoffPending: false, reason: "canceled_by_user" })).toBe("detach")
   })
 })

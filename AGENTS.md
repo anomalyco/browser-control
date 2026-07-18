@@ -74,7 +74,10 @@ local Node relay.
   id from the actual Playwright `Page`, then bind the exact registry
   target/tab/session. The relay resolves only a matching handoff id from that
   tab's in-page completion control. Toolbar clicks never resolve handoffs or
-  detach a tab whose session is mid-execute.
+  detach a tab whose session is mid-execute. If Chromium transiently releases
+  `chrome.debugger` while a handoff is pending, the relay may reconnect only the
+  same tab and exact CDP target generation; actual tab removal, a changed target,
+  or reconnect failure still cancels the handoff.
 - `TargetRegistry` is the sole production target-ownership authority. Session
   state keeps only the adopted default-page pointer. Adoption reserves,
   commits, or rolls back registry ownership transactionally and reconciles CDP

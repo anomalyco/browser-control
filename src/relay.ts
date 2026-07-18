@@ -42,6 +42,7 @@ import { ghostCursorClientSource, ghostCursorMouseActionExpression, ghostCursorR
 import { guardCdpMethod } from "./cdp-guardrails.ts"
 import {
   HandoffRegistry,
+  detachedHandoffAction,
   resolveExactHandoffTarget,
   toolbarClickAction,
   type HandoffCancellationReason,
@@ -164,6 +165,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
   })
   const handoffs = new HandoffRegistry()
   const activeHandoffTabs = new Map<string, Set<number>>()
+  const reconnectingHandoffTabs = new Set<number>()
   const journalBaseDir = defaultJournalBaseDir()
   const attachedBadge = { text: "ON", color: "#7c3aed", title: "Detach from Browser Control" }
   const executingBadge = { text: "RUN", color: "#f59e0b", title: "Browser Control is running a script" }
@@ -639,7 +641,15 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
         detachChildTargetState(detachedSessionId)
         return
       }
-      if (reason === "target_closed") {
+      const action = detachedHandoffAction({
+        handoffPending: tabId !== undefined && handoffs.pendingForTab(tabId) !== undefined,
+        ...(reason === undefined ? {} : { reason }),
+      })
+      if (action === "reconnect" && tabId) {
+        reconnectDetachedHandoffTarget(tabId, reason)
+        return
+      }
+      if (action === "ignore") {
         return
       }
       if (tabId) {
@@ -1227,6 +1237,71 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     return target
   })
 
+  const reconnectDetachedHandoffTarget = (tabId: number, reason: string | undefined): void => {
+    if (reconnectingHandoffTabs.has(tabId)) {
+      return
+    }
+    const target = registry.tabTargets.get(tabId)
+    const pending = handoffs.pendingForTab(tabId)
+    if (!target || !pending) {
+      detachTargetState(tabId)
+      return
+    }
+    reconnectingHandoffTabs.add(tabId)
+    Effect.runPromise(
+      Effect.gen(function* () {
+        // Chromium can transiently release chrome.debugger during account and
+        // extension-driven navigation while keeping the same visible tab. No
+        // Playwright command is in flight during a handoff, so preserve the
+        // virtual target if the exact tab/target can be attached again.
+        yield* Effect.sleep("100 millis")
+        if (registry.tabTargets.get(tabId) !== target || !handoffs.pendingForTab(tabId)) {
+          return
+        }
+        yield* sendToExtension({ method: "debugger.attach", params: { tabId } })
+        yield* sendDebuggerCommand({ tabId, method: "Page.enable", params: {} })
+        const targetInfoResult = yield* sendDebuggerCommand({ tabId, method: "Target.getTargetInfo", params: {} })
+        const targetInfo = getTargetInfo(targetInfoResult.targetInfo)
+        if (!targetInfo || targetInfo.targetId !== target.targetInfo.targetId) {
+          return yield* Effect.fail(new Error("Detached handoff tab returned as a different CDP target"))
+        }
+        registry.addRootTarget({ ...target, targetInfo })
+        mainFrameIdsByTab.set(tabId, targetInfo.targetId)
+        yield* injectGhostCursor(tabId).pipe(Effect.ignore)
+        yield* sendDebuggerCommand({
+          tabId,
+          method: "Target.setAutoAttach",
+          params: autoAttachParams ?? {
+            autoAttach: true,
+            waitForDebuggerOnStart: false,
+            flatten: true,
+          },
+        })
+        yield* Effect.ignore(sendToExtension({ method: "tabs.group", params: { tabId } }))
+        yield* Effect.ignore(sendToExtension({ method: "action.setAttached", params: { tabId, attached: true } }))
+        const currentPending = handoffs.pendingForTab(tabId)
+        if (currentPending) {
+          setActivityForTarget(target, "waiting", waitingBadge(currentPending.message), {
+            sessionId: currentPending.sessionId,
+            message: currentPending.message,
+            handoffId: currentPending.id,
+          })
+        }
+        contextDebugLog?.(`handoff-target-reconnected reason=${reason ?? "unknown"} ${targetDiagnosticIdentity(target)}`)
+      }).pipe(
+        Effect.catch((cause) => Effect.sync(() => {
+          contextDebugLog?.(`handoff-target-reconnect-failed reason=${reason ?? "unknown"} ${targetDiagnosticIdentity(target)} error=${cause instanceof Error ? cause.message : String(cause)}`)
+          if (registry.tabTargets.get(tabId) === target) {
+            detachTargetState(tabId)
+          }
+        })),
+        Effect.ensuring(Effect.sync(() => {
+          reconnectingHandoffTabs.delete(tabId)
+        })),
+      ),
+    ).catch(() => {})
+  }
+
   const injectGhostCursor = Effect.fnUntraced(function* (tabId: number) {
     yield* sendDebuggerCommand({
       tabId,
@@ -1272,6 +1347,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
   })
 
   function detachTargetState(tabId: number): void {
+    reconnectingHandoffTabs.delete(tabId)
     Effect.runPromise(Effect.ignore(sendToExtension({ method: "pageStatus.clear", params: { tabId } }))).catch(() => {})
     void recordingRelay.abortRecordingForTab({ tabId, reason: "Tab detached" }).catch((error: unknown) => {
       console.error("Failed to abort recording for detached tab", error)
