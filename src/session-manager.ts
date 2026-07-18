@@ -145,6 +145,16 @@ export class BrowserControlSessions {
     return affectedSessionIds
   }
 
+  markTargetDetached(targetId: string): string[] {
+    const affectedSessionIds: string[] = []
+    for (const session of this.sessions.values()) {
+      if (session.sandbox.markTargetDetached(targetId)) {
+        affectedSessionIds.push(session.id)
+      }
+    }
+    return affectedSessionIds
+  }
+
   delete(id: string): Effect.Effect<boolean, Error> {
     const manager = this
     return Effect.gen(function* () {

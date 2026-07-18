@@ -49,6 +49,7 @@ export interface ExecuteSandboxLike {
   /** Adoption rollback cleanup does not settle before started Playwright close promises settle. */
   closeSettled(): Effect.Effect<void, Error>
   markTargetCrashed(targetId: string): boolean
+  markTargetDetached(targetId: string): boolean
   getStatus(): {
     readonly sessionId?: string
     readonly connected: boolean

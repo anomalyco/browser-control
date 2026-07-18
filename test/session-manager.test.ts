@@ -8,6 +8,7 @@ type FakeSandbox = ExecuteSandboxLike & {
   readonly closes: () => number
   readonly adoptedSelections: () => unknown[]
   readonly crashedTargets: () => string[]
+  readonly detachedTargets: () => string[]
 }
 
 const makeFakeSandbox = (options?: {
@@ -21,6 +22,7 @@ const makeFakeSandbox = (options?: {
   let closes = 0
   const adoptedSelections: unknown[] = []
   const crashedTargets: string[] = []
+  const detachedTargets: string[] = []
   const close = () => Effect.sync(() => {
     closes += 1
   }).pipe(Effect.andThen(options?.onClose ?? Effect.void))
@@ -58,10 +60,15 @@ const makeFakeSandbox = (options?: {
       crashedTargets.push(targetId)
       return options?.defaultTargetId === undefined || options.defaultTargetId === targetId
     },
+    markTargetDetached: (targetId) => {
+      detachedTargets.push(targetId)
+      return options?.defaultTargetId === undefined || options.defaultTargetId === targetId
+    },
     getStatus: () => ({ connected: false, pageUrl: null, stateKeys: [] }),
     closes: () => closes,
     adoptedSelections: () => adoptedSelections,
     crashedTargets: () => crashedTargets,
+    detachedTargets: () => detachedTargets,
   }
 }
 
@@ -133,6 +140,19 @@ describe("BrowserControlSessions", () => {
     const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox())
     sessions.createNew("alpha")
     expect(() => sessions.createNew("alpha")).toThrow("Session already exists")
+  })
+
+  it("marks only the session page backed by a detached root target", () => {
+    const first = makeFakeSandbox({ defaultTargetId: "target-1" })
+    const second = makeFakeSandbox({ defaultTargetId: "target-2" })
+    const sandboxes = [first, second]
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandboxes.shift()!)
+    sessions.createNew("alpha")
+    sessions.createNew("beta")
+
+    expect(sessions.markTargetDetached("target-1")).toEqual(["alpha"])
+    expect(first.detachedTargets()).toEqual(["target-1"])
+    expect(second.detachedTargets()).toEqual(["target-1"])
   })
 
   it("delete waits for a running execute before closing the sandbox", async () => {

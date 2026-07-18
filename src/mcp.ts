@@ -8,7 +8,6 @@ import type { JsonObject } from "./protocol.ts"
 import { getObject, parseTargetSelection } from "./relay-helpers.ts"
 import * as RelayClient from "./relay-client.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"
-import { startRelay } from "./relay.ts"
 import { browserControlVersion } from "./version.ts"
 
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
@@ -223,31 +222,13 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
   ]
 }
 
-/**
- * Embedded relay: start one in-process. If the port is already taken, probe
- * `/version` through RelayClient to confirm a Browser Control relay is
- * actually serving there before assuming it is safe to proceed.
- */
 const relayLayer = Layer.effectDiscard(
   Effect.gen(function* () {
     const relay = yield* RelayClient.Service
-    const port = yield* RelayClient.portConfig
-    yield* startRelay({ port }).pipe(
-      Effect.catch((error) => {
-        if (isAddressInUse(error)) {
-          return relay.version.pipe(
-            Effect.mapError(() =>
-              new Error(`Port ${port} is in use but does not answer like a Browser Control relay; stop the other process or set BROWSER_CONTROL_PORT`)
-            ),
-            Effect.flatMap((version) => {
-              const problem = RelayLifecycle.relayBuildProblem(version)
-              return problem ? Effect.fail(new Error(problem)) : Effect.void
-            }),
-          )
-        }
-        return Effect.fail(error)
-      }),
-    )
+    const readiness = yield* RelayLifecycle.ensureRelay({ relay })
+    if (readiness.buildProblem) {
+      return yield* Effect.fail(new Error(readiness.buildProblem))
+    }
   }),
 )
 
@@ -431,10 +412,4 @@ function objectSchema(properties: JsonObject, required: readonly string[] = []):
     required: [...required],
     additionalProperties: false,
   }
-}
-
-function isAddressInUse(error: Error): boolean {
-  const nodeError = error as NodeJS.ErrnoException
-  const cause = error.cause as NodeJS.ErrnoException | undefined
-  return nodeError.code === "EADDRINUSE" || cause?.code === "EADDRINUSE"
 }

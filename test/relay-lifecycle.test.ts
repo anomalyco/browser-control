@@ -4,6 +4,7 @@ import * as RelayClient from "../src/relay-client.ts"
 import {
   ensureExtensionConnected,
   ensureRelay,
+  managedRelayEntrypoint,
   relayBuildProblem,
   statusCollections,
   stoppedRelayStatus,
@@ -110,5 +111,11 @@ describe("relay lifecycle", () => {
     })).toEqual({ sessions: [], targets: [] })
     expect(relayBuildProblem(version, "build-current")).toBeUndefined()
     expect(relayBuildProblem({ ...version, buildId: "build-old" }, "dev")).toBeUndefined()
+  })
+
+  it("starts a managed relay through the CLI entrypoint from MCP builds and source", () => {
+    expect(managedRelayEntrypoint("/package/dist/mcp.js")).toBe("/package/dist/cli.js")
+    expect(managedRelayEntrypoint("/package/src/mcp-main.ts")).toBe("/package/src/cli.ts")
+    expect(managedRelayEntrypoint("/package/dist/cli.js")).toBe("/package/dist/cli.js")
   })
 })

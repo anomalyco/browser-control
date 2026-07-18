@@ -1,5 +1,6 @@
 import { Effect, Schedule, Schema } from "effect"
 import { spawn } from "node:child_process"
+import path from "node:path"
 import process from "node:process"
 import * as RelayClient from "./relay-client.ts"
 import type { ExtensionStatus, RelayVersion } from "./relay-schema.ts"
@@ -126,7 +127,7 @@ function spawnManagedRelay(): Effect.Effect<void, Error> {
       if (!entrypoint) {
         throw new Error("Cannot locate the browser-control CLI entrypoint")
       }
-      const child = spawn(process.execPath, [...process.execArgv, entrypoint, "serve"], {
+      const child = spawn(process.execPath, [...process.execArgv, managedRelayEntrypoint(entrypoint), "serve"], {
         detached: true,
         stdio: "ignore",
         env: { ...process.env, BROWSER_CONTROL_MANAGED_RELAY: "1" },
@@ -135,6 +136,17 @@ function spawnManagedRelay(): Effect.Effect<void, Error> {
     },
     catch: (cause) => cause instanceof Error ? cause : new Error("Failed to start Browser Control relay", { cause }),
   })
+}
+
+export function managedRelayEntrypoint(entrypoint: string): string {
+  const name = path.basename(entrypoint)
+  if (name === "mcp.js") {
+    return path.join(path.dirname(entrypoint), "cli.js")
+  }
+  if (name === "mcp-main.ts") {
+    return path.join(path.dirname(entrypoint), "cli.ts")
+  }
+  return entrypoint
 }
 
 function isRelayUnreachable(error: unknown): error is RelayClient.RelayUnreachable {

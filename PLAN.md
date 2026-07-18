@@ -269,8 +269,10 @@ reconciles existing client announcements, browser grouping, and page status.
 
 ### Operations And Diagnostics
 
-- Relay-backed CLI commands start a detached relay when needed. `status` and
-  `doctor` remain observational; `serve` is the foreground debugging path.
+- Relay-backed CLI and MCP commands share one detached relay and start it when
+  needed. The relay outlives the MCP process, so a CLI handoff is not coupled to
+  MCP lifecycle. `status` and `doctor` remain observational; `serve` is the
+  foreground debugging path.
 - `doctor` reports relay and extension versions, build mismatches, sessions,
   active targets, child targets, crashed/browser-error targets, and built
   artifacts.
@@ -428,10 +430,10 @@ session isolation, compact snapshots, handoffs, media returns, and local fixture
 checkout flows.
 
 The current smoke matrix covers local forms, cart and checkout, reconnect and
-redirect reconnect, explicit target selection, crashed-page recovery, fill
-helpers, snapshot refs, handoff navigation and cross-tab binding, OOPIF
-reconnect, dedicated workers, the download capability boundary, cursor behavior,
-session isolation,
+redirect reconnect, explicit target selection, crashed- and detached-page
+recovery, fill helpers with string and Locator targets, snapshot refs, handoff
+navigation and cross-tab binding, OOPIF reconnect, dedicated workers, the
+download capability boundary, cursor behavior, session isolation,
 multi-client visibility, stale-client ordering, and raw-client checkout.
 Historical milestone scope is no longer used as the active backlog; `Next
 Priorities` is authoritative.

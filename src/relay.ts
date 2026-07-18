@@ -1283,6 +1283,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       return
     }
     cancelTargetHandoffs(detached.target, "target-detached")
+    sessions.markTargetDetached(detached.target.targetInfo.targetId)
     sessions.releaseAdoptedTarget(detached.target.targetInfo.targetId)
     removeClientTargetAliases(cdpClientSessionAliases.values(), (alias) => alias.tabId === tabId)
     mainFrameIdsByTab.delete(tabId)

@@ -21,6 +21,8 @@ browser-control execute 'return { url: page.url(), title: await page.title() }'
 Relay-backed commands start a detached relay when needed and wait briefly for
 the extension to reconnect. Do not start `browser-control serve` first; it is
 the foreground debugging path and intentionally does not return.
+CLI and MCP share this detached relay; restarting the MCP process does not stop
+the relay or interrupt a CLI execute or pending handoff.
 
 If `browser-control` is not on PATH, follow the source setup in the repository
 README (`pnpm install`, `pnpm build`, `bun link`).

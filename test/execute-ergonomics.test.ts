@@ -5,6 +5,7 @@ import {
   createExecuteLogCapture,
   createSnapshotHelpers,
   defaultAriaSnapshotTimeoutMs,
+  fillInputs,
   pageTargetId,
   runUserCode,
 } from "../src/execute.ts"
@@ -122,6 +123,64 @@ describe("user code execution", () => {
       },
     })
     expect(page.off).toHaveBeenCalledTimes(3)
+  })
+})
+
+describe("fillInputs", () => {
+  it("resolves locators before the single batched page evaluation", async () => {
+    const dispose = vi.fn().mockResolvedValue(undefined)
+    const handle = { dispose } as unknown as Awaited<ReturnType<Locator["elementHandle"]>>
+    const locator = {
+      _frame: { _platform: { boxedStackPrefixes: new Map([["secret", "internal"]]) } },
+      elementHandles: vi.fn().mockResolvedValue([handle]),
+    } as unknown as Locator
+    const evaluate = vi.fn(async (_fn, argument: unknown) => {
+      const fields = argument as Array<{ readonly target: unknown; readonly label: string; readonly value: string }>
+      expect(fields).toEqual([
+        { target: handle, label: "locator", value: "first" },
+        { target: "#second", label: "selector: #second", value: "second" },
+      ])
+      expect(fields[0]?.target).not.toBe(locator)
+      return ["locator", "selector: #second"]
+    })
+    const page = { evaluate } as unknown as Page
+
+    await fillInputs(page, [
+      { selector: locator, value: "first" },
+      { selector: "#second", value: "second" },
+    ])
+
+    expect(locator.elementHandles).toHaveBeenCalledOnce()
+    expect(evaluate).toHaveBeenCalledOnce()
+    expect(dispose).toHaveBeenCalledOnce()
+  })
+
+  it("rejects an ambiguous locator without serializing it or exposing values", async () => {
+    const handles = [
+      { dispose: vi.fn().mockResolvedValue(undefined) },
+      { dispose: vi.fn().mockResolvedValue(undefined) },
+    ]
+    const locator = { elementHandles: vi.fn().mockResolvedValue(handles) } as unknown as Locator
+    const page = { evaluate: vi.fn() } as unknown as Page
+
+    await expect(fillInputs(page, [{ selector: locator, value: "private-value" }]))
+      .rejects.toThrow("fillInputs expects exactly one match for locator; got 2")
+    expect(page.evaluate).not.toHaveBeenCalled()
+    expect(handles.every((handle) => handle.dispose.mock.calls.length === 1)).toBe(true)
+  })
+
+  it("disposes earlier handles when a later locator fails to resolve", async () => {
+    const dispose = vi.fn().mockResolvedValue(undefined)
+    const first = { elementHandles: vi.fn().mockResolvedValue([{ dispose }]) } as unknown as Locator
+    const second = { elementHandles: vi.fn().mockRejectedValue(new Error("target detached")) } as unknown as Locator
+    const page = { evaluate: vi.fn() } as unknown as Page
+
+    await expect(fillInputs(page, [
+      { selector: first, value: "first" },
+      { selector: second, value: "private-value" },
+    ])).rejects.toThrow("target detached")
+    expect(page.evaluate).not.toHaveBeenCalled()
+    expect(dispose).toHaveBeenCalledOnce()
   })
 })
 

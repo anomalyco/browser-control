@@ -99,11 +99,14 @@ Agents that prefer MCP over shell commands can use `browser-control-mcp`:
 claude mcp add browser-control -- browser-control-mcp
 ```
 
-The skill-driven CLI workflow and MCP expose the same relay sessions. MCP
-`execute` extracts returned screenshot buffers, including buffers nested in
-objects and arrays, as native image attachments without writing temporary files.
-This allows one result to return metadata and multiple images. Screenshots that
-are saved to a path but not returned remain file-only.
+The skill-driven CLI workflow and MCP expose the same relay sessions. MCP reuses
+the detached relay or starts it through the same lifecycle as the CLI; the relay
+does not belong to the MCP process, so restarting MCP does not interrupt a CLI
+execute or pending handoff. MCP `execute` extracts returned screenshot buffers,
+including buffers nested in objects and arrays, as native image attachments
+without writing temporary files. This allows one result to return metadata and
+multiple images. Screenshots that are saved to a path but not returned remain
+file-only.
 
 ### Explicit sessions
 
@@ -302,9 +305,10 @@ SMOKE_CASE=oopif-reconnect pnpm smoke
 
 The current smoke set covers local action/form fixtures, local cart and
 checkout flows, reconnect/evaluate, a local HTTP redirect followed by reconnect
-and evaluate, explicit target URL selection, execute fill helpers, the explicit
-download capability boundary, OOPIF reconnect, session isolation, and
-concurrent multi-client sessions. Run the
+and evaluate, explicit target URL selection, crashed and detached session-page
+recovery, execute fill helpers (including Locator targets), the explicit
+download capability boundary, OOPIF reconnect, session isolation, and concurrent
+multi-client sessions. Run the
 focused redirect/context regression with:
 
 ```bash

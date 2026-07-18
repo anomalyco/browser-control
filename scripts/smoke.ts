@@ -525,6 +525,34 @@ const cases: SmokeCase[] = [
     }),
   },
   {
+    name: "execute-page-detach-recovery",
+    run: Effect.fnUntraced(function* () {
+      const smokeSession = `bc-detach-recovery-${Date.now()}`
+      return yield* Effect.gen(function* () {
+        yield* runBrowserControl(["session", "new", smokeSession])
+        const closeOutput = yield* runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          "await page.setContent('<title>Detach recovery fixture</title>'); await page.close(); return 'closed'",
+        ])
+        if (!closeOutput.includes("session default page was closed")) {
+          return yield* Effect.fail(new Error(`closing the session root did not report stale page state: ${closeOutput}`))
+        }
+        const output = yield* runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          "return { url: page.url(), title: await page.title() }",
+        ])
+        if (!output.includes("about:blank")) {
+          return yield* Effect.fail(new Error(`execute retained the detached session page: ${output}`))
+        }
+        return output.trim()
+      }).pipe(Effect.ensuring(runBrowserControl(["session", "delete", smokeSession]).pipe(Effect.ignore)))
+    }),
+  },
+  {
     name: "execute-fill-helpers",
     run: Effect.fnUntraced(function* () {
       const marker = `bc-fill-${Date.now()}`
@@ -540,7 +568,7 @@ const cases: SmokeCase[] = [
 await page.setContent('<input id="one" placeholder="One"><input id="two"><textarea id="three"></textarea>')
 await fillInput('#one', 'alpha')
 await fillInputs(page, [
-  { selector: '#two', value: 'beta' },
+  { selector: page.getByRole('textbox').nth(1), value: 'beta' },
   { selector: '#three', value: 'gamma' },
 ])
 const values = await page.evaluate(() => ({

@@ -30,7 +30,9 @@ local Node relay.
   `--session`; it never infers agent identity from shared current-session state.
 - Relay-backed CLI commands auto-start a detached relay when needed. `status`
   and `doctor` remain observational, and `serve` is only the foreground/debug
-  path. The first session is created atomically in the execute request.
+  path. MCP uses the same detached relay lifecycle instead of owning an
+  in-process relay, so an MCP restart cannot interrupt CLI handoffs. The first
+  session is created atomically in the execute request.
 - Each Browser Control session owns one default page and persistent JavaScript
   `state`; do not default to arbitrary shared tabs for normal execute calls.
 - Use stock `playwright-core` for v1.
@@ -173,7 +175,7 @@ local Node relay.
 - Extension shim changes require reloading the unpacked extension once in Brave.
 - Relay-only changes should not require reloading the extension.
 - Use `termctrl` for long-running relay sessions during testing.
-- Run `SMOKE_CASE=local-forms,local-cart,local-checkout,reconnect-evaluate,redirect-reconnect-evaluate,execute-target-url,execute-page-recovery,execute-fill-helpers,execute-snapshot-refs,handoff-navigation,handoff-cross-tab,handoff-target-detach,oopif-reconnect,dedicated-worker,session-download-capability,execute-ghost-cursor,session-isolation,multi-client,stale-client-checkout,raw-first-checkout pnpm smoke`
+- Run `SMOKE_CASE=local-forms,local-cart,local-checkout,reconnect-evaluate,redirect-reconnect-evaluate,execute-target-url,execute-page-recovery,execute-page-detach-recovery,execute-fill-helpers,execute-snapshot-refs,handoff-navigation,handoff-cross-tab,handoff-target-detach,oopif-reconnect,dedicated-worker,session-download-capability,execute-ghost-cursor,session-isolation,multi-client,stale-client-checkout,raw-first-checkout pnpm smoke`
   before claiming the current smoke set is green.
 - CDP target visibility is scoped per client (`src/cdp-visibility.ts`):
   session-owned tabs are announced and their events delivered only to that

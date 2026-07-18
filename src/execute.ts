@@ -1,5 +1,5 @@
 import { Effect, Schema, Scope } from "effect"
-import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type Frame, type Locator, type Page } from "playwright-core"
+import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type ElementHandle, type Frame, type Locator, type Page } from "playwright-core"
 import * as acorn from "acorn"
 import fs from "node:fs"
 import path from "node:path"
@@ -250,7 +250,7 @@ export const defaultAriaSnapshotTimeoutMs = 5_000
 export const defaultSnapshotTimeoutMs = 10_000
 
 type InputField = {
-  readonly selector: string
+  readonly selector: InputTarget
   readonly value: string
 }
 
@@ -652,6 +652,20 @@ export class ExecuteSandbox {
     this.pageHealthCheckRequired = true
     if (!this.pendingWarnings.includes(defaultPageCrashedWarning)) {
       this.pendingWarnings.push(defaultPageCrashedWarning)
+    }
+    return true
+  }
+
+  markTargetDetached(targetId: string): boolean {
+    if (this.defaultPageTargetId !== targetId) {
+      return false
+    }
+    this.page = undefined
+    this.defaultPageTargetId = undefined
+    this.ownsPage = false
+    this.pageHealthCheckRequired = false
+    if (!this.pendingWarnings.includes(defaultPageClosedWarning)) {
+      this.pendingWarnings.push(defaultPageClosedWarning)
     }
     return true
   }
@@ -1518,32 +1532,56 @@ async function fillInput(options: { readonly page: Page; readonly target: InputT
   }, options.value, { timeout: 30_000 })
 }
 
-async function fillInputs(page: Page, fields: ReadonlyArray<InputField>): Promise<void> {
-  await page.evaluate((inputFields) => {
-    return inputFields.map((field) => {
-      const matches = document.querySelectorAll(field.selector)
+export async function fillInputs(page: Page, fields: ReadonlyArray<InputField>): Promise<void> {
+  const locatorHandles: ElementHandle[] = []
+  try {
+    const resolvedFields: Array<{ readonly target: string | ElementHandle; readonly label: string; readonly value: string }> = []
+    for (const field of fields) {
+      if (typeof field.selector === "string") {
+        resolvedFields.push({ target: field.selector, label: `selector: ${field.selector}`, value: field.value })
+        continue
+      }
+      const matches = await field.selector.elementHandles()
+      locatorHandles.push(...matches)
       if (matches.length !== 1) {
-        throw new Error(`fillInputs expects exactly one match for selector: ${field.selector}; got ${matches.length}`)
+        throw new Error(`fillInputs expects exactly one match for locator; got ${matches.length}`)
       }
-      const element = matches[0]
-      if (!(element instanceof HTMLInputElement) && !(element instanceof HTMLTextAreaElement)) {
-        throw new Error(`fillInputs expects input or textarea selector: ${field.selector}`)
-      }
-      const prototype = Object.getPrototypeOf(element) as HTMLInputElement | HTMLTextAreaElement
-      const valueSetter = Object.getOwnPropertyDescriptor(element, "value")?.set
-      const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set
-      element.focus()
-      if (prototypeValueSetter && valueSetter !== prototypeValueSetter) {
-        prototypeValueSetter.call(element, field.value)
-      } else {
-        element.value = field.value
-      }
-      element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: field.value }))
-      element.dispatchEvent(new Event("change", { bubbles: true }))
-      element.blur()
-      return field.selector
-    })
-  }, fields)
+      resolvedFields.push({ target: matches[0]!, label: "locator", value: field.value })
+    }
+
+    await page.evaluate((inputFields) => {
+      return inputFields.map((field) => {
+        let element: Node | undefined
+        if (typeof field.target === "string") {
+          const matches = document.querySelectorAll(field.target)
+          if (matches.length !== 1) {
+            throw new Error(`fillInputs expects exactly one match for ${field.label}; got ${matches.length}`)
+          }
+          element = matches[0]
+        } else {
+          element = field.target
+        }
+        if (!(element instanceof HTMLInputElement) && !(element instanceof HTMLTextAreaElement)) {
+          throw new Error(`fillInputs expects input or textarea ${field.label}`)
+        }
+        const prototype = Object.getPrototypeOf(element) as HTMLInputElement | HTMLTextAreaElement
+        const valueSetter = Object.getOwnPropertyDescriptor(element, "value")?.set
+        const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set
+        element.focus()
+        if (prototypeValueSetter && valueSetter !== prototypeValueSetter) {
+          prototypeValueSetter.call(element, field.value)
+        } else {
+          element.value = field.value
+        }
+        element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: field.value }))
+        element.dispatchEvent(new Event("change", { bubbles: true }))
+        element.blur()
+        return field.label
+      })
+    }, resolvedFields)
+  } finally {
+    await Promise.all(locatorHandles.map((handle) => handle.dispose().catch(() => {})))
+  }
 }
 
 async function screenshotWithLabels(options: ScreenshotWithLabelsOptions): Promise<ScreenshotWithLabelsResult> {

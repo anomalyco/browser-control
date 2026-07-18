@@ -123,6 +123,14 @@ describe("relay child target announce dedupe", () => {
             params: { context: { id: 100, origin: "chrome-extension://password-manager", auxData: { isDefault: true } } },
           },
         }))
+        extension.send(JSON.stringify({
+          method: "debugger.detached",
+          params: { tabId: 1, reason: "target_closed", sessionId: "password-manager-child-session" },
+        }))
+        extension.send(JSON.stringify({
+          method: "debugger.detached",
+          params: { tabId: 1, reason: "target_closed" },
+        }))
 
         client.send(JSON.stringify({ id: 2, sessionId: rootSessionId, method: "Target.getTargetInfo", params: {} }))
         client.send(JSON.stringify({ id: 3, sessionId: rootSessionId, method: "Page.navigate", params: { url: "https://example.com/after-focus" } }))
