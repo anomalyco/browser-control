@@ -165,7 +165,7 @@ require a new extension capture protocol and permission model.
 - The package remains private. Source setup uses `pnpm install`, `pnpm build`,
   and `bun link` until publication; published setup should use npm artifacts.
 - The browser extension remains unpacked for v1 and is loaded from
-  `extension/dist`. Its current shim version is `0.0.16`.
+  `extension/dist`. Its current shim version is `0.0.17`.
 - Extension source changes require rebuilding and reloading the unpacked
   extension. Relay-only changes do not.
 - Chrome Web Store distribution is deferred until behavior stabilizes. A
@@ -256,7 +256,9 @@ reconciles existing client announcements, browser grouping, and page status.
   cannot detach a tab while its session is executing or waiting for a handoff.
 - `handoff(message, { timeoutMs })` binds a waiter to the exact page target,
   survives top-level navigation, and resumes only from the matching in-page
-  completion control.
+  completion control. The relay ignores ambiguous `target_closed` events from
+  extension child targets, so the extension preserves the WAIT UI until the
+  relay confirms a root detach or the tab is removed.
 - Destructive browser-state CDP methods such as `Browser.close` and cookie or
   cache clearing are always blocked.
 - Read-only sessions additionally reject `Input.*`. They reduce trusted

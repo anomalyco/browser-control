@@ -39,23 +39,12 @@ export type PendingHandoffView = {
 }
 
 export type ToolbarClickAction = "ignore" | "toggle"
-export type DetachedHandoffAction = "reconnect" | "ignore" | "detach"
 
 export function toolbarClickAction(options: {
   readonly handoffPending: boolean
   readonly sessionExecuting: boolean
 }): ToolbarClickAction {
   return options.handoffPending || options.sessionExecuting ? "ignore" : "toggle"
-}
-
-export function detachedHandoffAction(options: {
-  readonly handoffPending: boolean
-  readonly reason?: string
-}): DetachedHandoffAction {
-  if (options.handoffPending) {
-    return "reconnect"
-  }
-  return options.reason === "target_closed" ? "ignore" : "detach"
 }
 
 export class HandoffRegistry {

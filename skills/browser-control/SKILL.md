@@ -210,8 +210,9 @@ When a flow hits 2FA, CAPTCHAs, payment confirmation, or anything the user must
 do personally, call `handoff(message, { timeoutMs })` inside execute code. It
 shows the message and an accessible **I'm done, continue** control in the page,
 blocks the script, and resumes only when the user activates that control. The
-WAIT UI survives top-level navigation. Default timeout is 10 minutes; a timeout
-throws so the failure is explicit.
+WAIT UI survives top-level navigation and ambiguous extension child-target
+closures. Actual tab removal cancels the handoff explicitly. Default timeout is
+10 minutes; a timeout throws so the failure is explicit.
 
 ```js
 await page.goto("https://accounts.example.com/login")
@@ -520,7 +521,7 @@ language changes, update `CONTEXT.md` too.
 - Extension changes not taking effect: rebuild `extension/dist` and reload the
   unpacked extension once.
 - Repeated `hello` messages or in-flight RPC timeouts: check for duplicate shim
-  websocket reconnects. The current shim version is `0.0.16`.
+  websocket reconnects. The current shim version is `0.0.17`.
 - Relay restarted while tabs were attached: shim `0.0.7`+ re-announces attached
   tabs after reconnecting, so the relay rebuilds its target registry without
   re-clicking the toolbar. If `activeTargets` stays 0 with an older shim,
@@ -529,7 +530,7 @@ language changes, update `CONTEXT.md` too.
   the user probably dismissed the "is being debugged" banner, which detaches
   chrome.debugger from every tab at once. Re-attach via the toolbar (or
   `session adopt` after re-attaching).
-- Control group: shim `0.0.16` puts session-owned tabs, including adopted user
+- Control group: shim `0.0.16`+ puts session-owned tabs, including adopted user
   tabs, in a purple `control` group within each browser window. Merely attached
   tabs remain where the user put them. Reset, delete, or re-adoption releases an
   adopted tab from the group without closing it. Legacy `browser-control`,

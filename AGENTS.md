@@ -74,10 +74,10 @@ local Node relay.
   id from the actual Playwright `Page`, then bind the exact registry
   target/tab/session. The relay resolves only a matching handoff id from that
   tab's in-page completion control. Toolbar clicks never resolve handoffs or
-  detach a tab whose session is mid-execute. If Chromium transiently releases
-  `chrome.debugger` while a handoff is pending, the relay may reconnect only the
-  same tab and exact CDP target generation; actual tab removal, a changed target,
-  or reconnect failure still cancels the handoff.
+  detach a tab whose session is mid-execute. The extension must not clear page
+  status directly from `chrome.debugger.onDetach`: the relay owns root-detach
+  classification, and ambiguous `target_closed` events from extension child
+  targets must preserve the handoff UI.
 - `TargetRegistry` is the sole production target-ownership authority. Session
   state keeps only the adopted default-page pointer. Adoption reserves,
   commits, or rolls back registry ownership transactionally and reconciles CDP
@@ -206,7 +206,7 @@ browser-control skill
 
 - Load `extension/dist` as the unpacked extension.
 - The relay listens on `127.0.0.1:19989` by default.
-- Current shim version is `0.0.16`.
+- Current shim version is `0.0.17`.
 - On socket open the shim sends `hello` and then re-announces every tab it still
   has `chrome.debugger` attached to (`debugger.attached` events), so a restarted
   relay rebuilds its target registry without the user re-clicking the toolbar.

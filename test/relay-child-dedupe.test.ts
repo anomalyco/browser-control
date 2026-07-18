@@ -55,7 +55,7 @@ describe("relay child target announce dedupe", () => {
             : {}
           extension.send(JSON.stringify({ id: command.id, result }))
         })
-        extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.16" } }))
+        extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.17" } }))
         extension.send(JSON.stringify({ method: "toolbar.clicked", params: { tabId: 1 } }))
         await waitFor(() => extensionCommands.some((command) => command.method === "action.setAttached"))
 

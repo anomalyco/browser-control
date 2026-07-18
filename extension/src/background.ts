@@ -8,10 +8,11 @@ import type {
 } from "./recording-types.ts"
 import { isBrowserControlGroupTitle, isCurrentBrowserControlGroupTitle, isLegacyBrowserControlGroupTitle, shouldUngroupBrowserControlTab, tabGroupColor, tabGroupTitle } from "./tab-groups.ts"
 import { pageStatusFromJson } from "./page-status.ts"
+import { debuggerDetachedEvent } from "./debugger-detach.ts"
 
 const relayHost = "127.0.0.1"
 const relayPort = 19989
-const shimVersion = "0.0.16"
+const shimVersion = "0.0.17"
 const offscreenDocumentPath = "offscreen.html"
 
 let socket: WebSocket | undefined
@@ -61,16 +62,11 @@ chrome.debugger.onDetach.addListener((source, reason) => {
     return
   }
   const sourceSession = source as chrome.debugger.DebuggerSession
-  sendMessage({
-    method: "debugger.detached",
-    params: {
-      tabId: source.tabId,
-      reason,
-      ...(sourceSession.sessionId === undefined ? {} : { sessionId: sourceSession.sessionId }),
-    },
-  })
-  void sendPageStatusMessage(source.tabId, { action: "page-status.clear" })
-  void guardedUngroupBrowserControlTab(source.tabId)
+  sendMessage(debuggerDetachedEvent({
+    tabId: source.tabId,
+    reason,
+    ...(sourceSession.sessionId === undefined ? {} : { sessionId: sourceSession.sessionId }),
+  }))
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {

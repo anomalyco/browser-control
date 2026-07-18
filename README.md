@@ -44,7 +44,7 @@ bun link          # installs `browser-control` and `browser-control-mcp` globall
 3. Click **Load unpacked** and select the repo's `extension/dist` directory.
 4. Pin the Browser Control toolbar button.
 
-The current extension shim version is `0.0.16`; reload the unpacked extension
+The current extension shim version is `0.0.17`; reload the unpacked extension
 after rebuilding when its source changes.
 
 ### 3. Run it
@@ -208,8 +208,9 @@ return await ariaSnapshot("main", { timeout: 10_000 })
 For a human-only step, `handoff` shows the message and an accessible **I'm done,
 continue** button in the selected page. The same WAIT UI is restored after a
 top-level navigation. Toolbar clicks do not complete a handoff or detach its tab
-while the execute call is active. The default timeout is 10 minutes and remains
-an explicit script failure.
+while the execute call is active. The extension preserves this UI across
+ambiguous child-target closure events until the relay confirms the tab detached.
+The default timeout is 10 minutes and remains an explicit script failure.
 
 Human acknowledgment is not proof that the requested step succeeded. Assert the
 expected URL or element immediately after every handoff:
