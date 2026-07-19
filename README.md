@@ -40,7 +40,7 @@ session identity, handle human-only steps, and recover from browser failures.
 Install it with the [skills CLI](https://skills.sh):
 
 ```bash
-npx skills add anomalyco/browser-control -g
+npx skills add anomalyco/browser-control --skill browser-control -g
 ```
 
 Choose the agents you use when prompted. The global `-g` installation makes the
@@ -114,6 +114,10 @@ prints a readable session ID with the exact `--session` command needed to
 continue. The relay listens on `127.0.0.1:19989` and stays running between CLI
 calls.
 
+A successful run returns the `Example Domain` title, a generated session ID,
+and a continuation command. `browser-control status` then reports the extension
+as connected.
+
 Check the installation at any time with:
 
 ```bash
@@ -135,6 +139,11 @@ browser-control execute --session docs 'await page.goto("https://example.com/doc
 browser-control execute --session docs 'return { url: page.url(), visits: state.visits }'
 browser-control journal --session docs
 ```
+
+The journal is a best-effort local activity record stored under
+`~/.browser-control/sessions/<id>/journal.jsonl`. It includes bounded script and
+result previews and remains after session deletion. Do not embed passwords,
+tokens, or other credentials directly in execute code.
 
 Single expressions return automatically, so this shorter form also works:
 
@@ -241,10 +250,15 @@ writes WebM or MP4, requires `ffmpeg` on `PATH`, and does not capture audio.
 Browser Control trusts the local agent code it executes. It is a driver, not an
 untrusted-code sandbox.
 
+The extension requires broad browser permissions, including `debugger`, `tabs`,
+`tabCapture`, and access to page content on all URLs. Attaching a user tab gives
+Browser Control access to that tab through your existing browser profile.
+
 The relay blocks destructive browser-wide CDP commands that clear cookies,
 clear cache, or close the browser. It also keeps session-owned tabs private from
 other Browser Control sessions. These guardrails reduce accidents, but scripts
-still have access to the selected page and a limited set of Node.js built-ins.
+still have access to the selected page, its logged-in state, and a limited set
+of Node.js filesystem and network APIs.
 
 Current limitations:
 
@@ -256,6 +270,24 @@ Current limitations:
 - CDP recording requires `ffmpeg`, activates the recorded tab, and has no audio.
 - Browser Control is intended for trusted local use. It does not provide an
   authenticated remote relay.
+
+## Troubleshooting and Upgrades
+
+- **`browser-control: command not found`**: confirm npm's global binary
+  directory is on `PATH`, then rerun the global install.
+- **Extension disconnected**: confirm the unpacked extension is enabled, then
+  reload it from the browser's extensions page. The extension reconnects to a
+  running relay automatically.
+- **After an npm upgrade**: reload the unpacked extension so its browser code
+  matches the newly installed CLI and relay.
+- **Stale relay warning**: run `browser-control doctor`, stop the old relay
+  process it identifies, then rerun a relay-backed command.
+
+For PowerShell, print the unpacked extension path with:
+
+```powershell
+Join-Path (npm root --global) "@opencode-ai/browser-control/extension/dist"
+```
 
 ## Development
 
