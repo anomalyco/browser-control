@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest"
-import { mcpErrorMessage, toolResultForValue } from "../src/mcp.ts"
+import { mcpErrorMessage, mcpToolRequiresRelayCompatibility, toolResultForValue } from "../src/mcp.ts"
 
 describe("MCP tool results", () => {
+  it("rechecks relay compatibility for operational tools", () => {
+    expect(mcpToolRequiresRelayCompatibility("execute")).toBe(true)
+    expect(mcpToolRequiresRelayCompatibility("network_start")).toBe(true)
+    expect(mcpToolRequiresRelayCompatibility("secrets_run")).toBe(true)
+    expect(mcpToolRequiresRelayCompatibility("status")).toBe(false)
+    expect(mcpToolRequiresRelayCompatibility("session_current")).toBe(false)
+    expect(mcpToolRequiresRelayCompatibility("skill")).toBe(false)
+  })
+
   it("marks execute script failures as failed MCP tool calls", () => {
     const result = toolResultForValue({
       text: "locator.click: Timeout 30000ms exceeded",

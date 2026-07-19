@@ -91,8 +91,37 @@ export type ConnectedTargetInfoUpdate =
   | { readonly kind: "root"; readonly target: ConnectedTarget }
   | { readonly kind: "child"; readonly target: ChildTarget }
 
+export type RootTargetChange =
+  | { readonly kind: "added" | "updated"; readonly target: ConnectedTarget }
+  | {
+      readonly kind: "replaced"
+      readonly target: ConnectedTarget
+      readonly previous: ConnectedTarget
+      readonly childSessionIds: readonly string[]
+    }
+
 export function shouldExposeChildTarget(target: ChildTarget): boolean {
   return target.targetInfo.type !== "page" || target.targetInfo.url !== ""
+}
+
+export function resolveTargetInfoTarget(options: {
+  readonly registry: TargetRegistry
+  readonly targetId?: string
+  readonly sessionId?: string
+  readonly aliasedTargetId?: string
+  readonly fallback?: () => ConnectedTarget | undefined
+}): ConnectedTarget | ChildTarget | undefined {
+  const explicit = Boolean(options.targetId || options.sessionId || options.aliasedTargetId)
+  return (options.targetId
+    ? options.registry.targetsByTargetId.get(options.targetId) ?? options.registry.childTargetsByTargetId.get(options.targetId)
+    : undefined) ??
+    (options.aliasedTargetId
+      ? options.registry.targetsByTargetId.get(options.aliasedTargetId) ?? options.registry.childTargetsByTargetId.get(options.aliasedTargetId)
+      : undefined) ??
+    (options.sessionId
+      ? options.registry.targets.get(options.sessionId) ?? options.registry.childTargets.get(options.sessionId)
+      : undefined) ??
+    (explicit ? undefined : options.fallback?.())
 }
 
 export class TargetRegistry {
@@ -103,6 +132,8 @@ export class TargetRegistry {
   readonly childTargets = new Map<string, ChildTarget>()
   readonly childTargetsByTargetId = new Map<string, ChildTarget>()
   readonly tabFrameEvents = new Map<number, Map<string, StoredFrameEvents>>()
+  private readonly pendingOwnershipReservations = new Map<string, TargetOwnershipReservation>()
+  private readonly stagedRootTargets = new Map<number, ConnectedTarget>()
 
   clear(): void {
     this.targets.clear()
@@ -112,22 +143,93 @@ export class TargetRegistry {
     this.childTargets.clear()
     this.childTargetsByTargetId.clear()
     this.tabFrameEvents.clear()
+    this.pendingOwnershipReservations.clear()
+    this.stagedRootTargets.clear()
   }
 
-  addRootTarget(target: ConnectedTarget): void {
+  addRootTarget(target: ConnectedTarget, options: {
+    readonly preserveChildParentSessionId?: string
+    readonly preserveFrameEvents?: boolean
+  } = {}): RootTargetChange {
     const existingForTab = this.tabTargets.get(target.tabId)
-    if (existingForTab) {
+    const generationChanged = existingForTab !== undefined && (
+      existingForTab.sessionId !== target.sessionId ||
+      existingForTab.targetInfo.targetId !== target.targetInfo.targetId
+    )
+    const pendingReservation = existingForTab
+      ? this.pendingOwnershipReservations.get(existingForTab.targetInfo.targetId)
+      : undefined
+    const inheritedBrowserControlSessionId = pendingReservation
+      ? pendingReservation.previousBrowserControlSessionId
+      : existingForTab?.browserControlSessionId
+    const { browserControlSessionId: _incomingOwner, ...targetWithoutOwner } = target
+    const nextTarget = generationChanged
+      ? {
+          ...targetWithoutOwner,
+          owner: existingForTab.owner,
+          ...(inheritedBrowserControlSessionId
+            ? { browserControlSessionId: inheritedBrowserControlSessionId }
+            : {}),
+        }
+      : target
+    const detached = generationChanged
+      ? this.detachRootTargetState(target.tabId, options)
+      : undefined
+    const childSessionIds = detached?.childSessionIds ?? []
+    if (existingForTab && !generationChanged) {
       this.targets.delete(existingForTab.sessionId)
       this.targetsByTargetId.delete(existingForTab.targetInfo.targetId)
     }
-    const existingForTargetId = this.targetsByTargetId.get(target.targetInfo.targetId)
+    const existingForTargetId = this.targetsByTargetId.get(nextTarget.targetInfo.targetId)
     if (existingForTargetId) {
       this.targets.delete(existingForTargetId.sessionId)
       this.tabTargets.delete(existingForTargetId.tabId)
     }
-    this.targets.set(target.sessionId, target)
-    this.tabTargets.set(target.tabId, target)
-    this.targetsByTargetId.set(target.targetInfo.targetId, target)
+    this.targets.set(nextTarget.sessionId, nextTarget)
+    this.tabTargets.set(nextTarget.tabId, nextTarget)
+    this.targetsByTargetId.set(nextTarget.targetInfo.targetId, nextTarget)
+    return generationChanged
+      ? { kind: "replaced", target: nextTarget, previous: existingForTab, childSessionIds }
+      : { kind: existingForTab ? "updated" : "added", target: nextTarget }
+  }
+
+  stageRootTarget(target: ConnectedTarget): ConnectedTarget {
+    const existing = this.tabTargets.get(target.tabId)
+    const pendingReservation = existing
+      ? this.pendingOwnershipReservations.get(existing.targetInfo.targetId)
+      : undefined
+    const inheritedBrowserControlSessionId = pendingReservation
+      ? pendingReservation.previousBrowserControlSessionId
+      : existing?.browserControlSessionId
+    const { browserControlSessionId: _incomingOwner, ...targetWithoutOwner } = target
+    const staged = existing
+      ? {
+          ...targetWithoutOwner,
+          owner: existing.owner,
+          ...(inheritedBrowserControlSessionId ? { browserControlSessionId: inheritedBrowserControlSessionId } : {}),
+        }
+      : target
+    this.stagedRootTargets.set(target.tabId, staged)
+    this.tabFrameEvents.delete(target.tabId)
+    return staged
+  }
+
+  stagedRootTarget(tabId: number): ConnectedTarget | undefined {
+    return this.stagedRootTargets.get(tabId)
+  }
+
+  routingRootTarget(tabId: number): ConnectedTarget | undefined {
+    return this.stagedRootTargets.get(tabId) ?? this.tabTargets.get(tabId)
+  }
+
+  commitStagedRootTarget(tabId: number, sessionId: string): RootTargetChange | undefined {
+    const staged = this.stagedRootTargets.get(tabId)
+    if (!staged || staged.sessionId !== sessionId) return undefined
+    this.stagedRootTargets.delete(tabId)
+    return this.addRootTarget(staged, {
+      preserveChildParentSessionId: staged.sessionId,
+      preserveFrameEvents: true,
+    })
   }
 
   addChildTarget(target: ChildTarget): void {
@@ -173,16 +275,19 @@ export class TargetRegistry {
       throw targetOwnedError(owner)
     }
     this.addRootTarget({ ...target, browserControlSessionId: sessionId })
-    return {
+    const reservation = {
       targetId,
       targetSessionId: target.sessionId,
       tabId: target.tabId,
       sessionId,
       ...(owner ? { previousBrowserControlSessionId: owner } : {}),
     }
+    this.pendingOwnershipReservations.set(targetId, reservation)
+    return reservation
   }
 
   rollbackTargetOwnership(reservation: TargetOwnershipReservation): TargetOwnershipChange {
+    this.pendingOwnershipReservations.delete(reservation.targetId)
     const target = this.targetsByTargetId.get(reservation.targetId)
     if (!target || target.sessionId !== reservation.targetSessionId || target.browserControlSessionId !== reservation.sessionId) {
       return emptyOwnershipChange
@@ -198,6 +303,7 @@ export class TargetRegistry {
     readonly reservation: TargetOwnershipReservation
     readonly previousAdoptedTargetId?: string
   }): TargetOwnershipChange {
+    this.pendingOwnershipReservations.delete(options.reservation.targetId)
     const target = this.targetsByTargetId.get(options.reservation.targetId)
     if (!target || target.sessionId !== options.reservation.targetSessionId || target.browserControlSessionId !== options.reservation.sessionId) {
       throw new TargetOwnershipError({
@@ -225,7 +331,11 @@ export class TargetRegistry {
     return ownershipChange(target.targetInfo.targetId, target.tabId)
   }
 
-  detachRootTargetState(tabId: number): { readonly target: ConnectedTarget; readonly childSessionIds: string[] } | undefined {
+  detachRootTargetState(tabId: number, options: {
+    readonly preserveChildParentSessionId?: string
+    readonly preserveFrameEvents?: boolean
+  } = {}): { readonly target: ConnectedTarget; readonly childSessionIds: string[] } | undefined {
+    this.stagedRootTargets.delete(tabId)
     const target = this.tabTargets.get(tabId)
     if (!target) {
       return undefined
@@ -233,10 +343,14 @@ export class TargetRegistry {
     this.targets.delete(target.sessionId)
     this.tabTargets.delete(tabId)
     this.targetsByTargetId.delete(target.targetInfo.targetId)
-    this.tabFrameEvents.delete(tabId)
+    this.pendingOwnershipReservations.delete(target.targetInfo.targetId)
+    if (!options.preserveFrameEvents) this.tabFrameEvents.delete(tabId)
     const childSessionIds = Array.from(this.childSessionTabs.entries())
       .filter(([, childTabId]) => {
         return childTabId === tabId
+      })
+      .filter(([sessionId]) => {
+        return this.childTargets.get(sessionId)?.parentSessionId !== options.preserveChildParentSessionId
       })
       .map(([sessionId]) => {
         this.detachChildTargetState(sessionId)
@@ -256,6 +370,11 @@ export class TargetRegistry {
   }
 
   updateTargetUrl(tabId: number, url: string): void {
+    const staged = this.stagedRootTargets.get(tabId)
+    if (staged) {
+      this.stagedRootTargets.set(tabId, { ...staged, targetInfo: { ...staged.targetInfo, title: url, url }, crashed: false })
+      return
+    }
     const target = this.tabTargets.get(tabId)
     if (!target) {
       return
@@ -264,6 +383,12 @@ export class TargetRegistry {
   }
 
   markRootTargetCrashed(tabId: number): ConnectedTarget | undefined {
+    const staged = this.stagedRootTargets.get(tabId)
+    if (staged) {
+      const crashed = { ...staged, crashed: true }
+      this.stagedRootTargets.set(tabId, crashed)
+      return crashed
+    }
     const target = this.tabTargets.get(tabId)
     if (!target) {
       return undefined
@@ -279,7 +404,7 @@ export class TargetRegistry {
       const target = this.childTargetsByTargetId.get(options.targetInfo.targetId)
       return target ? { kind: "child", target } : undefined
     }
-    const root = this.tabTargets.get(options.tabId)
+    const root = this.stagedRootTargets.get(options.tabId) ?? this.tabTargets.get(options.tabId)
     if (root?.targetInfo.targetId !== options.targetInfo.targetId) {
       return undefined
     }
@@ -289,6 +414,11 @@ export class TargetRegistry {
   }
 
   updateRootTargetInfo(tabId: number, targetInfo: TargetInfo): void {
+    const staged = this.stagedRootTargets.get(tabId)
+    if (staged?.targetInfo.targetId === targetInfo.targetId) {
+      this.stagedRootTargets.set(tabId, { ...staged, targetInfo })
+      return
+    }
     const target = this.tabTargets.get(tabId)
     if (!target) {
       return

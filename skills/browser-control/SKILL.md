@@ -614,6 +614,12 @@ language changes, update `CONTEXT.md` too.
   tabs after reconnecting, so the relay rebuilds its target registry without
   re-clicking the toolbar. If `activeTargets` stays 0 with an older shim,
   reload the unpacked extension and re-attach.
+- Stale relay build: operational CLI and MCP calls reject the relay before
+  invoking a route. `status` and `doctor` remain observational. Source runs use
+  a content fingerprint, so rebuilds and worktrees cannot silently share
+  incompatible relay code. Bounded process-fault diagnostics for managed relays
+  are retained in `~/.browser-control/relay.log`; `/version` reports the relay
+  instance id, start time, and PID.
 - All tabs suddenly detached (`activeTargets: 0`) while the browser looks fine:
   the user probably dismissed the "is being debugged" banner, which detaches
   chrome.debugger from every tab at once. Re-attach via the toolbar (or
@@ -655,9 +661,11 @@ language changes, update `CONTEXT.md` too.
   Browser Control should replay stored child target attaches and current child
   frame navigation for the current OOPIF canary.
 - Repeated `Execution context was destroyed` failures: run one short follow-up
-  execute so Browser Control can health-check the default page. A relay-owned
-  page is recreated automatically; reset or re-adopt an unhealthy user-owned
-  tab because Browser Control will not replace it. If failures continue,
+  execute so Browser Control can wait through transient context replacement and
+  health-check the default page. Same-tab root replacements preserve ownership,
+  handoffs, and the exact target id. A genuinely unhealthy relay-owned page is
+  recreated automatically; reset or re-adopt an unhealthy user-owned tab
+  because Browser Control will not replace it. If failures continue,
   restart the relay with `BROWSER_CONTROL_DEBUG=1` before reproducing. `[bc:ctx]`
   lines contain bounded metadata only: target/context IDs, ownership, loader changes, URL origin/shape
   plus fingerprint, reset outcomes, and evaluate shape/failure class. They never

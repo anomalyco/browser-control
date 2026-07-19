@@ -18,14 +18,16 @@ import type { HandoffOutcome } from "./handoff.ts"
 import * as AuthProfile from "./auth-profile.ts"
 import * as NetworkCapture from "./network-capture.ts"
 import type { ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary, ExecuteMedia } from "./relay-schema.ts"
-import { executionContextFailureDiagnostic } from "./runtime-diagnostics.ts"
+import { executionContextFailureDiagnostic, runtimeFailureKind } from "./runtime-diagnostics.ts"
 
 const nodeModules = { fs, path, os, crypto, url, util, events, stream, buffer, http, https, zlib }
 const nodeModuleAliases = Object.keys(nodeModules).join(", ")
 
 const playwrightCloseTimeoutMs = 2_000
 const playwrightConnectTimeoutMs = 15_000
-const sessionPageHealthCheckTimeoutMs = 1_000
+const sessionPageHealthCheckTimeoutMs = 3_000
+const sessionPageHealthRetryDelayMs = 100
+const timedOut = Symbol("timed-out")
 export const downloadCapabilityErrorMessage = "Downloads are unavailable in Browser Control extension-backed tabs: Chromium blocks Browser.setDownloadBehavior and Page.setDownloadBehavior through chrome.debugger, so Playwright cannot retain an artifact for download.saveAs(). Fetch the response in the page and write the returned bytes with fs when the site exposes them."
 const downloadGuardedPages = new WeakSet<Page>()
 const downloadGuardedContexts = new WeakSet<BrowserContext>()
@@ -44,7 +46,7 @@ export class SessionPageRecoveryError extends Schema.TaggedErrorClass<SessionPag
   "Execute.SessionPageRecoveryError",
   {
     message: Schema.String,
-    reason: Schema.Literals(["adopted-unresponsive", "close-failed"]),
+    reason: Schema.Literals(["adopted-unresponsive", "close-failed", "target-unavailable"]),
     cause: Schema.Defect(),
   },
 ) {}
@@ -101,21 +103,16 @@ export const recoverSessionPage = Effect.fn("Execute.recoverSessionPage")(functi
   readonly healthCheck: () => Promise<void>
   readonly close: () => Promise<void>
 }) {
-  let healthFailure: Error | undefined
-  if (!options.url.startsWith("chrome-error://")) {
-    healthFailure = yield* runPlaywrightOperation({
-      label: "Session page health check",
-      timeoutMs: options.timeoutMs,
-      run: options.healthCheck,
-    }).pipe(
-      Effect.match({
-        onFailure: (error) => error,
-        onSuccess: () => undefined,
-      }),
-    )
-  } else {
-    healthFailure = new Error(`Session page is showing ${options.url}`)
-  }
+  const healthFailure = yield* runPlaywrightOperation({
+    label: "Session page health check",
+    timeoutMs: options.timeoutMs,
+    run: options.healthCheck,
+  }).pipe(
+    Effect.match({
+      onFailure: (error) => error,
+      onSuccess: () => undefined,
+    }),
+  )
   if (!healthFailure) {
     return "use" as const
   }
@@ -145,6 +142,53 @@ export const recoverSessionPage = Effect.fn("Execute.recoverSessionPage")(functi
   }
   return "recreate" as const
 })
+
+export async function waitForPageContext(options: {
+  readonly evaluate: () => Promise<void>
+  readonly timeoutMs: number
+  readonly retryDelayMs?: number
+  readonly delay?: (milliseconds: number) => Promise<void>
+}): Promise<void> {
+  const retryDelayMs = options.retryDelayMs ?? sessionPageHealthRetryDelayMs
+  const deadline = Date.now() + options.timeoutMs
+  let lastError: unknown
+  while (true) {
+    const remainingMs = deadline - Date.now()
+    if (remainingMs <= 0) break
+    try {
+      const result = await withTimeout(options.evaluate(), remainingMs)
+      if (result === timedOut) break
+      return
+    } catch (error) {
+      lastError = error
+      const kind = runtimeFailureKind(error)
+      if (kind !== "context-destroyed" && kind !== "context-missing") throw error
+      const retryInMs = Math.min(retryDelayMs, Math.max(0, deadline - Date.now()))
+      if (retryInMs > 0) await (options.delay ?? delay)(retryInMs)
+    }
+  }
+  throw lastError ?? new Error(`Execution context did not become available within ${options.timeoutMs}ms`)
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | typeof timedOut> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => resolve(timedOut), timeoutMs)
+    promise.then(
+      (value) => {
+        clearTimeout(timeout)
+        resolve(value)
+      },
+      (error: unknown) => {
+        clearTimeout(timeout)
+        reject(error)
+      },
+    )
+  })
+}
 
 type SandboxGlobals = {
   readonly browser: Browser
@@ -313,6 +357,7 @@ export type AdoptTarget = {
 export const defaultPageClosedWarning = "The session default page was closed; created a new page. References to the old page in state are stale."
 export const defaultPageRecoveredWarning = "The session default page was unresponsive; created a new page. References to the old page in state are stale."
 export const defaultPageCrashedWarning = "The session default page target crashed; checking it before the next execute."
+export const defaultPageReplacedWarning = "The session default page target was replaced; rebound to the same browser tab. References to the old page in state are stale."
 
 export const shouldCloseCurrentPageOnAdopt = (options: {
   readonly hasCurrentPage: boolean
@@ -367,6 +412,7 @@ export class ExecuteSandbox {
   private defaultPageTargetId: string | undefined
   private ownsPage = false
   private pageHealthCheckRequired = false
+  private pendingPageTarget: { readonly targetId: string; readonly warnReplaced: boolean } | undefined
   private readonly state: Record<string, unknown> = {}
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private readonly networkCapture = new NetworkCapture.Recorder()
@@ -489,6 +535,7 @@ export class ExecuteSandbox {
       sandbox.defaultPageTargetId = undefined
       sandbox.ownsPage = false
       sandbox.pageHealthCheckRequired = false
+      sandbox.pendingPageTarget = undefined
       yield* sandbox.networkCapture.cancel()
 
       if (ownsOpenPage) {
@@ -519,6 +566,7 @@ export class ExecuteSandbox {
       sandbox.defaultPageTargetId = undefined
       sandbox.ownsPage = false
       sandbox.pageHealthCheckRequired = false
+      sandbox.pendingPageTarget = undefined
       yield* sandbox.networkCapture.cancel()
 
       if (ownsOpenPage) {
@@ -559,6 +607,7 @@ export class ExecuteSandbox {
         sandbox.defaultPageTargetId = undefined
         sandbox.ownsPage = false
         sandbox.pageHealthCheckRequired = false
+        sandbox.pendingPageTarget = undefined
         sandbox.networkCapture.bindPage(undefined)
       }
       const browser = sandbox.browser
@@ -570,8 +619,8 @@ export class ExecuteSandbox {
         label: "Create a browser context for session adoption",
         run: () => browser.newContext(),
       }))
-      const selected = yield* Effect.try({
-        try: () => selectPageForAdopt({ pages: context.pages(), target }),
+      const selected = yield* Effect.tryPromise({
+        try: () => waitForPageTarget({ context, targetId: target.targetId, timeoutMs: sessionPageHealthCheckTimeoutMs }),
         catch: (cause) => cause instanceof Error ? cause : new Error("Select page for session adoption", { cause }),
       })
       if (!selected) {
@@ -593,6 +642,7 @@ export class ExecuteSandbox {
       sandbox.defaultPageTargetId = target.targetId
       sandbox.ownsPage = false
       sandbox.pageHealthCheckRequired = false
+      sandbox.pendingPageTarget = undefined
       sandbox.networkCapture.bindPage(selected)
       return selected.url()
     })
@@ -614,8 +664,9 @@ export class ExecuteSandbox {
         ...(this.options.sessionId ? { headers: { "Browser-Control-Session-Id": this.options.sessionId } } : {}),
       })
       this.page = undefined
-      this.defaultPageTargetId = undefined
-      this.ownsPage = false
+      if (this.defaultPageTargetId) {
+        this.pendingPageTarget = { targetId: this.defaultPageTargetId, warnReplaced: false }
+      }
       this.pageHealthCheckRequired = false
       this.networkCapture.bindPage(undefined)
       if (hadBrowser) {
@@ -711,10 +762,21 @@ export class ExecuteSandbox {
     this.defaultPageTargetId = undefined
     this.ownsPage = false
     this.pageHealthCheckRequired = false
+    this.pendingPageTarget = undefined
     this.networkCapture.bindPage(undefined)
     if (!this.pendingWarnings.includes(defaultPageClosedWarning)) {
       this.pendingWarnings.push(defaultPageClosedWarning)
     }
+    return true
+  }
+
+  markTargetReplaced(previousTargetId: string, targetId: string): boolean {
+    if (this.defaultPageTargetId !== previousTargetId) return false
+    this.page = undefined
+    this.defaultPageTargetId = targetId
+    this.pageHealthCheckRequired = false
+    this.pendingPageTarget = { targetId, warnReplaced: true }
+    this.networkCapture.bindPage(undefined)
     return true
   }
 
@@ -788,6 +850,22 @@ export class ExecuteSandbox {
       }
       return selected
     }
+    if (this.pendingPageTarget) {
+      const pendingTarget = this.pendingPageTarget
+      const targetId = pendingTarget.targetId
+      const replacement = await waitForPageTarget({ context, targetId, timeoutMs: sessionPageHealthCheckTimeoutMs })
+      if (!replacement) {
+        throw new SessionPageRecoveryError({
+          message: `Playwright did not expose session page target ${targetId} after the browser connection or target changed. Retry after the browser transition settles.`,
+          reason: "target-unavailable",
+          cause: new Error(`Session page target unavailable: ${targetId}`),
+        })
+      }
+      this.page = replacement
+      this.pendingPageTarget = undefined
+      if (pendingTarget.warnReplaced) this.pendingWarnings.push(defaultPageReplacedWarning)
+      return replacement
+    }
     if (this.page && !this.page.isClosed()) {
       if (this.pageHealthCheckRequired || this.page.url().startsWith("chrome-error://")) {
         const page = this.page
@@ -795,9 +873,12 @@ export class ExecuteSandbox {
           ownsPage: this.ownsPage,
           url: page.url(),
           timeoutMs: sessionPageHealthCheckTimeoutMs,
-          healthCheck: async () => {
-            await page.evaluate(() => true)
-          },
+          healthCheck: () => waitForPageContext({
+            timeoutMs: sessionPageHealthCheckTimeoutMs,
+            evaluate: async () => {
+              await page.evaluate(() => true)
+            },
+          }),
           close: () => page.close(),
         }))
         if (recovery === "use") {
@@ -821,6 +902,57 @@ export class ExecuteSandbox {
     this.defaultPageTargetId = await resolvePageTargetId(this.page)
     this.ownsPage = true
     return this.page
+  }
+}
+
+async function waitForPageTarget(options: {
+  readonly context: BrowserContext
+  readonly targetId: string
+  readonly timeoutMs: number
+}): Promise<Page | undefined> {
+  return await waitForExactTarget({
+    targetId: options.targetId,
+    timeoutMs: options.timeoutMs,
+    candidates: () => options.context.pages(),
+    getTargetId: resolvePageTargetId,
+  })
+}
+
+export async function waitForExactTarget<T>(options: {
+  readonly targetId: string
+  readonly timeoutMs: number
+  readonly candidates: () => readonly T[]
+  readonly getTargetId: (candidate: T) => Promise<string | undefined>
+  readonly delay?: (milliseconds: number) => Promise<void>
+}): Promise<T | undefined> {
+  const deadline = Date.now() + options.timeoutMs
+  const cachedTargetIds = new Map<T, string | undefined>()
+  const inFlightTargetIds = new Map<T, Promise<{ readonly candidate: T; readonly targetId: string | undefined }>>()
+  while (true) {
+    const remainingMs = deadline - Date.now()
+    if (remainingMs <= 0) return undefined
+    const candidates = options.candidates()
+    for (const candidate of candidates) {
+      const cached = cachedTargetIds.get(candidate)
+      if (cached === options.targetId) return candidate
+      if (cached !== undefined || inFlightTargetIds.has(candidate)) continue
+      inFlightTargetIds.set(candidate, options.getTargetId(candidate).then(
+        (targetId) => ({ candidate, targetId }),
+        () => ({ candidate, targetId: undefined }),
+      ))
+    }
+    const retryInMs = Math.min(sessionPageHealthRetryDelayMs, Math.max(0, deadline - Date.now()))
+    if (retryInMs <= 0) return undefined
+    if (inFlightTargetIds.size > 0) {
+      const resolved = await withTimeout(Promise.race(inFlightTargetIds.values()), retryInMs)
+      if (resolved !== timedOut) {
+        inFlightTargetIds.delete(resolved.candidate)
+        if (resolved.targetId !== undefined) cachedTargetIds.set(resolved.candidate, resolved.targetId)
+        if (resolved.targetId === options.targetId) return resolved.candidate
+      }
+      continue
+    }
+    await (options.delay ?? delay)(retryInMs)
   }
 }
 
@@ -912,18 +1044,6 @@ function selectPage({ pages, selection }: { readonly pages: readonly Page[]; rea
   return selectTarget({ targets: pages, selection, getUrl: (page) => page.url() })
 }
 
-export function selectTargetById<T>({
-  targets,
-  targetId,
-  getTargetId,
-}: {
-  readonly targets: readonly T[]
-  readonly targetId: string
-  readonly getTargetId: (target: T) => string | undefined
-}): T | undefined {
-  return targets.find((target) => getTargetId(target) === targetId)
-}
-
 async function resolvePageTargetId(page: Page): Promise<string | undefined> {
   return await Effect.runPromise(
     runPlaywrightOperation({
@@ -954,30 +1074,6 @@ export async function pageTargetId(page: Page): Promise<string> {
   } finally {
     await session.detach()
   }
-}
-
-export function selectAdoptCandidateByUrl<T>({
-  candidates,
-  targetUrl,
-  getUrl,
-}: {
-  readonly candidates: readonly T[]
-  readonly targetUrl: string
-  readonly getUrl: (candidate: T) => string
-}): T | undefined {
-  const matches = candidates.filter((candidate) => getUrl(candidate) === targetUrl)
-  if (matches.length > 1) {
-    throw new Error(`Multiple Playwright pages have URL ${targetUrl}; cannot safely map the validated target to a page without a relay target-id hook`)
-  }
-  return matches[0]
-}
-
-function selectPageForAdopt({ pages, target }: { readonly pages: readonly Page[]; readonly target: AdoptTarget }): Page | undefined {
-  return selectAdoptCandidateByUrl({
-    candidates: pages.filter((page) => !page.isClosed()),
-    targetUrl: target.url,
-    getUrl: (page) => page.url(),
-  })
 }
 
 function ghostCursorOptions(options: ShowGhostCursorOptions | undefined): GhostCursorClientOptions | undefined {
@@ -1251,7 +1347,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         for (const attribute of ["data-testid", "data-test", "name", "aria-label", "placeholder"]) {
           const value = element.getAttribute(attribute)
           if (value) {
-            const candidate = `[${attribute}="${quote(value)}"]`
+            const candidate = `[${attribute}="${CSS.escape(value)}"]`
             if (document.querySelectorAll(candidate).length === 1) return candidate
           }
         }
@@ -1771,7 +1867,7 @@ async function showScreenshotLabels(page: Page): Promise<readonly ScreenshotLabe
     }
 
     const quoteAttribute = (value: string): string => {
-      return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
+      return CSS.escape(value)
     }
 
     const selectorForElement = (element: Element): string => {

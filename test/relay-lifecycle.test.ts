@@ -9,6 +9,7 @@ import {
   statusCollections,
   stoppedRelayStatus,
 } from "../src/relay-lifecycle.ts"
+import { sourceBuildIdForFiles } from "../src/version.ts"
 
 const version = { version: "0.1.0", buildId: "build-current" }
 
@@ -110,12 +111,24 @@ describe("relay lifecycle", () => {
       targets: [],
     })).toEqual({ sessions: [], targets: [] })
     expect(relayBuildProblem(version, "build-current")).toBeUndefined()
-    expect(relayBuildProblem({ ...version, buildId: "build-old" }, "dev")).toBeUndefined()
+    expect(relayBuildProblem({ ...version, buildId: "build-old" }, "dev")).toContain("does not match CLI build")
   })
 
   it("starts a managed relay through the CLI entrypoint from MCP builds and source", () => {
     expect(managedRelayEntrypoint("/package/dist/mcp.js")).toBe("/package/dist/cli.js")
     expect(managedRelayEntrypoint("/package/src/mcp-main.ts")).toBe("/package/src/cli.ts")
     expect(managedRelayEntrypoint("/package/dist/cli.js")).toBe("/package/dist/cli.js")
+  })
+
+  it("gives source processes a deterministic content-sensitive build id", () => {
+    const files = [
+      { name: "src/relay.ts", content: "relay" },
+      { name: "src/cli.ts", content: "cli" },
+    ]
+    expect(sourceBuildIdForFiles(files)).toBe(sourceBuildIdForFiles([...files].reverse()))
+    expect(sourceBuildIdForFiles(files)).not.toBe(sourceBuildIdForFiles([
+      files[0]!,
+      { name: "src/cli.ts", content: "changed" },
+    ]))
   })
 })

@@ -156,6 +156,17 @@ export class BrowserControlSessions {
     return affectedSessionIds
   }
 
+  markTargetReplaced(previousTargetId: string, targetId: string): string[] {
+    const affected: string[] = []
+    for (const session of this.sessions.values()) {
+      if (session.adoptedTargetId === previousTargetId) session.adoptedTargetId = targetId
+      if (session.sandbox.markTargetReplaced(previousTargetId, targetId)) {
+        affected.push(session.id)
+      }
+    }
+    return affected
+  }
+
   delete(id: string): Effect.Effect<boolean, Error> {
     const manager = this
     return Effect.gen(function* () {
@@ -389,7 +400,6 @@ export class BrowserControlSessions {
             }
             return yield* Effect.fail(timeoutError)
           }
-          const previousAdoptedTargetId = session.adoptedTargetId
           reservation = yield* Effect.try({
             try: () => manager.targetOwnership.reserveTargetOwnership(options.targetId, session.id),
             catch: (cause) => cause instanceof Error ? cause : new Error("Reserve target ownership", { cause }),
@@ -405,6 +415,7 @@ export class BrowserControlSessions {
           return yield* Effect.try({
             try: () => {
               state = "committed"
+              const previousAdoptedTargetId = session.adoptedTargetId
               manager.notifyTargetOwnershipChange(manager.targetOwnership.commitTargetOwnership({
                 reservation: activeReservation,
                 ...(previousAdoptedTargetId ? { previousAdoptedTargetId } : {}),

@@ -84,6 +84,10 @@ local Node relay.
   state keeps only the adopted default-page pointer. Adoption reserves,
   commits, or rolls back registry ownership transactionally and reconciles CDP
   visibility, grouping, and page status for every changed target.
+- Same-tab root target generations are explicit replacements, never map
+  overwrites. Preserve committed ownership, roll back provisional adoption
+  ownership, detach the old generation before announcing the new one, rebind
+  pending handoffs, and make the owning sandbox reacquire the exact new target.
 - Adopted targets are exclusive to one Browser Control session. Serialize
   adopts, reject competing owners, and release ownership on detach, reset, or
   delete. If adoption times out, roll back visibility immediately but retain
@@ -135,9 +139,14 @@ local Node relay.
 - Session delete/reset must acquire the session's execute permit before closing
   the sandbox, so running scripts are never yanked mid-flight.
 - The version string and build id are injected by `scripts/build-cli.ts`
-  (`src/version.ts`, `0.0.0-dev` / `dev` when running from source). The relay
+  (`src/version.ts`; source runs use `0.0.0-dev` and a deterministic source
+  and dependency-lock fingerprint). The relay
   reports both so `doctor` can detect a long-running relay left stale by a CLI
   rebuild; never hardcode version literals.
+- Relay version metadata includes an instance id, start time, and PID. Bounded
+  managed-relay process-fault diagnostics are retained with mode `0600` in
+  `~/.browser-control/relay.log` so same-build restarts and session loss are
+  diagnosable instead of appearing as eviction.
 - `dist/mcp.js` self-runs via the dedicated `src/mcp-main.ts` entrypoint. Do not
   add `process.argv[1] === import.meta.url` self-run guards to modules that get
   bundled into `dist/cli.js`; esbuild inlining makes the guard fire inside the

@@ -47,6 +47,13 @@ The exclusive Browser Control session assignment stored by the Target Registry
 for a root target. It governs CDP visibility, grouping, and page status.
 _Avoid_: Adopted-page pointer, current session
 
+**Root Target Generation**:
+One CDP target/session identity for a physical attached tab. Chrome may replace
+that identity while preserving the tab; Browser Control transfers committed
+ownership, handoffs, and the default-page pointer to the new generation only
+after its CDP setup succeeds.
+_Avoid_: New tab, navigation, detach
+
 **Adoption Transaction**:
 The serialized reserve, Playwright page resolution, commit-or-rollback, and
 visibility reconciliation that makes an attached tab a session's default page.
@@ -108,6 +115,8 @@ _Avoid_: Token value, hardcoded credential
 - A **User Browser** contains zero or more **Attached Tabs**.
 - Unowned members of the **Attached-Tab Pool** are shared across sessions.
 - **Target Ownership** scopes a target to exactly one session.
+- A replacement **Root Target Generation** preserves the physical tab and its
+  committed **Target Ownership**.
 - An **Adoption Transaction** changes **Target Ownership** and the session's
   default-page pointer together.
 - A **Toolbar Control** attaches or detaches the active tab.

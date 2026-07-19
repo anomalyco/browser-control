@@ -37,6 +37,7 @@ describe("HTTP request schemas", () => {
     const sessions = new BrowserControlSessions(`http://127.0.0.1:${port}`, undefined, undefined, registry)
     sessions.createNew("beta")
     handler = createHttpRequestHandler({
+      relayInstance: { id: "relay-test", startedAt: "2026-07-19T00:00:00.000Z", pid: 123 },
       host: "127.0.0.1",
       port,
       browserId: "test-browser",
@@ -51,6 +52,12 @@ describe("HTTP request schemas", () => {
     })
 
     try {
+      const version = await fetch(`http://127.0.0.1:${port}/version`).then((response) => response.json())
+      expect(version).toMatchObject({
+        instanceId: "relay-test",
+        startedAt: "2026-07-19T00:00:00.000Z",
+        pid: 123,
+      })
       await expect(postJson(port, "/cli/session/new", { id: "alpha", readOnly: "yes" })).resolves.toMatchObject({
         status: 400,
         body: { error: expect.stringContaining("Invalid session new request"), code: "invalid-request" },

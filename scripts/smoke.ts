@@ -11,6 +11,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import util from "node:util"
 import { getObject } from "../src/relay-helpers.ts"
+import { browserControlBuildId } from "../src/version.ts"
 
 const endpointUrl = process.env.BROWSER_CONTROL_ENDPOINT ?? "http://127.0.0.1:19989"
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
@@ -743,6 +744,19 @@ return { driftedCount }
         if (!actionOutput.includes("continued: true")) {
           return yield* Effect.fail(new Error(`snapshot ref did not resolve across execute calls: ${actionOutput}`))
         }
+        const escapedAttributeOutput = yield* runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          `
+await page.setContent('<main><button aria-label="First line&#10;Second &quot;line&quot; &#92; [draft]">Fallback</button></main>')
+const captured = await snapshot()
+return { captured, count: await ref('e1').count() }
+          `,
+        ])
+        if (!escapedAttributeOutput.includes("count: 1")) {
+          return yield* Effect.fail(new Error(`snapshot ref did not escape multiline attribute values: ${escapedAttributeOutput}`))
+        }
         const denseOutput = yield* runBrowserControl([
           "execute",
           "--session",
@@ -1374,6 +1388,7 @@ const main = Effect.fn("Smoke.main")(function* () {
   }
 
   yield* Console.log(`browser-control smoke: ${selectedCases.map((testCase) => testCase.name).join(", ")} x${repeatCount}`)
+  yield* assertCompatibleRelay()
   yield* waitForExtensionConnected()
   const before = yield* fetchStatus()
   yield* Console.log(`extension status: ${formatValue(before)}`)
@@ -2070,6 +2085,24 @@ const fetchStatus = Effect.fnUntraced(function* () {
     try: async () => parseExtensionStatus(await response.json()),
     catch: (cause) => new Error("parse extension status", { cause }),
   })
+})
+
+const assertCompatibleRelay = Effect.fnUntraced(function* () {
+  const response = yield* Effect.tryPromise({
+    try: () => fetch(new URL("/version", endpointUrl)),
+    catch: (cause) => new Error("fetch relay version", { cause }),
+  })
+  const version = yield* Effect.tryPromise({
+    try: () => response.json() as Promise<unknown>,
+    catch: (cause) => new Error("parse relay version", { cause }),
+  })
+  const object = getObject(version)
+  const buildId = typeof object?.buildId === "string" ? object.buildId : undefined
+  if (buildId !== browserControlBuildId) {
+    return yield* Effect.fail(new Error(
+      `Smoke relay build ${buildId ?? "unknown"} does not match source build ${browserControlBuildId}; restart the relay before running smoke.`,
+    ))
+  }
 })
 
 const waitForRelayCleanup = Effect.fnUntraced(function* (baseline: ExtensionStatus) {

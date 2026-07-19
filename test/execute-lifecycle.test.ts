@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { Effect } from "effect"
-import { recoverSessionPage, runPlaywrightOperation } from "../src/execute.ts"
+import { recoverSessionPage, runPlaywrightOperation, waitForPageContext } from "../src/execute.ts"
 
 describe("execute lifecycle", () => {
   it("bounds a Playwright operation that never settles", async () => {
@@ -13,13 +13,30 @@ describe("execute lifecycle", () => {
     expect(error.message).toBe("Close test page timed out after 20ms")
   })
 
-  it("recreates an unhealthy relay-owned page", async () => {
+  it("keeps a navigable relay-owned error document", async () => {
     let closed = false
     const result = await Effect.runPromise(recoverSessionPage({
       ownsPage: true,
       url: "chrome-error://chromewebdata/",
       timeoutMs: 20,
       healthCheck: () => Promise.resolve(),
+      close: () => {
+        closed = true
+        return Promise.resolve()
+      },
+    }))
+
+    expect(result).toBe("use")
+    expect(closed).toBe(false)
+  })
+
+  it("recreates a relay-owned error document whose context is unavailable", async () => {
+    let closed = false
+    const result = await Effect.runPromise(recoverSessionPage({
+      ownsPage: true,
+      url: "chrome-error://chromewebdata/",
+      timeoutMs: 20,
+      healthCheck: () => Promise.reject(new Error("Execution context was destroyed")),
       close: () => {
         closed = true
         return Promise.resolve()
@@ -35,7 +52,7 @@ describe("execute lifecycle", () => {
       ownsPage: true,
       url: "chrome-error://chromewebdata/",
       timeoutMs: 20,
-      healthCheck: () => Promise.resolve(),
+      healthCheck: () => Promise.reject(new Error("Execution context was destroyed")),
       close: () => Promise.reject(new Error("target did not close")),
     })).then(
       () => undefined,
@@ -76,5 +93,41 @@ describe("execute lifecycle", () => {
     }))
 
     expect(result).toBe("use")
+  })
+
+  it("waits through transient execution-context replacement", async () => {
+    let attempts = 0
+    await expect(waitForPageContext({
+      timeoutMs: 30,
+      retryDelayMs: 10,
+      delay: () => Promise.resolve(),
+      evaluate: () => ++attempts < 3
+        ? Promise.reject(new Error("Execution context was destroyed"))
+        : Promise.resolve(),
+    })).resolves.toBeUndefined()
+    expect(attempts).toBe(3)
+  })
+
+  it("does not retry non-context page failures", async () => {
+    let attempts = 0
+    await expect(waitForPageContext({
+      timeoutMs: 30,
+      retryDelayMs: 10,
+      delay: () => Promise.resolve(),
+      evaluate: () => {
+        attempts += 1
+        return Promise.reject(new Error("Permission denied"))
+      },
+    })).rejects.toThrow("Permission denied")
+    expect(attempts).toBe(1)
+  })
+
+  it("bounds a context evaluation that never settles", async () => {
+    const startedAt = Date.now()
+    await expect(waitForPageContext({
+      timeoutMs: 20,
+      evaluate: () => new Promise<void>(() => {}),
+    })).rejects.toThrow("did not become available within 20ms")
+    expect(Date.now() - startedAt).toBeLessThan(100)
   })
 })

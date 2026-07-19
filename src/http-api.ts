@@ -39,6 +39,7 @@ export function createHttpRequestHandler(options: {
   readonly host: string
   readonly port: number
   readonly browserId: string
+  readonly relayInstance: { readonly id: string; readonly startedAt: string; readonly pid: number }
   readonly extensionStatus: () => { readonly connected: boolean; readonly version: string | null; readonly cdpClients?: number }
   readonly recordingRelay: RecordingRelay
   readonly registry: TargetRegistry
@@ -63,7 +64,13 @@ export function createHttpRequestHandler(options: {
     const requestUrl = new URL(request.url ?? "/", `http://${formatHostForUrl(options.host)}:${options.port}`)
     const pathname = requestUrl.pathname.replace(/\/$/, "") || "/"
     if (pathname === "/" || pathname === "/version") {
-      sendJson(response, { version: browserControlVersion, buildId: browserControlBuildId })
+      sendJson(response, {
+        version: browserControlVersion,
+        buildId: browserControlBuildId,
+        instanceId: options.relayInstance.id,
+        startedAt: options.relayInstance.startedAt,
+        pid: options.relayInstance.pid,
+      })
       return
     }
     if (pathname === "/json/version") {

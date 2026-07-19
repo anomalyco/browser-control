@@ -57,6 +57,7 @@ export interface ExecuteSandboxLike {
   redactNetworkCaptureText(text: string): string
   markTargetCrashed(targetId: string): boolean
   markTargetDetached(targetId: string): boolean
+  markTargetReplaced(previousTargetId: string, targetId: string): boolean
   getStatus(): {
     readonly sessionId?: string
     readonly connected: boolean

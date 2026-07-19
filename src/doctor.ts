@@ -1,5 +1,6 @@
 import { Effect, FileSystem, Path, Schema } from "effect"
 import * as RelayClient from "./relay-client.ts"
+import { relayBuildProblem } from "./relay-lifecycle.ts"
 import type { ExtensionStatus, RelayVersion, SessionSummary, TargetSummary } from "./relay-schema.ts"
 import * as SessionStore from "./session-store.ts"
 import { browserControlBuildId, browserControlVersion } from "./version.ts"
@@ -168,11 +169,9 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
   ])
   const relayResult = yield* probe(relay.version)
   const relayBuildMatches = relayResult.ok
-    ? browserControlBuildId === "dev"
-      ? true
-      : relayResult.value.buildId
-        ? relayResult.value.buildId === browserControlBuildId
-        : null
+    ? relayResult.value.buildId
+      ? relayBuildProblem(relayResult.value, browserControlBuildId) === undefined
+      : null
     : null
   const [extensionResult, targetsResult, sessionsResult] = relayResult.ok
     ? yield* Effect.all([
@@ -427,14 +426,6 @@ export function relayBuildCheck(options: {
       label: "relay build",
       status: "warn",
       message: "relay unreachable; cannot compare builds",
-    }
-  }
-  if (options.cliBuildId === "dev") {
-    return {
-      id: "relay-build",
-      label: "relay build",
-      status: "ok",
-      message: "CLI is a development build; build comparison skipped",
     }
   }
   const relayBuildId = options.relayResult.value.buildId

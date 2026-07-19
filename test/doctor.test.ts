@@ -60,10 +60,10 @@ describe("relayBuildCheck", () => {
     })).toMatchObject({ status: "warn", message: "running relay does not report a build id" })
   })
 
-  it("skips relay build comparison for a development CLI", () => {
+  it("compares legacy development build ids instead of treating them as wildcards", () => {
     expect(relayBuildCheck({
       cliBuildId: "dev",
       relayResult: { ok: true, value: { version: "0.1.0", buildId: "build-from-dist" } },
-    })).toMatchObject({ status: "ok", message: "CLI is a development build; build comparison skipped" })
+    })).toMatchObject({ status: "warn", message: "runtime build-from-dist does not match CLI dev" })
   })
 })
