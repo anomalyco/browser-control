@@ -1,5 +1,11 @@
 # @opencode-ai/browser-control
 
+## 0.1.3
+
+### Patch Changes
+
+- 3729b6c: Rewrite the README around npm installation, agent skill and MCP setup, first-run workflows, and safety boundaries.
+
 ## 0.1.2
 
 ### Patch Changes
