@@ -19,7 +19,7 @@ await build({
   bundle: true,
   format: "esm",
   platform: "node",
-  target: "node22",
+  target: "node20",
   packages: "external",
   define: {
     "globalThis.__BROWSER_CONTROL_VERSION__": JSON.stringify(packageJson.version),

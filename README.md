@@ -20,28 +20,29 @@ What you get:
   exactly what an agent did to your browser.
 - **Recording**: capture attached tabs to WebM or CDP frame directories.
 
-## Source Setup
+## Setup
 
-Requirements: Node 20+, [pnpm](https://pnpm.io), [bun](https://bun.sh) (for
-`bun link`), and a Chromium-family browser.
+Requirements: Node 20+ and a Chromium-family browser.
 
 ### 1. Install the CLI
 
-The package is currently private, so install it from a source checkout:
+Install both CLI entrypoints globally from npm:
 
 ```bash
-git clone git@github.com:anomalyco/browser-control.git
-cd browser-control
-pnpm install
-pnpm build
-bun link          # installs `browser-control` and `browser-control-mcp` globally
+npm install --global @anomalyco/browser-control
 ```
 
 ### 2. Load the extension
 
 1. Open `chrome://extensions` (or `brave://extensions`, ...).
 2. Enable **Developer mode**.
-3. Click **Load unpacked** and select the repo's `extension/dist` directory.
+3. Click **Load unpacked** and select the installed package's `extension/dist`
+   directory. Print its location with:
+
+   ```bash
+   printf '%s\n' "$(npm root --global)/@anomalyco/browser-control/extension/dist"
+   ```
+
 4. Pin the Browser Control toolbar button.
 
 The current extension shim version is `0.0.17`; reload the unpacked extension
@@ -68,15 +69,26 @@ The skill teaches your coding agent (OpenCode, Claude Code, Cursor, ...) how to
 drive Browser Control. Install it with the [skills CLI](https://skills.sh):
 
 ```bash
-npx skills add git@github.com:anomalyco/browser-control.git -g
+npx skills add anomalyco/browser-control -g
 ```
 
 Pick the agents you use when prompted (`-g` installs to your user-level agent
-config so it works across projects). Since the repo is private, the git SSH
-URL form is required and your existing GitHub SSH access is used.
+config so it works across projects).
 
 Alternatively, `browser-control skill` prints the skill text so you can paste
 it wherever your agent reads instructions.
+
+### Source installation
+
+For development, clone the repository and build both artifacts locally:
+
+```bash
+git clone git@github.com:anomalyco/browser-control.git
+cd browser-control
+pnpm install
+pnpm build
+bun link
+```
 
 ### 5. (Optional) MCP server
 
