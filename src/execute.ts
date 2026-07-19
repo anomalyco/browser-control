@@ -1155,10 +1155,17 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
             if (document.querySelectorAll(candidate).length === 1) return candidate
           }
         }
+        const tag = element.tagName.toLowerCase()
+        const role = element.getAttribute("role")
+        const roleSuffix = role ? `[role="${quote(role)}"]` : ""
+        for (const className of element.classList) {
+          const candidate = `${tag}.${CSS.escape(className)}${roleSuffix}`
+          if (document.querySelectorAll(candidate).length === 1) return candidate
+        }
         const parent = element.parentElement
-        if (!parent) return element.tagName.toLowerCase()
+        if (!parent) return tag
         const siblings = Array.from(parent.children).filter((sibling) => sibling.tagName === element.tagName)
-        return `${cssPath(parent)} > ${element.tagName.toLowerCase()}:nth-of-type(${siblings.indexOf(element) + 1})`
+        return `${cssPath(parent)} > ${tag}:nth-of-type(${siblings.indexOf(element) + 1})`
       }
       const headingDepth = (element: Element): number => {
         const ownLevel = /^H([1-6])$/.exec(element.tagName)?.[1]

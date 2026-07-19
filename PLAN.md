@@ -162,10 +162,12 @@ require a new extension capture protocol and permission model.
 
 - The product, repository, CLI, and MCP server use the name `browser-control`.
   The npm package is `@anomalyco/browser-control`.
-- The package remains private. Source setup uses `pnpm install`, `pnpm build`,
-  and `bun link` until publication; published setup should use npm artifacts.
+- The package is published publicly on npm. Normal setup installs the npm
+  artifact; source development uses `pnpm install`, `pnpm build`, and `bun
+  link`.
 - The browser extension remains unpacked for v1 and is loaded from
-  `extension/dist`. Its current shim version is `0.0.17`.
+  the npm package's `extension/dist` directory or a source build. Its current
+  shim version is `0.0.17`.
 - Extension source changes require rebuilding and reloading the unpacked
   extension. Relay-only changes do not.
 - Chrome Web Store distribution is deferred until behavior stabilizes. A
