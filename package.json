@@ -1,5 +1,5 @@
 {
-  "name": "@anomalyco/browser-control",
+  "name": "@opencode-ai/browser-control",
   "version": "0.1.1",
   "description": "Local browser driver for trusted agents: control your existing Chromium-family browser through a small extension and a local relay.",
   "license": "MIT",

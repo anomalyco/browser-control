@@ -29,7 +29,7 @@ Requirements: Node 20+ and a Chromium-family browser.
 Install both CLI entrypoints globally from npm:
 
 ```bash
-npm install --global @anomalyco/browser-control
+npm install --global @opencode-ai/browser-control
 ```
 
 ### 2. Load the extension
@@ -40,7 +40,7 @@ npm install --global @anomalyco/browser-control
    directory. Print its location with:
 
    ```bash
-   printf '%s\n' "$(npm root --global)/@anomalyco/browser-control/extension/dist"
+   printf '%s\n' "$(npm root --global)/@opencode-ai/browser-control/extension/dist"
    ```
 
 4. Pin the Browser Control toolbar button.

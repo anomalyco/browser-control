@@ -25,7 +25,7 @@ CLI and MCP share this detached relay; restarting the MCP process does not stop
 the relay or interrupt a CLI execute or pending handoff.
 
 If `browser-control` is not on PATH, install it with `npm install --global
-@anomalyco/browser-control`. Use the source setup in the repository README only
+@opencode-ai/browser-control`. Use the source setup in the repository README only
 when developing Browser Control itself.
 
 `browser-control skill` prints this skill text from the installed package/repo.

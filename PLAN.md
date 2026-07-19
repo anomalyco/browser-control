@@ -161,7 +161,7 @@ require a new extension capture protocol and permission model.
 ## Distribution And Installation
 
 - The product, repository, CLI, and MCP server use the name `browser-control`.
-  The npm package is `@anomalyco/browser-control`.
+  The npm package is `@opencode-ai/browser-control`.
 - The package is published publicly on npm. Normal setup installs the npm
   artifact; source development uses `pnpm install`, `pnpm build`, and `bun
   link`.
