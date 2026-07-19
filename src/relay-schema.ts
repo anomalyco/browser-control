@@ -197,6 +197,105 @@ export const RelayVersion = Schema.Struct({
 
 export interface RelayVersion extends Schema.Schema.Type<typeof RelayVersion> {}
 
+export const NetworkContentMode = Schema.Literals(["omit", "embed"])
+
+export const NetworkStartRequest = Schema.Struct({
+  sessionId: Schema.NonEmptyString,
+  urlFilter: Schema.optionalKey(Schema.String),
+  resourceTypes: Schema.optionalKey(Schema.Array(Schema.NonEmptyString).check(Schema.isMaxLength(50))),
+  content: Schema.optionalKey(NetworkContentMode),
+  maxBodyBytes: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 10_000_000 }))),
+  maxTotalBodyBytes: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100_000_000 }))),
+  maxEntries: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 10_000 }))),
+})
+
+export interface NetworkStartRequest extends Schema.Schema.Type<typeof NetworkStartRequest> {}
+
+export const NetworkSessionRequest = Schema.Struct({ sessionId: Schema.NonEmptyString })
+export interface NetworkSessionRequest extends Schema.Schema.Type<typeof NetworkSessionRequest> {}
+
+export const NetworkStopRequest = NetworkSessionRequest.pipe(Schema.fieldsAssign({
+  outputPath: Schema.optionalKey(Schema.String),
+  secrets: Schema.optionalKey(Schema.NonEmptyString),
+}))
+export interface NetworkStopRequest extends Schema.Schema.Type<typeof NetworkStopRequest> {}
+
+export const NetworkStatusResponse = Schema.Struct({
+  active: Schema.Boolean,
+  startedAt: Schema.optionalKey(Schema.String),
+  entryCount: Schema.Number,
+  responseCount: Schema.Number,
+  failureCount: Schema.Number,
+  capturedBodyBytes: Schema.Number,
+  truncatedBodyCount: Schema.Number,
+  droppedEntryCount: Schema.Number,
+  urlFilter: Schema.optionalKey(Schema.String),
+  resourceTypes: Schema.optionalKey(Schema.Array(Schema.String)),
+  content: Schema.optionalKey(NetworkContentMode),
+  secrets: Schema.optionalKey(Schema.String),
+})
+export interface NetworkStatusResponse extends Schema.Schema.Type<typeof NetworkStatusResponse> {}
+
+export const AuthProfileSlotSummary = Schema.Struct({
+  ref: Schema.String,
+  sources: Schema.Array(Schema.String),
+  expiresAt: Schema.optionalKey(Schema.String),
+  expired: Schema.Boolean,
+})
+
+export const AuthProfileSummary = Schema.Struct({
+  name: Schema.String,
+  createdAt: Schema.String,
+  updatedAt: Schema.String,
+  slotCount: Schema.Number,
+  slots: Schema.Array(AuthProfileSlotSummary),
+})
+export interface AuthProfileSummary extends Schema.Schema.Type<typeof AuthProfileSummary> {}
+
+export const NetworkStopResponse = NetworkStatusResponse.pipe(Schema.fieldsAssign({
+  active: Schema.Literal(false),
+  stoppedAt: Schema.String,
+  outputPath: Schema.optionalKey(Schema.String),
+  authProfile: Schema.optionalKey(AuthProfileSummary),
+  updatedSecretRefs: Schema.Array(Schema.String),
+  observedSecretRefs: Schema.Array(Schema.String),
+}))
+export interface NetworkStopResponse extends Schema.Schema.Type<typeof NetworkStopResponse> {}
+
+export const NetworkCancelResponse = Schema.Struct({ cancelled: Schema.Boolean })
+export interface NetworkCancelResponse extends Schema.Schema.Type<typeof NetworkCancelResponse> {}
+
+export const AuthProfileRequest = Schema.Struct({ name: Schema.NonEmptyString })
+export interface AuthProfileRequest extends Schema.Schema.Type<typeof AuthProfileRequest> {}
+
+export const AuthRefreshRequest = Schema.Struct({
+  sessionId: Schema.NonEmptyString,
+  name: Schema.NonEmptyString,
+  urlFilter: Schema.optionalKey(Schema.String),
+  timeoutMs: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
+})
+export interface AuthRefreshRequest extends Schema.Schema.Type<typeof AuthRefreshRequest> {}
+
+export const AuthRunRequest = Schema.Struct({
+  name: Schema.NonEmptyString,
+  command: Schema.NonEmptyString,
+  args: Schema.optionalKey(Schema.Array(Schema.String)),
+  cwd: Schema.optionalKey(Schema.String),
+  timeoutMs: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThan(0))),
+})
+export interface AuthRunRequest extends Schema.Schema.Type<typeof AuthRunRequest> {}
+
+export const AuthRunResponse = Schema.Struct({
+  exitCode: Schema.Number,
+  signal: Schema.NullOr(Schema.String),
+  stdout: Schema.String,
+  stderr: Schema.String,
+  stdoutTruncated: Schema.Boolean,
+  stderrTruncated: Schema.Boolean,
+  durationMs: Schema.Number,
+})
+export interface AuthRunResponse extends Schema.Schema.Type<typeof AuthRunResponse> {}
+
 export const RecordingMode = Schema.Literals(["tab-capture", "cdp"])
 
 export const RecordingRequestedMode = Schema.Literals(["auto", "tab-capture", "cdp"])
@@ -271,6 +370,8 @@ export interface RecordingCancelResponse extends Schema.Schema.Type<typeof Recor
 
 export const RelayErrorCode = Schema.Literals([
   "invalid-request",
+  "auth-profile-not-found",
+  "capture-conflict",
   "session-already-exists",
   "session-inactive",
   "session-not-found",

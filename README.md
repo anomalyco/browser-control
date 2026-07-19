@@ -245,6 +245,44 @@ Automatic mode uses browser tab capture for user-owned tabs and CDP screencast
 for relay-created tabs. Tab capture writes WebM and can include audio. CDP mode
 writes WebM or MP4, requires `ffmpeg` on `PATH`, and does not capture audio.
 
+## Derive a Direct Client
+
+Capture authenticated API exchanges across as many execute calls or human
+handoffs as the workflow needs:
+
+```bash
+browser-control network start --session github --url /api/ \
+  --resource-type fetch --resource-type xhr
+browser-control execute --session github --file ./perform-flow.js
+browser-control network stop --session github \
+  --output ./github.har --secrets github
+```
+
+Browser Control records normalized request/response exchanges itself; HAR is an
+interoperable export, not the internal capture model. Written artifacts replace
+cookies, authorization headers, CSRF tokens, API keys, and token-like query or
+body fields with stable `${BC_SECRET_N}` references. Lossless values are stored
+separately in a mode-`0600` profile under `~/.browser-control/secrets`.
+Bodies that cannot be reliably redacted, including binary and file-bearing
+multipart content, are omitted and reported as truncated.
+Unknown-length and compressed response bodies are also omitted so Browser
+Control never materializes them before it can enforce the configured budget.
+
+Generated clients read the referenced environment variables and run without
+printing or embedding the values:
+
+```bash
+browser-control secrets status github
+browser-control secrets run github -- ./github-cli repositories
+browser-control secrets refresh github --session github
+```
+
+`secrets refresh` reloads the session page and preserves references while
+updating values observed at the same source. If reauthentication requires a
+human flow, log in through the browser and repeat the capture with the same
+profile name instead. Child stdout and stderr are redacted before Browser
+Control returns them.
+
 ## Safety Boundaries
 
 Browser Control trusts the local agent code it executes. It is a driver, not an

@@ -67,6 +67,26 @@ describe("HTTP request schemas", () => {
         status: 400,
         body: { error: expect.stringContaining("Invalid recording start request"), code: "invalid-request" },
       })
+      await expect(postJson(port, "/network/start", { sessionId: "beta", content: "everything" })).resolves.toMatchObject({
+        status: 400,
+        body: { error: expect.stringContaining("Invalid network start request"), code: "invalid-request" },
+      })
+      await expect(postJson(port, "/network/stop", { sessionId: "beta", secrets: 42 })).resolves.toMatchObject({
+        status: 400,
+        body: { error: expect.stringContaining("Invalid network stop request"), code: "invalid-request" },
+      })
+      await expect(postJson(port, "/auth/run", { name: "uber", command: "", timeoutMs: -1 })).resolves.toMatchObject({
+        status: 400,
+        body: { error: expect.stringContaining("Invalid auth run request"), code: "invalid-request" },
+      })
+      await expect(postJson(port, "/auth/status", { name: `missing-${Date.now()}` })).resolves.toMatchObject({
+        status: 404,
+        body: { error: expect.stringContaining("Auth profile not found"), code: "auth-profile-not-found" },
+      })
+      await expect(postJson(port, "/network/stop", { sessionId: "beta", outputPath: "/tmp/unused.har" })).resolves.toMatchObject({
+        status: 409,
+        body: { error: expect.stringContaining("not active"), code: "capture-conflict" },
+      })
       await expect(postJson(port, "/cli/execute", { code: 42, createIfMissing: true })).resolves.toMatchObject({
         status: 400,
         body: { error: expect.stringContaining("Invalid execute request"), code: "invalid-request" },

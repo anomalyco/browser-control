@@ -6,6 +6,8 @@ import {
   ExecuteSessionSummary,
   ErrorEnvelope,
   ExtensionStatus,
+  NetworkStartRequest,
+  NetworkStopResponse,
   RecordingStartRequest,
   RecordingStartResponse,
   RecordingStatusResponse,
@@ -37,6 +39,8 @@ const decodeSessionNewRequest = Schema.decodeUnknownSync(SessionNewRequest)
 const decodeRecordingStatus = Schema.decodeUnknownSync(RecordingStatusResponse)
 const decodeRelayVersion = Schema.decodeUnknownSync(RelayVersion)
 const decodeErrorEnvelope = Schema.decodeUnknownSync(ErrorEnvelope)
+const decodeNetworkStartRequest = Schema.decodeUnknownSync(NetworkStartRequest)
+const decodeNetworkStopResponse = Schema.decodeUnknownSync(NetworkStopResponse)
 
 const session = {
   id: "rapid-otter-633",
@@ -255,6 +259,30 @@ describe("relay-schema", () => {
       tabId: 7,
       audio: "yes",
     })).toThrow()
+  })
+
+  it("decodes bounded network capture contracts", () => {
+    expect(decodeNetworkStartRequest({
+      sessionId: "rapid-otter-633",
+      content: "embed",
+      maxBodyBytes: 100,
+      maxTotalBodyBytes: 1_000,
+      maxEntries: 20,
+    }).maxTotalBodyBytes).toBe(1_000)
+    expect(() => decodeNetworkStartRequest({ sessionId: "rapid-otter-633", maxTotalBodyBytes: 0 })).toThrow()
+    expect(decodeNetworkStopResponse({
+      active: false,
+      startedAt: "2026-07-19T00:00:00.000Z",
+      stoppedAt: "2026-07-19T00:01:00.000Z",
+      entryCount: 2,
+      responseCount: 2,
+      failureCount: 0,
+      capturedBodyBytes: 100,
+      truncatedBodyCount: 0,
+      droppedEntryCount: 0,
+      updatedSecretRefs: ["BC_SECRET_1"],
+      observedSecretRefs: ["BC_SECRET_1"],
+    }).observedSecretRefs).toEqual(["BC_SECRET_1"])
   })
 
   it("decodes current coded and legacy relay error envelopes", () => {

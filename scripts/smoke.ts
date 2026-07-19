@@ -6,9 +6,11 @@ import { WebSocket } from "ws"
 import cp from "node:child_process"
 import fs from "node:fs/promises"
 import http from "node:http"
+import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import util from "node:util"
+import { getObject } from "../src/relay-helpers.ts"
 
 const endpointUrl = process.env.BROWSER_CONTROL_ENDPOINT ?? "http://127.0.0.1:19989"
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
@@ -1046,6 +1048,74 @@ return { answer: await worker.evaluate(() => globalThis.answer), url: worker.url
     }),
   },
   {
+    name: "network-capture",
+    run: Effect.fnUntraced(function* () {
+      const marker = `bc-network-${Date.now()}`
+      const smokeSession = `${marker}-session`
+      const profile = `${marker}-profile`
+      const outputPath = path.join(repoRoot, "tmp", `${marker}.har`)
+      return yield* Effect.scoped(
+        Effect.gen(function* () {
+          const fixture = yield* scopedNetworkFixture(marker)
+          yield* runBrowserControl(["session", "new", smokeSession])
+          yield* runBrowserControl([
+            "network", "start", "--session", smokeSession, "--url", "/api/", "--resource-type", "fetch",
+          ])
+          const executeOutput = yield* runBrowserControl([
+            "execute",
+            "--session",
+            smokeSession,
+            `const responsePromise = page.waitForResponse((candidate) => candidate.url().includes('/api/data'), { timeout: 10000 }); await page.goto(${JSON.stringify(fixture.url)}); const body = await (await responsePromise).json(); return { marker: body.marker, refreshToken: body.refreshToken }`,
+          ])
+          if (!executeOutput.includes(marker) || executeOutput.includes("smoke-refresh-")) {
+            return yield* Effect.fail(new Error(`network fixture execute output was missing its marker or exposed a credential: ${executeOutput}`))
+          }
+          const journalOutput = yield* runBrowserControl(["journal", "--session", smokeSession, "--json"])
+          if (journalOutput.includes("smoke-refresh-") || journalOutput.includes("smoke-access-") || journalOutput.includes("smoke-query-token")) {
+            return yield* Effect.fail(new Error("network capture credential appeared in the session journal"))
+          }
+          const stopOutput = yield* runBrowserControl([
+            "network", "stop", "--session", smokeSession, "--output", outputPath, "--secrets", profile, "--json",
+          ])
+          const stop = parseJsonObject(stopOutput, "network stop")
+          if (stop.entryCount !== 1 || stop.responseCount !== 1 || !Array.isArray(stop.observedSecretRefs) || stop.observedSecretRefs.length < 2) {
+            return yield* Effect.fail(new Error(`network stop summary invalid: ${stopOutput}`))
+          }
+          const artifact = yield* Effect.tryPromise({
+            try: () => fs.readFile(outputPath, "utf8"),
+            catch: (cause) => new Error("read network smoke artifact", { cause }),
+          })
+          if (artifact.includes("smoke-access-") || artifact.includes("smoke-query-token") || !artifact.includes("${BC_SECRET_1}")) {
+            return yield* Effect.fail(new Error("network artifact did not redact synthetic credentials"))
+          }
+          const refreshOutput = yield* runBrowserControl([
+            "secrets", "refresh", profile, "--session", smokeSession, "--url", "/api/", "--json",
+          ])
+          const refresh = parseJsonObject(refreshOutput, "secrets refresh")
+          if (!Array.isArray(refresh.observedSecretRefs) || refresh.observedSecretRefs.length < 2 || !Array.isArray(refresh.updatedSecretRefs) || refresh.updatedSecretRefs.length < 1) {
+            return yield* Effect.fail(new Error(`secret refresh did not observe and update stable refs: ${refreshOutput}`))
+          }
+          const runOutput = yield* runBrowserControl([
+            "secrets", "run", profile, "--", process.execPath, "-e", "process.stdout.write(process.env.BC_SECRET_1 || '')",
+          ])
+          if (runOutput !== "${BC_SECRET_1}") {
+            return yield* Effect.fail(new Error(`secret command output was not redacted: ${runOutput}`))
+          }
+          return { entries: stop.entryCount, observed: refresh.observedSecretRefs.length, refreshed: refresh.updatedSecretRefs.length }
+        }).pipe(
+          Effect.ensuring(
+            Effect.gen(function* () {
+              yield* runBrowserControl(["network", "cancel", "--session", smokeSession]).pipe(Effect.ignore)
+              yield* runBrowserControl(["session", "delete", smokeSession]).pipe(Effect.ignore)
+              yield* removePath(outputPath)
+              yield* removePath(path.join(os.homedir(), ".browser-control", "secrets", `${profile}.json`))
+            }),
+          ),
+        ),
+      )
+    }),
+  },
+  {
     name: "session-download-capability",
     run: Effect.fnUntraced(function* () {
       const marker = `bc-download-${Date.now()}`
@@ -1682,6 +1752,51 @@ const scopedDownloadFixture = Effect.fnUntraced(function* (marker: string) {
     (fixture) => boundedCleanup("close download fixture", () => new Promise<void>((resolve) => fixture.server.close(() => resolve()))),
   )
 })
+
+const scopedNetworkFixture = Effect.fnUntraced(function* (marker: string) {
+  return yield* Effect.acquireRelease(
+    Effect.tryPromise({
+      try: () => new Promise<{ readonly server: http.Server; readonly url: string }>((resolve, reject) => {
+        let pageLoads = 0
+        const server = http.createServer((request, response) => {
+          if (request.url?.startsWith("/api/data")) {
+            const body = JSON.stringify({ marker, refreshToken: `smoke-refresh-${pageLoads}` })
+            response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body) })
+            response.end(body)
+            return
+          }
+          pageLoads += 1
+          response.writeHead(200, { "content-type": "text/html; charset=utf-8" })
+          response.end(`<!doctype html><title>${marker}</title><script>
+            fetch('/api/data?access_token=smoke-query-token', {
+              headers: { authorization: 'Bearer smoke-access-${pageLoads}' }
+            })
+          </script>`)
+        })
+        server.once("error", reject)
+        server.listen(0, "127.0.0.1", () => {
+          server.off("error", reject)
+          const address = server.address()
+          if (!address || typeof address === "string") {
+            server.close()
+            reject(new Error("network fixture did not receive a TCP address"))
+            return
+          }
+          resolve({ server, url: `http://127.0.0.1:${address.port}/` })
+        })
+      }),
+      catch: (cause) => new Error("start network fixture", { cause }),
+    }),
+    (fixture) => boundedCleanup("close network fixture", () => new Promise<void>((resolve) => fixture.server.close(() => resolve()))),
+  )
+})
+
+function parseJsonObject(text: string, label: string): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(text)
+  const object = getObject(parsed)
+  if (!object) throw new Error(`${label} did not return a JSON object`)
+  return object
+}
 
 function getBrowserContext(browser: Browser): Promise<BrowserContext> {
   const existing = browser.contexts()[0]

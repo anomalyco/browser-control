@@ -18,6 +18,7 @@ const makeFakeSandbox = (options?: {
   readonly onAdopt?: ExecuteSandboxLike["adoptPage"]
   readonly onClose?: Effect.Effect<void>
   readonly defaultTargetId?: string
+  readonly redactText?: (text: string) => string
 }): FakeSandbox => {
   let closes = 0
   const adoptedSelections: unknown[] = []
@@ -48,6 +49,12 @@ const makeFakeSandbox = (options?: {
       ),
     close,
     closeSettled: close,
+    networkStart: () => Effect.succeed({ active: true, entryCount: 0, responseCount: 0, failureCount: 0, capturedBodyBytes: 0, truncatedBodyCount: 0, droppedEntryCount: 0 }),
+    networkStatus: () => ({ active: false, entryCount: 0, responseCount: 0, failureCount: 0, capturedBodyBytes: 0, truncatedBodyCount: 0, droppedEntryCount: 0 }),
+    networkStop: () => Effect.fail(new Error("network capture is not active")),
+    networkCancel: () => Effect.succeed({ cancelled: false }),
+    authRefresh: () => Effect.fail(new Error("auth refresh is not configured")),
+    redactNetworkCaptureText: (text) => options?.redactText?.(text) ?? text,
     adoptPage: (selection) => options?.onAdopt
       ? options.onAdopt(selection)
       : options?.adoptFailure
@@ -653,6 +660,23 @@ describe("BrowserControlSessions", () => {
     } finally {
       consoleError.mockRestore()
     }
+  })
+
+  it("redacts capture values before execute code reaches the session journal hook", async () => {
+    const records: string[] = []
+    const sessions = new BrowserControlSessions(
+      "http://127.0.0.1:0",
+      () => makeFakeSandbox({ redactText: (text) => text.replaceAll("live-token", "${BC_SECRET_1}") }),
+      { onExecuteRecord: (record) => records.push(record.code) },
+    )
+    sessions.createNew("alpha")
+
+    await Effect.runPromise(sessions.execute({
+      sessionId: "alpha",
+      code: "return 'live-token'",
+      createIfMissing: false,
+    }))
+    expect(records).toEqual(["return '${BC_SECRET_1}'"])
   })
 
   it("adopts a selected page while serializing on the session execute permit", async () => {

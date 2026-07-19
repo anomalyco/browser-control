@@ -1,5 +1,6 @@
 import { Deferred, Effect, Option, Schema, Semaphore } from "effect"
 import { defaultPageClosedWarning, ExecuteSandbox, hasExplicitTargetSelection, type ExecuteResult, type ExecuteTargetSelection } from "./execute.ts"
+import type { NetworkCaptureOptions, NetworkCaptureResult, NetworkCaptureStatus, NetworkCaptureStopOptions } from "./network-capture.ts"
 import { generateSessionId } from "./relay-helpers.ts"
 import type { BrowserControlSession, ExecuteSandboxLike, SessionSummary } from "./relay-types.ts"
 import {
@@ -215,6 +216,61 @@ export class BrowserControlSessions {
     return undefined
   }
 
+  networkStart(id: string, options: NetworkCaptureOptions = {}): Effect.Effect<NetworkCaptureStatus, Error> {
+    const manager = this
+    const session = this.sessions.get(id)
+    if (!session) return Effect.fail(sessionError("not-found", `Session not found: ${id}`, id))
+    return this.withLifecyclePermit(session, "network start", Effect.gen(function* () {
+      if (manager.sessions.get(id) !== session) {
+        return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${id}`, id))
+      }
+      return yield* session.sandbox.networkStart(options)
+    }))
+  }
+
+  networkStatus(id: string): Effect.Effect<NetworkCaptureStatus, Error> {
+    const session = this.sessions.get(id)
+    return session
+      ? Effect.succeed(session.sandbox.networkStatus())
+      : Effect.fail(sessionError("not-found", `Session not found: ${id}`, id))
+  }
+
+  networkStop(id: string, options: NetworkCaptureStopOptions = {}): Effect.Effect<NetworkCaptureResult, Error> {
+    const manager = this
+    const session = this.sessions.get(id)
+    if (!session) return Effect.fail(sessionError("not-found", `Session not found: ${id}`, id))
+    return this.withLifecyclePermit(session, "network stop", Effect.gen(function* () {
+      if (manager.sessions.get(id) !== session) {
+        return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${id}`, id))
+      }
+      return yield* session.sandbox.networkStop(options)
+    }))
+  }
+
+  networkCancel(id: string): Effect.Effect<{ readonly cancelled: boolean }, Error> {
+    const manager = this
+    const session = this.sessions.get(id)
+    if (!session) return Effect.fail(sessionError("not-found", `Session not found: ${id}`, id))
+    return this.withLifecyclePermit(session, "network cancel", Effect.gen(function* () {
+      if (manager.sessions.get(id) !== session) {
+        return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${id}`, id))
+      }
+      return yield* session.sandbox.networkCancel()
+    }))
+  }
+
+  authRefresh(id: string, options: { readonly name: string; readonly urlFilter?: string; readonly timeoutMs?: number }): Effect.Effect<NetworkCaptureResult, Error> {
+    const manager = this
+    const session = this.sessions.get(id)
+    if (!session) return Effect.fail(sessionError("not-found", `Session not found: ${id}`, id))
+    return this.withLifecyclePermit(session, "auth refresh", Effect.gen(function* () {
+      if (manager.sessions.get(id) !== session) {
+        return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${id}`, id))
+      }
+      return yield* session.sandbox.authRefresh(options)
+    }))
+  }
+
   execute(options: {
     readonly sessionId?: string
     readonly code: string
@@ -262,7 +318,12 @@ export class BrowserControlSessions {
             ? { ...result, warnings: [...result.warnings, adoptionTipForUrl(userAttachedPageUrls[0] ?? "about:blank")] }
             : result
           session.updatedAt = new Date().toISOString()
-          manager.recordExecute({ sessionId: session.id, code: options.code, durationMs: Date.now() - startedAt, result: resultWithHint })
+          manager.recordExecute({
+            sessionId: session.id,
+            code: session.sandbox.redactNetworkCaptureText(options.code),
+            durationMs: Date.now() - startedAt,
+            result: resultWithHint,
+          })
           const summary = manager.sessionSummary(session)
           return { result: resultWithHint, session: { ...summary, ...(resolved.created ? { created: true } : {}) } }
         }),

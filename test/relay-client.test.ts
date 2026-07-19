@@ -173,4 +173,56 @@ describe("RelayClient", () => {
       audioBitsPerSecond: 128_000,
     })
   })
+
+  it("preserves network limits and decodes capture results", async () => {
+    routes.set("POST /network/start", {
+      status: 200,
+      body: {
+        active: true,
+        startedAt: "2026-07-19T00:00:00.000Z",
+        entryCount: 0,
+        responseCount: 0,
+        failureCount: 0,
+        capturedBodyBytes: 0,
+        truncatedBodyCount: 0,
+        droppedEntryCount: 0,
+        content: "embed",
+      },
+    })
+    const result = await withClient((client) => client.networkStart({
+      sessionId: session.id,
+      urlFilter: "/api/",
+      resourceTypes: ["fetch", "xhr"],
+      maxBodyBytes: 100,
+      maxTotalBodyBytes: 1_000,
+      maxEntries: 25,
+    }))
+    expect(result.active).toBe(true)
+    expect(lastRequestBody).toMatchObject({
+      sessionId: session.id,
+      urlFilter: "/api/",
+      resourceTypes: ["fetch", "xhr"],
+      maxBodyBytes: 100,
+      maxTotalBodyBytes: 1_000,
+      maxEntries: 25,
+    })
+  })
+
+  it("decodes redacted command-run output", async () => {
+    routes.set("POST /auth/run", {
+      status: 200,
+      body: {
+        exitCode: 0,
+        signal: null,
+        stdout: "${BC_SECRET_1}\n",
+        stderr: "",
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        durationMs: 12,
+      },
+    })
+    const result = await withClient((client) => client.authRun({ name: "uber", command: "./uber-cli", args: ["restaurants"] }))
+    expect(result.stdout).toBe("${BC_SECRET_1}\n")
+    expect(lastRequestBody).toEqual({ name: "uber", command: "./uber-cli", args: ["restaurants"] })
+  })
 })

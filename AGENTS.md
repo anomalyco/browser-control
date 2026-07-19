@@ -111,6 +111,14 @@ local Node relay.
   and expose refs only for added or changed current lines. Keep `ariaSnapshot()`
   and raw Playwright as deeper inspection layers; do not replace the code-first
   execute interface with many action commands.
+- Authenticated network capture is owned by the persistent Execute Sandbox and
+  records normalized exchanges; HAR is only an export adapter. Written
+  artifacts always use route-scoped stable `BC_SECRET_N` references. Lossless
+  values live in restrictive secret profiles and enter generated clients only
+  through `secrets run`. Keep recorder transitions serialized, body retention
+  bounded per body and in aggregate, profile updates locked across relay
+  processes, and credential values out of normal outputs, diagnostics, and
+  journals.
 - With `BROWSER_CONTROL_DEBUG=1`, `[bc:ctx]` lines trace bounded metadata for
   target ownership/browser-context identity, main-frame loaders, Runtime context
   lifecycle/reset attempts, and failed evaluates. Never add expressions,
@@ -175,7 +183,7 @@ local Node relay.
 - Extension shim changes require reloading the unpacked extension once in Brave.
 - Relay-only changes should not require reloading the extension.
 - Use `termctrl` for long-running relay sessions during testing.
-- Run `SMOKE_CASE=local-forms,local-cart,local-checkout,reconnect-evaluate,redirect-reconnect-evaluate,execute-target-url,execute-page-recovery,execute-page-detach-recovery,execute-fill-helpers,execute-snapshot-refs,handoff-navigation,handoff-cross-tab,handoff-target-detach,oopif-reconnect,dedicated-worker,session-download-capability,execute-ghost-cursor,session-isolation,multi-client,stale-client-checkout,raw-first-checkout pnpm smoke`
+- Run `SMOKE_CASE=local-forms,local-cart,local-checkout,reconnect-evaluate,redirect-reconnect-evaluate,execute-target-url,execute-page-recovery,execute-page-detach-recovery,execute-fill-helpers,execute-snapshot-refs,handoff-navigation,handoff-cross-tab,handoff-target-detach,oopif-reconnect,dedicated-worker,network-capture,session-download-capability,execute-ghost-cursor,session-isolation,multi-client,stale-client-checkout,raw-first-checkout pnpm smoke`
   before claiming the current smoke set is green.
 - CDP target visibility is scoped per client (`src/cdp-visibility.ts`):
   session-owned tabs are announced and their events delivered only to that

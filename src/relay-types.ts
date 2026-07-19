@@ -1,5 +1,6 @@
 import type { Effect, Semaphore } from "effect"
 import type { AdoptTarget, ExecuteOptions, ExecuteResult } from "./execute.ts"
+import type { NetworkCaptureOptions, NetworkCaptureResult, NetworkCaptureStatus, NetworkCaptureStopOptions } from "./network-capture.ts"
 import type { JsonObject, TargetInfo } from "./protocol.ts"
 import type { SessionSummary } from "./relay-schema.ts"
 
@@ -48,6 +49,12 @@ export interface ExecuteSandboxLike {
   close(): Effect.Effect<void, Error>
   /** Adoption rollback cleanup does not settle before started Playwright close promises settle. */
   closeSettled(): Effect.Effect<void, Error>
+  networkStart(options?: NetworkCaptureOptions): Effect.Effect<NetworkCaptureStatus, Error>
+  networkStatus(): NetworkCaptureStatus
+  networkStop(options?: NetworkCaptureStopOptions): Effect.Effect<NetworkCaptureResult, Error>
+  networkCancel(): Effect.Effect<{ readonly cancelled: boolean }>
+  authRefresh(options: { readonly name: string; readonly urlFilter?: string; readonly timeoutMs?: number }): Effect.Effect<NetworkCaptureResult, Error>
+  redactNetworkCaptureText(text: string): string
   markTargetCrashed(targetId: string): boolean
   markTargetDetached(targetId: string): boolean
   getStatus(): {

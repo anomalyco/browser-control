@@ -80,6 +80,28 @@ _Avoid_: Browser storage, tab state
 The implicit persistent execute sandbox owned by one running MCP server process.
 _Avoid_: Explicit MCP session id
 
+**Network Capture**:
+A session-owned recording of normalized request/response exchanges from the
+session's current default page and its child frames. It survives individual
+execute calls and is independent of any export format.
+_Avoid_: HAR recorder, global request log
+
+**Capture Artifact**:
+An agent-readable export of a Network Capture. HAR is the first compatibility
+format; credential values are represented by Stable Secret References.
+_Avoid_: Raw authenticated HAR, credential bundle
+
+**Secret Profile**:
+A restrictive local store of lossless credential values discovered during a
+Network Capture. Agents use profile metadata and injected references rather
+than reading values directly.
+_Avoid_: HAR credentials, generated-source secrets
+
+**Stable Secret Reference**:
+An environment-variable name such as `BC_SECRET_1` that retains its identity
+when a Secret Profile is refreshed from the same request source.
+_Avoid_: Token value, hardcoded credential
+
 ## Relationships
 
 - A **Driver** serves one or more external **Agents**.
@@ -93,6 +115,9 @@ _Avoid_: Explicit MCP session id
 - An **Agent** controls the browser by running code in an **Execute Sandbox**.
 - An **Execute Sandbox** owns **Persistent State**; the Target Registry owns
   target assignment.
+- An **Execute Sandbox** owns at most one active **Network Capture**.
+- A **Capture Artifact** refers to values in a **Secret Profile** through
+  **Stable Secret References**.
 - **Detach** removes an **Attached Tab** from the **Attached-Tab Pool**.
 
 ## Example Dialogue

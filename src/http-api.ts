@@ -1,5 +1,7 @@
 import http from "node:http"
 import { Effect, Schema } from "effect"
+import * as AuthProfile from "./auth-profile.ts"
+import { NetworkCaptureError } from "./network-capture.ts"
 import {
   HttpRouteError,
   formatHostForUrl,
@@ -14,7 +16,13 @@ import {
 } from "./relay-helpers.ts"
 import { selectTarget, TargetSelectionError } from "./execute.ts"
 import {
+  AuthProfileRequest,
+  AuthRefreshRequest,
+  AuthRunRequest,
   ExecuteRequest,
+  NetworkSessionRequest,
+  NetworkStartRequest,
+  NetworkStopRequest,
   RecordingStartRequest,
   RecordingTargetRequest,
   SessionAdoptRequest,
@@ -92,6 +100,14 @@ export function createHttpRequestHandler(options: {
       runRequestEffect(response, handleRecordingRequest({ request, response, pathname, requestUrl, registry: options.registry, recordingRelay: options.recordingRelay }))
       return
     }
+    if (pathname.startsWith("/network/")) {
+      runRequestEffect(response, handleNetworkRequest({ request, response, pathname, sessions: options.sessions }))
+      return
+    }
+    if (pathname.startsWith("/auth/")) {
+      runRequestEffect(response, handleAuthRequest({ request, response, pathname, sessions: options.sessions }))
+      return
+    }
     if (pathname.startsWith("/cli/")) {
       runRequestEffect(response, handleCliRequest({
         request,
@@ -105,6 +121,69 @@ export function createHttpRequestHandler(options: {
     response.writeHead(404)
     response.end("Not found")
   }
+}
+
+function handleNetworkRequest(options: {
+  readonly request: http.IncomingMessage
+  readonly response: http.ServerResponse
+  readonly pathname: string
+  readonly sessions: BrowserControlSessions
+}): Effect.Effect<void, Error> {
+  return Effect.gen(function* () {
+    if (options.pathname === "/network/start" && options.request.method === "POST") {
+      const request = yield* decodeRequest(NetworkStartRequest, yield* readJsonBody(options.request), "network start")
+      const { sessionId, ...captureOptions } = request
+      const result = yield* options.sessions.networkStart(sessionId, captureOptions)
+      sendJson(options.response, result)
+      return
+    }
+    if (options.pathname === "/network/status" && options.request.method === "POST") {
+      const request = yield* decodeRequest(NetworkSessionRequest, yield* readJsonBody(options.request), "network status")
+      sendJson(options.response, yield* options.sessions.networkStatus(request.sessionId))
+      return
+    }
+    if (options.pathname === "/network/stop" && options.request.method === "POST") {
+      const request = yield* decodeRequest(NetworkStopRequest, yield* readJsonBody(options.request), "network stop")
+      const { sessionId, ...stopOptions } = request
+      sendJson(options.response, yield* options.sessions.networkStop(sessionId, stopOptions))
+      return
+    }
+    if (options.pathname === "/network/cancel" && options.request.method === "POST") {
+      const request = yield* decodeRequest(NetworkSessionRequest, yield* readJsonBody(options.request), "network cancel")
+      sendJson(options.response, yield* options.sessions.networkCancel(request.sessionId))
+      return
+    }
+    options.response.writeHead(404)
+    options.response.end("Not found")
+  })
+}
+
+function handleAuthRequest(options: {
+  readonly request: http.IncomingMessage
+  readonly response: http.ServerResponse
+  readonly pathname: string
+  readonly sessions: BrowserControlSessions
+}): Effect.Effect<void, Error> {
+  return Effect.gen(function* () {
+    if (options.pathname === "/auth/status" && options.request.method === "POST") {
+      const request = yield* decodeRequest(AuthProfileRequest, yield* readJsonBody(options.request), "auth status")
+      sendJson(options.response, yield* AuthProfile.status(request.name))
+      return
+    }
+    if (options.pathname === "/auth/refresh" && options.request.method === "POST") {
+      const request = yield* decodeRequest(AuthRefreshRequest, yield* readJsonBody(options.request), "auth refresh")
+      const { sessionId, ...refreshOptions } = request
+      sendJson(options.response, yield* options.sessions.authRefresh(sessionId, refreshOptions))
+      return
+    }
+    if (options.pathname === "/auth/run" && options.request.method === "POST") {
+      const request = yield* decodeRequest(AuthRunRequest, yield* readJsonBody(options.request), "auth run")
+      sendJson(options.response, yield* AuthProfile.run(request))
+      return
+    }
+    options.response.writeHead(404)
+    options.response.end("Not found")
+  })
 }
 
 function runRequestEffect(response: http.ServerResponse, effect: Effect.Effect<void, Error>): void {
@@ -403,6 +482,20 @@ export function relayHttpError(error: unknown): HttpRouteError {
       case "setup-failed":
         return new HttpRouteError({ message: error.message, status: 500, code: "setup-failed" })
     }
+  }
+  if (error instanceof NetworkCaptureError) {
+    return new HttpRouteError({
+      message: error.message,
+      status: error.reason === "invalid-options" ? 400 : error.reason === "already-active" || error.reason === "inactive" ? 409 : 500,
+      code: error.reason === "invalid-options" ? "invalid-request" : error.reason === "already-active" || error.reason === "inactive" ? "capture-conflict" : "internal",
+    })
+  }
+  if (error instanceof AuthProfile.AuthProfileError) {
+    return new HttpRouteError({
+      message: error.message,
+      status: error.reason === "invalid-name" ? 400 : error.reason === "not-found" ? 404 : 500,
+      code: error.reason === "invalid-name" ? "invalid-request" : error.reason === "not-found" ? "auth-profile-not-found" : "internal",
+    })
   }
   if (error instanceof TargetSelectionError) {
     return new HttpRouteError({

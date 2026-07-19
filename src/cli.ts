@@ -9,7 +9,7 @@ import { createDoctorReport, formatDoctorReport } from "./doctor.ts"
 import { runMcpServer } from "./mcp.ts"
 import * as RelayClient from "./relay-client.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"
-import type { ExecuteAftermath, ExecuteLogEntry, ExecuteResponse } from "./relay-schema.ts"
+import type { ExecuteAftermath, ExecuteLogEntry, ExecuteResponse, NetworkStatusResponse, NetworkStopResponse } from "./relay-schema.ts"
 import { startRelay } from "./relay.ts"
 import { defaultJournalBaseDir, formatJournalEntry, readJournalEntries } from "./session-journal.ts"
 import * as SessionStore from "./session-store.ts"
@@ -623,6 +623,196 @@ const recording = Command.make("recording").pipe(
   Command.withSubcommands([recordingStart, recordingStop, recordingStatus, recordingCancel]),
 )
 
+const networkSession = Effect.fnUntraced(function* (session: Option.Option<string>) {
+  return yield* resolveExistingSessionId(optionString(session) ?? Option.getOrUndefined(yield* sessionIdConfig))
+})
+
+const parseNetworkContent = Effect.fnUntraced(function* (content: Option.Option<string>) {
+  const value = optionString(content)
+  if (value === undefined || value === "embed" || value === "omit") return value
+  return yield* Effect.fail(new Error("Network content must be embed or omit"))
+})
+
+function formatNetworkStatus(status: NetworkStatusResponse): string {
+  if (!status.active) return "Network capture: inactive"
+  return `Network capture: active entries=${status.entryCount} responses=${status.responseCount} failures=${status.failureCount} bodyBytes=${status.capturedBodyBytes} truncated=${status.truncatedBodyCount} dropped=${status.droppedEntryCount} startedAt=${status.startedAt ?? "unknown"}`
+}
+
+function formatNetworkResult(result: NetworkStopResponse): string {
+  const output = result.outputPath ? ` output=${result.outputPath}` : ""
+  const profile = result.authProfile ? ` secrets=${result.authProfile.name}(${result.authProfile.slotCount})` : ""
+  return `Network capture stopped: entries=${result.entryCount} responses=${result.responseCount} failures=${result.failureCount} bodyBytes=${result.capturedBodyBytes} truncated=${result.truncatedBodyCount} dropped=${result.droppedEntryCount}${output}${profile}`
+}
+
+const networkStart = Command.make(
+  "start",
+  {
+    session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Capture the default page for this Browser Control session")),
+    urlFilter: Flag.string("url").pipe(Flag.optional, Flag.withDescription("Capture only requests whose URL contains this text")),
+    resourceTypes: Flag.string("resource-type").pipe(Flag.atMost(50), Flag.withDescription("Capture this Playwright resource type; repeat for multiple types")),
+    content: Flag.string("content").pipe(Flag.optional, Flag.withDescription("Response and request body mode: embed (default) or omit")),
+    maxBodyBytes: Flag.integer("max-body-bytes").pipe(Flag.optional, Flag.withDescription("Maximum captured bytes per body, defaults to 1000000")),
+    maxTotalBodyBytes: Flag.integer("max-total-body-bytes").pipe(Flag.optional, Flag.withDescription("Maximum captured body bytes for the whole capture, defaults to 25000000")),
+    maxEntries: Flag.integer("max-entries").pipe(Flag.optional, Flag.withDescription("Maximum request entries, defaults to 1000")),
+    json: Flag.boolean("json").pipe(Flag.withDescription("Print machine-readable JSON")),
+  },
+  Effect.fn("Cli.networkStart")(function* ({ session, urlFilter, resourceTypes, content, maxBodyBytes, maxTotalBodyBytes, maxEntries, json }) {
+    const relay = yield* RelayClient.Service
+    yield* ensureCliRelayAndExtension()
+    const sessionId = yield* networkSession(session)
+    const contentValue = yield* parseNetworkContent(content)
+    const urlFilterValue = optionString(urlFilter)
+    const maxBodyBytesValue = optionNumber(maxBodyBytes)
+    const maxTotalBodyBytesValue = optionNumber(maxTotalBodyBytes)
+    const maxEntriesValue = optionNumber(maxEntries)
+    const result = yield* relay.networkStart({
+      sessionId,
+      ...(urlFilterValue === undefined ? {} : { urlFilter: urlFilterValue }),
+      ...(resourceTypes.length === 0 ? {} : { resourceTypes }),
+      ...(contentValue === undefined ? {} : { content: contentValue }),
+      ...(maxBodyBytesValue === undefined ? {} : { maxBodyBytes: maxBodyBytesValue }),
+      ...(maxTotalBodyBytesValue === undefined ? {} : { maxTotalBodyBytes: maxTotalBodyBytesValue }),
+      ...(maxEntriesValue === undefined ? {} : { maxEntries: maxEntriesValue }),
+    })
+    yield* Console.log(json ? JSON.stringify(result, null, 2) : formatNetworkStatus(result))
+  }),
+).pipe(Command.withDescription("Start session-scoped network capture"))
+
+const networkStatus = Command.make(
+  "status",
+  {
+    session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s")),
+    json: Flag.boolean("json").pipe(Flag.withDescription("Print machine-readable JSON")),
+  },
+  Effect.fn("Cli.networkStatus")(function* ({ session, json }) {
+    const relay = yield* RelayClient.Service
+    const sessionId = yield* networkSession(session)
+    const result = yield* relay.networkStatus({ sessionId })
+    yield* Console.log(json ? JSON.stringify(result, null, 2) : formatNetworkStatus(result))
+  }),
+).pipe(Command.withDescription("Show session-scoped network capture status"))
+
+const networkStop = Command.make(
+  "stop",
+  {
+    session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s")),
+    output: Flag.string("output").pipe(Flag.optional, Flag.withAlias("o"), Flag.withDescription("Write a credential-redacted HAR artifact to this path")),
+    secrets: Flag.string("secrets").pipe(Flag.optional, Flag.withDescription("Store captured credentials under this reusable profile name")),
+    json: Flag.boolean("json").pipe(Flag.withDescription("Print machine-readable JSON")),
+  },
+  Effect.fn("Cli.networkStop")(function* ({ session, output, secrets, json }) {
+    const relay = yield* RelayClient.Service
+    const sessionId = yield* networkSession(session)
+    const outputValue = optionString(output)
+    const secretsValue = optionString(secrets)
+    if (!outputValue && !secretsValue) {
+      return yield* Effect.fail(new Error("network stop requires --output, --secrets, or both"))
+    }
+    const result = yield* relay.networkStop({
+      sessionId,
+      ...(outputValue ? { outputPath: path.resolve(outputValue) } : {}),
+      ...(secretsValue ? { secrets: secretsValue } : {}),
+    })
+    yield* Console.log(json ? JSON.stringify(result, null, 2) : formatNetworkResult(result))
+  }),
+).pipe(Command.withDescription("Stop capture and write a redacted artifact or reusable secret profile"))
+
+const networkCancel = Command.make(
+  "cancel",
+  { session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s")) },
+  Effect.fn("Cli.networkCancel")(function* ({ session }) {
+    const relay = yield* RelayClient.Service
+    const sessionId = yield* networkSession(session)
+    const result = yield* relay.networkCancel({ sessionId })
+    yield* Console.log(result.cancelled ? "Network capture cancelled" : "Network capture was not active")
+  }),
+).pipe(Command.withDescription("Cancel capture without writing an artifact"))
+
+const network = Command.make("network").pipe(
+  Command.withDescription("Capture authenticated network exchanges for direct client derivation"),
+  Command.withSubcommands([networkStart, networkStatus, networkStop, networkCancel]),
+)
+
+const secretsStatus = Command.make(
+  "status",
+  {
+    name: Argument.string("name"),
+    json: Flag.boolean("json").pipe(Flag.withDescription("Print machine-readable JSON")),
+  },
+  Effect.fn("Cli.secretsStatus")(function* ({ name, json }) {
+    const relay = yield* RelayClient.Service
+    yield* ensureCliRelay()
+    const result = yield* relay.authStatus({ name })
+    if (json) {
+      yield* Console.log(JSON.stringify(result, null, 2))
+      return
+    }
+    yield* Console.log(`Secrets profile ${result.name}: slots=${result.slotCount} updatedAt=${result.updatedAt}`)
+    yield* Effect.forEach(result.slots, (slot) => Console.log(`- ${slot.ref} sources=${slot.sources.join(",")} expired=${slot.expired}${slot.expiresAt ? ` expiresAt=${slot.expiresAt}` : ""}`))
+  }),
+).pipe(Command.withDescription("Show secret profile metadata without revealing values"))
+
+const secretsRefresh = Command.make(
+  "refresh",
+  {
+    name: Argument.string("name"),
+    session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s")),
+    urlFilter: Flag.string("url").pipe(Flag.optional, Flag.withDescription("Observe credentials only on matching request URLs")),
+    timeoutMs: Flag.integer("timeout-ms").pipe(Flag.optional, Flag.withDescription("Page reload timeout, defaults to 30000")),
+    json: Flag.boolean("json").pipe(Flag.withDescription("Print machine-readable JSON")),
+  },
+  Effect.fn("Cli.secretsRefresh")(function* ({ name, session, urlFilter, timeoutMs, json }) {
+    const relay = yield* RelayClient.Service
+    yield* ensureCliRelayAndExtension()
+    const sessionId = yield* networkSession(session)
+    const urlFilterValue = optionString(urlFilter)
+    const timeoutMsValue = optionNumber(timeoutMs)
+    const result = yield* relay.authRefresh({
+      sessionId,
+      name,
+      ...(urlFilterValue === undefined ? {} : { urlFilter: urlFilterValue }),
+      ...(timeoutMsValue === undefined ? {} : { timeoutMs: timeoutMsValue }),
+    })
+    yield* Console.log(json ? JSON.stringify(result, null, 2) : `Secrets profile ${name} refreshed: observed=${result.observedSecretRefs.length} changed=${result.updatedSecretRefs.length}`)
+  }),
+).pipe(Command.withDescription("Reload a session page and refresh a profile while preserving stable references"))
+
+const secretsRun = Command.make(
+  "run",
+  {
+    name: Argument.string("name"),
+    command: Argument.string("command").pipe(Argument.variadic({ min: 1 })),
+    cwd: Flag.string("cwd").pipe(Flag.optional, Flag.withDescription("Child process working directory")),
+    timeoutMs: Flag.integer("timeout-ms").pipe(Flag.optional, Flag.withDescription("Child timeout in milliseconds, defaults to 120000")),
+  },
+  Effect.fn("Cli.secretsRun")(function* ({ name, command, cwd, timeoutMs }) {
+    const relay = yield* RelayClient.Service
+    yield* ensureCliRelay()
+    const [executable, ...args] = command
+    if (!executable) return yield* Effect.fail(new Error("secrets run requires a command after --"))
+    const cwdValue = optionString(cwd)
+    const timeoutMsValue = optionNumber(timeoutMs)
+    const result = yield* relay.authRun({
+      name,
+      command: executable,
+      args,
+      cwd: path.resolve(cwdValue ?? process.cwd()),
+      ...(timeoutMsValue === undefined ? {} : { timeoutMs: timeoutMsValue }),
+    })
+    yield* Effect.sync(() => {
+      if (result.stdout) process.stdout.write(result.stdout)
+      if (result.stderr) process.stderr.write(result.stderr)
+      if (result.stdoutTruncated || result.stderrTruncated) process.stderr.write("\nBrowser Control truncated child output.\n")
+      if (result.exitCode !== 0) process.exitCode = result.exitCode
+    })
+  }),
+).pipe(Command.withDescription("Run a command with profile values injected as BC_SECRET_* environment variables"))
+
+const secrets = Command.make("secrets").pipe(
+  Command.withDescription("Inspect, refresh, and use captured credentials without revealing their values"),
+  Command.withSubcommands([secretsStatus, secretsRefresh, secretsRun]),
+)
+
 const journal = Command.make(
   "journal",
   {
@@ -697,7 +887,7 @@ const mcp = Command.make(
 
 const browserControl = Command.make("browser-control").pipe(
   Command.withDescription("Control the user's existing browser through the Browser Control extension"),
-  Command.withSubcommands([serve, execute, session, status, recording, journal, doctor, skill, mcp]),
+  Command.withSubcommands([serve, execute, session, status, network, secrets, recording, journal, doctor, skill, mcp]),
 )
 
 const mainLayer = Layer.mergeAll(RelayClient.layerFetch, SessionStore.layer).pipe(

@@ -348,6 +348,91 @@ in-progress form edits. Persistent tabs preserve navigation and DOM state betwee
 commands, but a single script is safer when one action creates the exact UI state
 that the next action must consume.
 
+## Authenticated Network Capture
+
+Use network capture when repeated direct HTTP calls would be faster and more
+reliable than driving the browser every time. Browser Control records normalized
+Playwright request/response exchanges itself; HAR is only the interoperable
+export format.
+
+Start from a logged-in session, then exercise each client flow at least twice
+with different inputs so constants and parameters can be distinguished:
+
+```bash
+browser-control network start --session github --url /api/ \
+  --resource-type fetch --resource-type xhr
+browser-control execute --session github --file ./perform-flow.js
+browser-control network status --session github
+browser-control network stop --session github \
+  --output ./github.har --secrets github
+```
+
+Captures span execute calls and handoffs and follow the session's default page
+when it is adopted or recovered. Bodies default to `embed`; use `--content omit`
+when shapes are unnecessary. The defaults cap each body at 1 MB, total retained
+body data at 25 MB, and entries at 1000. Status and stop results report body
+bytes, truncations, failures, and dropped entries without captured values.
+JSON, URL-encoded forms, and text-only multipart forms are exported with
+credential substitution. Opaque, malformed, file-bearing multipart, binary, and
+truncated bodies are omitted and counted as truncated rather than written
+without reliable redaction.
+Response bodies also require an uncompressed declared `Content-Length` within
+the remaining budgets; unknown-length or compressed bodies are omitted rather
+than materialized without a memory bound.
+
+Written artifacts are safe by default: credential-bearing headers, cookies,
+token-like query parameters, and structured body fields become literal stable
+references such as `${BC_SECRET_1}`. `--secrets github` stores the original
+values separately in `~/.browser-control/secrets/github.json` with mode `0600`.
+Never copy profile values into generated source, output, diagnostics, or a
+session journal.
+While capture is active, Browser Control also substitutes values observed in
+completed exchanges and removes secret-shaped returned fields from execute
+results, logs, URLs, and journal records. Do not deliberately return or log
+credentials; this redaction is a final safety boundary, not a secret-inspection
+interface.
+
+Inspect the HAR offline to identify first-party JSON endpoints, request
+dependencies, response shapes, pagination, and required headers. Generate one
+typed function per observed flow. Generated code reads the exact `BC_SECRET_N`
+environment variables referenced by the artifact and gives a concise refresh
+instruction on 401/403. Verify every generated function with a harmless live
+request before declaring the client complete.
+
+Run a generated client without exposing credential values:
+
+```bash
+browser-control secrets status github
+browser-control secrets run github -- ./github-cli repositories
+```
+
+Browser Control injects the profile as environment variables and replaces known
+values in bounded child stdout/stderr with their references. Do not print the
+environment variables in generated code; redaction is defense in depth, not an
+invitation to log credentials.
+
+For credentials normally renewed by a page reload:
+
+```bash
+browser-control secrets refresh github --session github --url /api/
+```
+
+Refresh preserves a reference when the credential observed at that source
+changes, and succeeds when a still-valid value is observed unchanged. If the
+site requires login, 2FA, or another human action instead, reauthenticate in the
+adopted tab and repeat `network start`/`network stop --secrets github`; the same
+source-based refresh behavior applies.
+
+Execute code has equivalent `network.start(options)`, `network.status()`,
+`network.stop({ outputPath, secrets })`, and `network.cancel()` helpers. MCP
+provides `network_start`, `network_status`, `network_stop`, `network_cancel`,
+`secrets_status`, `secrets_refresh`, and `secrets_run` over the same recorder and
+profile store.
+Pass an absolute `outputPath` from execute code (use the provided `path.resolve`)
+so artifact location does not depend on the detached relay's original working
+directory. CLI and MCP resolve relative output and child-command paths against
+their caller process working directory before contacting the relay.
+
 ## Labeled Screenshots
 
 Use `screenshotWithLabels({ page, path? })` when a visual page read would help.

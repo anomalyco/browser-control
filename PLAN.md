@@ -235,6 +235,27 @@ reconciles existing client announcements, browser grouping, and page status.
   channel. MCP emits native image attachments without temporary files or
   duplicated base64 metadata.
 
+### Authenticated Network Capture
+
+- Each Execute Sandbox owns one normalized network recorder that follows its
+  default or adopted page across execute calls and page recovery.
+- Playwright page events capture root-frame and child-frame exchanges. HAR is
+  an export adapter, not the recorder's domain model.
+- Request and response bodies have per-body and aggregate byte budgets;
+  truncation, failures, and dropped-entry counts remain visible in summaries.
+- Written artifacts always replace credential-bearing headers, cookies, query
+  parameters, and structured body fields with stable `BC_SECRET_N` references.
+- Named secret profiles retain lossless values in restrictive local files.
+  Cross-process locks serialize profile publication; repeated captures and
+  reload-based refresh preserve references by observed request source.
+- `secrets run` injects profile values into a child process and redacts known
+  values from bounded stdout and stderr before returning them.
+- While capture is active, values observed in completed exchanges and
+  secret-shaped returned data are removed from execute results, URLs, logs,
+  and journal records before they leave the sandbox.
+- CLI, MCP, and execute-sandbox helpers call the same session-owned recorder.
+  Capture is cancelled on session reset, deletion, and relay shutdown.
+
 ### Inspection And Interaction Helpers
 
 - `snapshot(options?)` provides a bounded semantic read-before-act view.
@@ -298,6 +319,9 @@ reconciles existing client announcements, browser grouping, and page status.
 - The extension protocol remains custom JSON over websocket until schema or
   versioning needs justify Effect RPC. Its shared pure validators reject
   malformed commands and envelopes without pulling Effect into the MV3 shim.
+- Authenticated capture stays in the relay-backed session sandbox. The
+  extension forwards the CDP traffic Playwright already needs; Node handles
+  correlation, budgets, export, credential profiles, and refresh.
 
 ### One schema and one client define the relay boundary
 

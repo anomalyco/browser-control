@@ -208,6 +208,162 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       }),
     },
     {
+      name: "network_start",
+      description: "Start session-scoped network capture. Browser Control records normalized Playwright exchanges; HAR is only the optional export format. Bodies are embedded by default with per-body and total memory limits.",
+      inputSchema: objectSchema({
+        session: { type: "string", description: "Optional existing session id. Omit to use or create this MCP server's current session." },
+        urlFilter: { type: "string", description: "Capture only request URLs containing this text." },
+        resourceTypes: { type: "array", items: { type: "string" }, description: "Optional Playwright resource types such as fetch and xhr." },
+        content: { type: "string", enum: ["embed", "omit"], description: "Request and response body mode. Defaults to embed." },
+        maxBodyBytes: { type: "integer", minimum: 1, description: "Maximum bytes captured from each body. Defaults to 1000000." },
+        maxTotalBodyBytes: { type: "integer", minimum: 1, description: "Maximum body bytes retained for the capture. Defaults to 25000000." },
+        maxEntries: { type: "integer", minimum: 1, description: "Maximum captured requests. Defaults to 1000." },
+      }),
+      readOnly: false,
+      destructive: false,
+      idempotent: false,
+      handle: (input) => Effect.gen(function* () {
+        const object = requireObject(input)
+        const explicitSession = optionalStringField(object, "session")
+        const sessionId = explicitSession ?? currentSession.id
+        if (explicitSession) {
+          yield* ensureSessionExists(relay, sessionId)
+        } else {
+          const sessions = yield* relay.sessions
+          if (!sessions.some((session) => session.id === sessionId)) {
+            yield* relay.sessionNew(sessionId)
+          }
+          currentSession.established = true
+        }
+        yield* RelayLifecycle.ensureExtensionConnected({ relay, waitForReconnect: true })
+        const content = optionalStringField(object, "content")
+        if (content !== undefined && content !== "embed" && content !== "omit") {
+          return yield* Effect.fail(new Error("content must be embed or omit"))
+        }
+        const urlFilter = optionalStringField(object, "urlFilter")
+        const resourceTypes = optionalStringArrayField(object, "resourceTypes")
+        const maxBodyBytes = optionalPositiveIntegerField(object, "maxBodyBytes")
+        const maxTotalBodyBytes = optionalPositiveIntegerField(object, "maxTotalBodyBytes")
+        const maxEntries = optionalPositiveIntegerField(object, "maxEntries")
+        const result = yield* relay.networkStart({
+          sessionId,
+          ...(urlFilter ? { urlFilter } : {}),
+          ...(resourceTypes && resourceTypes.length > 0 ? { resourceTypes } : {}),
+          ...(content ? { content } : {}),
+          ...(maxBodyBytes === undefined ? {} : { maxBodyBytes }),
+          ...(maxTotalBodyBytes === undefined ? {} : { maxTotalBodyBytes }),
+          ...(maxEntries === undefined ? {} : { maxEntries }),
+        })
+        return { session: sessionId, ...result }
+      }),
+    },
+    {
+      name: "network_status",
+      description: "Return bounded metadata for a session's active network capture. Captured values are never included.",
+      inputSchema: objectSchema({ session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." } }),
+      readOnly: true,
+      destructive: false,
+      idempotent: true,
+      handle: (input) => {
+        const sessionId = optionalStringField(input, "session") ?? currentSession.id
+        return relay.networkStatus({ sessionId }).pipe(Effect.map((result) => ({ session: sessionId, ...result })))
+      },
+    },
+    {
+      name: "network_stop",
+      description: "Stop network capture. Optionally write a credential-redacted HAR and store lossless credential values in a reusable secret profile. At least one of outputPath or secrets is required.",
+      inputSchema: objectSchema({
+        session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." },
+        outputPath: { type: "string", description: "Optional artifact path, resolved against the MCP process working directory. The HAR contains stable ${BC_SECRET_N} references, not captured values." },
+        secrets: { type: "string", description: "Optional reusable profile name for captured credential values." },
+      }),
+      readOnly: false,
+      destructive: false,
+      idempotent: false,
+      handle: (input) => Effect.gen(function* () {
+        const sessionId = optionalStringField(input, "session") ?? currentSession.id
+        const outputPath = optionalStringField(input, "outputPath")
+        const secrets = optionalStringField(input, "secrets")
+        if (!outputPath && !secrets) {
+          return yield* Effect.fail(new Error("network_stop requires outputPath, secrets, or both"))
+        }
+        return yield* relay.networkStop({
+          sessionId,
+          ...(outputPath ? { outputPath: path.resolve(outputPath) } : {}),
+          ...(secrets ? { secrets } : {}),
+        })
+      }),
+    },
+    {
+      name: "network_cancel",
+      description: "Cancel a session's network capture and discard its in-memory exchanges.",
+      inputSchema: objectSchema({ session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." } }),
+      readOnly: false,
+      destructive: true,
+      idempotent: true,
+      handle: (input) => relay.networkCancel({ sessionId: optionalStringField(input, "session") ?? currentSession.id }),
+    },
+    {
+      name: "secrets_status",
+      description: "Return secret profile references, sources, and expiration metadata without revealing credential values.",
+      inputSchema: objectSchema({ name: { type: "string", description: "Secret profile name." } }, ["name"]),
+      readOnly: true,
+      destructive: false,
+      idempotent: true,
+      handle: (input) => relay.authStatus({ name: requiredStringField(input, "name") }),
+    },
+    {
+      name: "secrets_refresh",
+      description: "Reload a session page, observe fresh credentials, and update a secret profile while preserving stable BC_SECRET_N references.",
+      inputSchema: objectSchema({
+        name: { type: "string", description: "Existing secret profile name." },
+        session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." },
+        urlFilter: { type: "string", description: "Observe credentials only on matching request URLs." },
+        timeoutMs: { type: "integer", minimum: 1, description: "Reload timeout. Defaults to 30000." },
+      }, ["name"]),
+      readOnly: false,
+      destructive: true,
+      idempotent: false,
+      handle: (input) => {
+        const object = requireObject(input)
+        const timeoutMs = optionalPositiveIntegerField(object, "timeoutMs")
+        const urlFilter = optionalStringField(object, "urlFilter")
+        return relay.authRefresh({
+          sessionId: optionalStringField(object, "session") ?? currentSession.id,
+          name: requiredStringField(object, "name"),
+          ...(urlFilter ? { urlFilter } : {}),
+          ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        })
+      },
+    },
+    {
+      name: "secrets_run",
+      description: "Run a local command with a captured profile injected as BC_SECRET_N environment variables. Known values are replaced with their references in stdout and stderr.",
+      inputSchema: objectSchema({
+        name: { type: "string", description: "Secret profile name." },
+        command: { type: "string", description: "Executable path or command name." },
+        args: { type: "array", items: { type: "string" }, description: "Command arguments." },
+        cwd: { type: "string", description: "Optional child working directory." },
+        timeoutMs: { type: "integer", minimum: 1, description: "Child timeout. Defaults to 120000." },
+      }, ["name", "command"]),
+      readOnly: false,
+      destructive: true,
+      idempotent: false,
+      handle: (input) => {
+        const object = requireObject(input)
+        const args = optionalStringArrayField(object, "args")
+        const cwd = optionalStringField(object, "cwd")
+        const timeoutMs = optionalPositiveIntegerField(object, "timeoutMs")
+        return relay.authRun({
+          name: requiredStringField(object, "name"),
+          command: requiredStringField(object, "command"),
+          ...(args ? { args } : {}),
+          cwd: path.resolve(cwd ?? process.cwd()),
+          ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        })
+      },
+    },
+    {
       name: "skill",
       description: "Return the Browser Control agent skill instructions.",
       inputSchema: emptyInputSchema,
@@ -341,6 +497,33 @@ function optionalBooleanField(input: unknown, field: string): boolean | undefine
   const object = requireObject(input)
   const value = object[field]
   return typeof value === "boolean" ? value : undefined
+}
+
+function optionalPositiveIntegerField(input: unknown, field: string): number | undefined {
+  const object = requireObject(input)
+  const value = object[field]
+  if (value === undefined) return undefined
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`${field} must be a positive integer`)
+  }
+  return value
+}
+
+function optionalStringArrayField(input: unknown, field: string): readonly string[] | undefined {
+  const object = requireObject(input)
+  const value = object[field]
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) {
+    throw new Error(`${field} must be an array of non-empty strings`)
+  }
+  const strings: string[] = []
+  for (const item of value) {
+    if (typeof item !== "string" || item.length === 0) {
+      throw new Error(`${field} must be an array of non-empty strings`)
+    }
+    strings.push(item)
+  }
+  return strings
 }
 
 function requireObject(input: unknown): JsonObject {

@@ -15,6 +15,8 @@ import https from "node:https"
 import zlib from "node:zlib"
 import { hideGhostCursor as hideGhostCursorOnPage, showGhostCursor as showGhostCursorOnPage, type GhostCursorClientOptions } from "./ghost-cursor.ts"
 import type { HandoffOutcome } from "./handoff.ts"
+import * as AuthProfile from "./auth-profile.ts"
+import * as NetworkCapture from "./network-capture.ts"
 import type { ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary, ExecuteMedia } from "./relay-schema.ts"
 import { executionContextFailureDiagnostic } from "./runtime-diagnostics.ts"
 
@@ -163,6 +165,12 @@ type SandboxGlobals = {
     readonly hide: (options?: HideGhostCursorOptions) => Promise<void>
   }
   readonly handoff: (message?: string, options?: HandoffCallOptions) => Promise<void>
+  readonly network: {
+    readonly start: (options?: NetworkCapture.NetworkCaptureOptions) => Promise<NetworkCapture.NetworkCaptureStatus>
+    readonly status: () => NetworkCapture.NetworkCaptureStatus
+    readonly stop: (options?: NetworkCapture.NetworkCaptureStopOptions) => Promise<NetworkCapture.NetworkCaptureResult>
+    readonly cancel: () => Promise<{ readonly cancelled: boolean }>
+  }
   readonly handoffTracker: { count: number }
 }
 
@@ -361,6 +369,7 @@ export class ExecuteSandbox {
   private pageHealthCheckRequired = false
   private readonly state: Record<string, unknown> = {}
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
+  private readonly networkCapture = new NetworkCapture.Recorder()
   private pendingWarnings: string[] = []
 
   constructor(readonly options: ExecuteSandboxOptions) {}
@@ -377,8 +386,10 @@ export class ExecuteSandbox {
       try: async () => {
         const globals = await this.getGlobals(options)
         const { result, logs, logSummary, aftermath } = await runUserCode({ code, globals })
+        await this.networkCapture.settleForOutput()
         const extracted = extractExecuteMedia(result)
-        const jsonSafeResult = toJsonSafeValue(extracted.value)
+        const redactedValue = this.networkCapture.redactValue(extracted.value)
+        const jsonSafeResult = toJsonSafeValue(redactedValue)
         const warnings = this.drainWarnings()
         const logCompactionWarning = formatLogCompactionWarning(logSummary)
         if (logCompactionWarning) {
@@ -388,14 +399,14 @@ export class ExecuteSandbox {
           warnings.push(`Execute result could not be represented as JSON value: ${jsonSafeResult.reason}`)
         }
         return {
-          text: stringifyResult(extracted.value),
+          text: stringifyResult(redactedValue),
           ...(jsonSafeResult.serializable ? { value: jsonSafeResult.value } : {}),
           ...(extracted.media.length > 0 ? { media: extracted.media } : {}),
           isError: false,
-          logs,
+          logs: this.redactCaptureLogs(logs),
           logSummary,
-          warnings,
-          aftermath,
+          warnings: warnings.map((warning) => this.networkCapture.redactText(warning)),
+          aftermath: this.redactCaptureAftermath(aftermath),
         }
       },
       catch: (cause) => {
@@ -406,6 +417,7 @@ export class ExecuteSandbox {
       },
     }).pipe(
       Effect.uninterruptible,
+      Effect.ensuring(Effect.promise(() => this.networkCapture.settleForOutput())),
       Effect.match({
         onFailure: (error): ExecuteResult => {
           const logSummary = error instanceof ExecuteCodeError ? error.logSummary : emptyExecuteLogSummary()
@@ -420,13 +432,13 @@ export class ExecuteSandbox {
             warnings.push(logCompactionWarning)
           }
           return {
-            text: error instanceof ExecuteCodeError ? error.stack ?? error.message : error.message,
+            text: this.networkCapture.redactText(error instanceof ExecuteCodeError ? error.stack ?? error.message : error.message),
             isError: true,
-            logs: error instanceof ExecuteCodeError ? error.logs : [],
+            logs: this.redactCaptureLogs(error instanceof ExecuteCodeError ? error.logs : []),
             logSummary,
-            warnings,
-            ...(diagnostic ? { diagnostic } : {}),
-            ...(aftermath ? { aftermath } : {}),
+            warnings: warnings.map((warning) => this.networkCapture.redactText(warning)),
+            ...(diagnostic ? { diagnostic: this.networkCapture.redactText(diagnostic) } : {}),
+            ...(aftermath ? { aftermath: this.redactCaptureAftermath(aftermath) } : {}),
             ...(error instanceof ExecuteCodeError ? {} : { setupFailed: true as const }),
           }
         },
@@ -443,6 +455,29 @@ export class ExecuteSandbox {
     return warnings
   }
 
+  redactNetworkCaptureText(text: string): string {
+    return this.networkCapture.redactText(text)
+  }
+
+  private redactCaptureLogs(logs: readonly ExecuteLogEntry[]): readonly ExecuteLogEntry[] {
+    return logs.map((log) => ({
+      ...log,
+      text: this.networkCapture.redactText(log.text),
+      ...(log.location ? {
+        location: { ...log.location, url: this.networkCapture.redactUrl(log.location.url) },
+      } : {}),
+    }))
+  }
+
+  private redactCaptureAftermath(aftermath: ExecuteAftermath): ExecuteAftermath {
+    return {
+      ...aftermath,
+      startUrl: aftermath.startUrl ? this.networkCapture.redactUrl(aftermath.startUrl) : aftermath.startUrl,
+      endUrl: aftermath.endUrl ? this.networkCapture.redactUrl(aftermath.endUrl) : aftermath.endUrl,
+      navigations: aftermath.navigations.map((url) => this.networkCapture.redactUrl(url)),
+    }
+  }
+
   close(): Effect.Effect<void, Error> {
     const sandbox = this
     return Effect.gen(function* () {
@@ -454,6 +489,7 @@ export class ExecuteSandbox {
       sandbox.defaultPageTargetId = undefined
       sandbox.ownsPage = false
       sandbox.pageHealthCheckRequired = false
+      yield* sandbox.networkCapture.cancel()
 
       if (ownsOpenPage) {
         yield* runPlaywrightOperation({
@@ -483,6 +519,7 @@ export class ExecuteSandbox {
       sandbox.defaultPageTargetId = undefined
       sandbox.ownsPage = false
       sandbox.pageHealthCheckRequired = false
+      yield* sandbox.networkCapture.cancel()
 
       if (ownsOpenPage) {
         yield* runSettledPlaywrightOperation({
@@ -522,6 +559,7 @@ export class ExecuteSandbox {
         sandbox.defaultPageTargetId = undefined
         sandbox.ownsPage = false
         sandbox.pageHealthCheckRequired = false
+        sandbox.networkCapture.bindPage(undefined)
       }
       const browser = sandbox.browser
       if (!browser) {
@@ -555,6 +593,7 @@ export class ExecuteSandbox {
       sandbox.defaultPageTargetId = target.targetId
       sandbox.ownsPage = false
       sandbox.pageHealthCheckRequired = false
+      sandbox.networkCapture.bindPage(selected)
       return selected.url()
     })
   }
@@ -578,6 +617,7 @@ export class ExecuteSandbox {
       this.defaultPageTargetId = undefined
       this.ownsPage = false
       this.pageHealthCheckRequired = false
+      this.networkCapture.bindPage(undefined)
       if (hadBrowser) {
         this.pendingWarnings.push("Relay connection was lost and re-established; the session default page was re-resolved.")
       }
@@ -586,6 +626,7 @@ export class ExecuteSandbox {
     installDownloadCapabilityGuards(context)
     const targetSelection = options.targetSelection
     const page = await this.getSessionPage({ context, ...(targetSelection ? { targetSelection } : {}) })
+    this.networkCapture.bindPage(this.page)
     const showGhostCursor = async (options?: ShowGhostCursorOptions) => {
       const cursorOptions = ghostCursorOptions(options)
       await showGhostCursorOnPage({ page: options?.page ?? page, ...(cursorOptions ? { cursorOptions } : {}) })
@@ -641,6 +682,12 @@ export class ExecuteSandbox {
         hide: hideGhostCursor,
       },
       handoff,
+      network: {
+        start: (options) => Effect.runPromise(this.networkCapture.start(page, options)),
+        status: () => this.networkCapture.status(),
+        stop: (options) => Effect.runPromise(this.networkCapture.stop(options)),
+        cancel: () => Effect.runPromise(this.networkCapture.cancel()),
+      },
       handoffTracker,
     }
   }
@@ -664,6 +711,7 @@ export class ExecuteSandbox {
     this.defaultPageTargetId = undefined
     this.ownsPage = false
     this.pageHealthCheckRequired = false
+    this.networkCapture.bindPage(undefined)
     if (!this.pendingWarnings.includes(defaultPageClosedWarning)) {
       this.pendingWarnings.push(defaultPageClosedWarning)
     }
@@ -677,6 +725,58 @@ export class ExecuteSandbox {
       pageUrl: this.page && !this.page.isClosed() ? this.page.url() : null,
       stateKeys: Object.keys(this.state),
     }
+  }
+
+  networkStart(options: NetworkCapture.NetworkCaptureOptions = {}): Effect.Effect<NetworkCapture.NetworkCaptureStatus, Error> {
+    const sandbox = this
+    return Effect.gen(function* () {
+      const globals = yield* Effect.tryPromise({
+        try: () => sandbox.getGlobals({}),
+        catch: (cause) => cause instanceof Error ? cause : new Error("Set up page for network capture", { cause }),
+      })
+      return yield* sandbox.networkCapture.start(globals.page, options)
+    }).pipe(Effect.uninterruptible)
+  }
+
+  networkStatus(): NetworkCapture.NetworkCaptureStatus {
+    return this.networkCapture.status()
+  }
+
+  networkStop(options: NetworkCapture.NetworkCaptureStopOptions = {}): Effect.Effect<NetworkCapture.NetworkCaptureResult, Error> {
+    return this.networkCapture.stop(options)
+  }
+
+  networkCancel(): Effect.Effect<{ readonly cancelled: boolean }> {
+    return this.networkCapture.cancel()
+  }
+
+  authRefresh(options: {
+    readonly name: string
+    readonly urlFilter?: string
+    readonly timeoutMs?: number
+  }): Effect.Effect<NetworkCapture.NetworkCaptureResult, Error> {
+    const sandbox = this
+    return Effect.gen(function* () {
+      const globals = yield* Effect.tryPromise({
+        try: () => sandbox.getGlobals({}),
+        catch: (cause) => cause instanceof Error ? cause : new Error("Set up page for auth refresh", { cause }),
+      })
+      yield* AuthProfile.read(options.name).pipe(Effect.asVoid)
+      yield* sandbox.networkCapture.start(globals.page, {
+        ...(options.urlFilter ? { urlFilter: options.urlFilter } : {}),
+      })
+      return yield* Effect.gen(function* () {
+        yield* Effect.tryPromise({
+          try: () => globals.page.reload({ waitUntil: "domcontentloaded", timeout: options.timeoutMs ?? 30_000 }),
+          catch: (cause) => cause instanceof Error ? cause : new Error("Refresh auth profile", { cause }),
+        })
+        yield* Effect.tryPromise({
+          try: () => globals.page.waitForLoadState("networkidle", { timeout: Math.min(options.timeoutMs ?? 30_000, 5_000) }).catch(() => {}),
+          catch: (cause) => cause instanceof Error ? cause : new Error("Wait for auth refresh network", { cause }),
+        })
+        return yield* sandbox.networkCapture.stop({ secrets: options.name, requireObservedSecrets: true })
+      }).pipe(Effect.ensuring(sandbox.networkCapture.cancel()))
+    }).pipe(Effect.uninterruptible)
   }
 
   private async getSessionPage({ context, targetSelection }: { readonly context: BrowserContext; readonly targetSelection?: ExecuteTargetSelection }): Promise<Page> {
@@ -2077,6 +2177,7 @@ export async function runUserCode({ code, globals }: { readonly code: string; re
       "hideGhostCursor",
       "ghostCursor",
       "handoff",
+      "network",
       wrapCodeWithModuleAliases(code),
     )
     const result = await fn(
@@ -2096,6 +2197,7 @@ export async function runUserCode({ code, globals }: { readonly code: string; re
       globals.hideGhostCursor,
       globals.ghostCursor,
       globals.handoff,
+      globals.network,
     )
     return { result, ...buildResultMetadata() }
   } catch (cause) {
