@@ -806,6 +806,44 @@ return await snapshot({ interactive: true })
         if (!unnamedRefOutput.includes('textbox "q"') || !unnamedRefOutput.includes("count: 1")) {
           return yield* Effect.fail(new Error(`snapshot ref for an unnamed control did not preserve structural identity: ${unnamedRefOutput}`))
         }
+        const classRefOutput = yield* runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          `
+await page.setContent('<main><div><div class="drop-down-click" tabindex="0" role="button"><span>Books</span></div></div><p id="class-result"></p></main>')
+await page.locator('.drop-down-click').evaluate((button) => {
+  button.addEventListener('click', () => { document.querySelector('#class-result').textContent = 'clicked' })
+})
+return await snapshot({ within: '.drop-down-click' })
+          `,
+        ])
+        if (!classRefOutput.includes('button "Books" [ref=e1]')) {
+          return yield* Effect.fail(new Error(`snapshot omitted the unique-class control: ${classRefOutput}`))
+        }
+        const classRerenderOutput = yield* runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          `
+await page.evaluate(() => {
+  const current = document.querySelector('.drop-down-click')
+  if (!(current instanceof HTMLElement)) throw new Error('missing class control')
+  const sibling = document.createElement('div')
+  sibling.textContent = 'Inserted sibling'
+  current.before(sibling)
+  const replacement = current.cloneNode(true)
+  if (!(replacement instanceof HTMLElement)) throw new Error('invalid replacement')
+  replacement.addEventListener('click', () => { document.querySelector('#class-result').textContent = 'clicked' })
+  current.replaceWith(replacement)
+})
+await ref('e1').click()
+return { result: await page.locator('#class-result').textContent() }
+          `,
+        ])
+        if (!classRerenderOutput.includes("result: 'clicked'")) {
+          return yield* Effect.fail(new Error(`unique-class snapshot ref did not survive a safe rerender: ${classRerenderOutput}`))
+        }
         return {
           snapshotOutput: snapshotOutput.trim(),
           diffOutput: diffOutput.trim(),
@@ -817,6 +855,8 @@ return await snapshot({ interactive: true })
           denseOutput: denseOutput.trim(),
           structureOutput: structureOutput.trim(),
           unnamedRefOutput: unnamedRefOutput.trim(),
+          classRefOutput: classRefOutput.trim(),
+          classRerenderOutput: classRerenderOutput.trim(),
         }
       }).pipe(Effect.ensuring(runBrowserControl(["session", "delete", smokeSession]).pipe(Effect.ignore)))
     }),
