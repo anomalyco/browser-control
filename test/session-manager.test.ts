@@ -9,6 +9,7 @@ type FakeSandbox = ExecuteSandboxLike & {
   readonly adoptedSelections: () => unknown[]
   readonly crashedTargets: () => string[]
   readonly detachedTargets: () => string[]
+  readonly replacedTargets: () => Array<readonly [string, string]>
 }
 
 const makeFakeSandbox = (options?: {
@@ -24,6 +25,7 @@ const makeFakeSandbox = (options?: {
   const adoptedSelections: unknown[] = []
   const crashedTargets: string[] = []
   const detachedTargets: string[] = []
+  const replacedTargets: Array<readonly [string, string]> = []
   const close = () => Effect.sync(() => {
     closes += 1
   }).pipe(Effect.andThen(options?.onClose ?? Effect.void))
@@ -71,11 +73,16 @@ const makeFakeSandbox = (options?: {
       detachedTargets.push(targetId)
       return options?.defaultTargetId === undefined || options.defaultTargetId === targetId
     },
+    markTargetReplaced: (previousTargetId, targetId) => {
+      replacedTargets.push([previousTargetId, targetId])
+      return options?.defaultTargetId === undefined || options.defaultTargetId === previousTargetId
+    },
     getStatus: () => ({ connected: false, pageUrl: null, stateKeys: [] }),
     closes: () => closes,
     adoptedSelections: () => adoptedSelections,
     crashedTargets: () => crashedTargets,
     detachedTargets: () => detachedTargets,
+    replacedTargets: () => replacedTargets,
   }
 }
 
@@ -160,6 +167,19 @@ describe("BrowserControlSessions", () => {
     expect(sessions.markTargetDetached("target-1")).toEqual(["alpha"])
     expect(first.detachedTargets()).toEqual(["target-1"])
     expect(second.detachedTargets()).toEqual(["target-1"])
+  })
+
+  it("rebinds only the session page backed by a replaced root target", () => {
+    const first = makeFakeSandbox({ defaultTargetId: "target-1" })
+    const second = makeFakeSandbox({ defaultTargetId: "target-2" })
+    const sandboxes = [first, second]
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandboxes.shift()!)
+    sessions.createNew("alpha")
+    sessions.createNew("beta")
+
+    expect(sessions.markTargetReplaced("target-1", "target-new")).toEqual(["alpha"])
+    expect(first.replacedTargets()).toEqual([["target-1", "target-new"]])
+    expect(second.replacedTargets()).toEqual([["target-1", "target-new"]])
   })
 
   it("delete waits for a running execute before closing the sandbox", async () => {
@@ -843,6 +863,53 @@ describe("BrowserControlSessions", () => {
       expect(sessions.adoptedTargetId("alpha")).toBeUndefined()
       expect(registry.targetsByTargetId.get("target-1")?.browserControlSessionId).toBeUndefined()
     }))
+  })
+
+  it("releases a replacement generation of the previously adopted target", async () => {
+    const registry = new TargetRegistry()
+    const addTarget = (tabId: number, sessionId: string, targetId: string) => registry.addRootTarget({
+      tabId,
+      sessionId,
+      owner: "user" as const,
+      targetInfo: {
+        targetId,
+        type: "page" as const,
+        title: targetId,
+        url: `https://example.com/${targetId}`,
+        attached: true,
+        canAccessOpener: false,
+      },
+    })
+    addTarget(1, "bc-tab-a", "target-a")
+    addTarget(2, "bc-tab-b", "target-b")
+    let sessions: BrowserControlSessions
+    sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox({
+      onAdopt: (target) => Effect.sync(() => {
+        if (target.targetId === "target-b") {
+          addTarget(1, "bc-tab-a2", "target-a2")
+          sessions.markTargetReplaced("target-a", "target-a2")
+        }
+        return target.url
+      }),
+    }), undefined, registry)
+    sessions.createNew("alpha")
+
+    await Effect.runPromise(sessions.adopt({
+      sessionId: "alpha",
+      createIfMissing: false,
+      targetId: "target-a",
+      targetUrl: "https://example.com/target-a",
+    }))
+    await Effect.runPromise(sessions.adopt({
+      sessionId: "alpha",
+      createIfMissing: false,
+      targetId: "target-b",
+      targetUrl: "https://example.com/target-b",
+    }))
+
+    expect(sessions.adoptedTargetId("alpha")).toBe("target-b")
+    expect(registry.targetsByTargetId.get("target-a2")?.browserControlSessionId).toBeUndefined()
+    expect(registry.targetsByTargetId.get("target-b")?.browserControlSessionId).toBe("alpha")
   })
 
   it("preserves an existing sandbox when adoption times out before starting", async () => {

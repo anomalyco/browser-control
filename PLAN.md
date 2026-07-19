@@ -351,6 +351,10 @@ reconciles existing client announcements, browser grouping, and page status.
   OOPIF reconnects.
 - Never announce one target id twice to the same client. Emit
   `Target.detachedFromTarget` before re-announcing it with a new session id.
+- Treat a new root target/session generation for an existing physical tab as a
+  replacement transaction: preserve committed ownership, roll back provisional
+  adoption ownership, detach old clients and children, rebind handoffs, and
+  reacquire the new Playwright page by exact target id.
 - Await HTTP and websocket close callbacks during relay shutdown so tests and
   smoke runs do not leak ports or listeners.
 - Relay shutdown closes the adoption gate and drains active or queued adoption
@@ -380,8 +384,12 @@ not contain expressions, arguments, results, headers, cookies, or form values.
 ### Builds provide runtime identity
 
 `scripts/build-cli.ts` injects the package version and build id. Source runs use
-`0.0.0-dev` and `dev`; runtime code does not hardcode release versions. The
+`0.0.0-dev` and a deterministic fingerprint of `src/*.ts`, `package.json`, and
+`pnpm-lock.yaml`; runtime code does not hardcode release versions. The
 relay reports both values so `doctor` can identify a stale long-running relay.
+It also reports an instance id, start time, and PID; bounded managed-relay
+process-fault diagnostics are retained locally so unexpected same-build
+restarts can be distinguished from session eviction.
 
 ## Known Limitations
 

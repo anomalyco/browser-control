@@ -193,6 +193,9 @@ export interface ExtensionStatus extends Schema.Schema.Type<typeof ExtensionStat
 export const RelayVersion = Schema.Struct({
   version: Schema.String,
   buildId: Schema.optionalKey(Schema.String),
+  instanceId: Schema.optionalKey(Schema.String),
+  startedAt: Schema.optionalKey(Schema.String),
+  pid: Schema.optionalKey(Schema.Number),
 })
 
 export interface RelayVersion extends Schema.Schema.Type<typeof RelayVersion> {}

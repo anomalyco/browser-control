@@ -35,9 +35,6 @@ export class ExtensionDisconnected extends Schema.TaggedErrorClass<ExtensionDisc
 ) {}
 
 export function relayBuildProblem(version: RelayVersion, buildId = browserControlBuildId): string | undefined {
-  if (buildId === "dev") {
-    return undefined
-  }
   if (!version.buildId) {
     return `Running relay does not report a build id; restart it with the current CLI (${buildId}).`
   }

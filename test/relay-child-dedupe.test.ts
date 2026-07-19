@@ -47,9 +47,15 @@ describe("relay child target announce dedupe", () => {
       yield* Effect.tryPromise(async () => {
         const extension = await openSocket(`${relay.url.replace("http://", "ws://")}/extension`)
         const extensionCommands: Array<{ readonly method: string; readonly params?: JsonObject }> = []
+        let targetInfoFailures = 0
         extension.on("message", (data) => {
           const command = JSON.parse(data.toString()) as { readonly id: number; readonly method: string; readonly params?: JsonObject }
           extensionCommands.push(command)
+          if (command.method === "debugger.sendCommand" && command.params?.method === "Target.getTargetInfo" && targetInfoFailures > 0) {
+            targetInfoFailures -= 1
+            extension.send(JSON.stringify({ id: command.id, error: "transient target probe failure" }))
+            return
+          }
           const result = command.method === "debugger.sendCommand" && command.params?.method === "Target.getTargetInfo"
             ? { targetInfo: targetInfo("root-target") }
             : {}
@@ -127,10 +133,12 @@ describe("relay child target announce dedupe", () => {
           method: "debugger.detached",
           params: { tabId: 1, reason: "target_closed", sessionId: "password-manager-child-session" },
         }))
+        targetInfoFailures = 2
         extension.send(JSON.stringify({
           method: "debugger.detached",
           params: { tabId: 1, reason: "target_closed" },
         }))
+        await waitFor(() => targetInfoFailures === 0)
 
         client.send(JSON.stringify({ id: 2, sessionId: rootSessionId, method: "Target.getTargetInfo", params: {} }))
         client.send(JSON.stringify({ id: 3, sessionId: rootSessionId, method: "Page.navigate", params: { url: "https://example.com/after-focus" } }))
@@ -159,6 +167,81 @@ describe("relay child target announce dedupe", () => {
         }))
         const navigateCommand = extensionCommands.find((command) => command.method === "debugger.sendCommand" && command.params?.method === "Page.navigate")
         expect(navigateCommand?.params?.sessionId).toBeUndefined()
+        expect(extensionCommands.some((command) => {
+          return command.method === "action.setAttached" && command.params?.attached === false
+        })).toBe(false)
+
+        client.close()
+        extension.close()
+      })
+    })))
+  })
+
+  it("commits one replacement generation after setup retries", async () => {
+    const port = await freePort()
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port })
+      yield* Effect.tryPromise(async () => {
+        const extension = await openSocket(`${relay.url.replace("http://", "ws://")}/extension`)
+        let currentTargetId = "root-old"
+        let autoAttachFailures = 0
+        const extensionCommands: Array<{ readonly method: string; readonly params?: JsonObject }> = []
+        extension.on("message", (data) => {
+          const command = JSON.parse(data.toString()) as { readonly id: number; readonly method: string; readonly params?: JsonObject }
+          extensionCommands.push(command)
+          if (command.method === "debugger.sendCommand" && command.params?.method === "Target.setAutoAttach" && autoAttachFailures > 0) {
+            autoAttachFailures -= 1
+            currentTargetId = "root-final"
+            extension.send(JSON.stringify({ id: command.id, error: "transient auto-attach failure" }))
+            extension.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 1 } }))
+            return
+          }
+          const result = command.method === "debugger.sendCommand" && command.params?.method === "Target.getTargetInfo"
+            ? { targetInfo: targetInfo(currentTargetId) }
+            : {}
+          extension.send(JSON.stringify({ id: command.id, result }))
+        })
+        extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.17" } }))
+        extension.send(JSON.stringify({ method: "toolbar.clicked", params: { tabId: 1 } }))
+        await waitFor(() => extensionCommands.some((command) => command.method === "action.setAttached"))
+
+        const client = await openSocket(`${relay.url.replace("http://", "ws://")}/devtools/browser/test`)
+        const messages: CdpEvent[] = []
+        client.on("message", (data) => {
+          const message = JSON.parse(data.toString()) as CdpEvent | { readonly id: number }
+          if ("method" in message) messages.push(message)
+        })
+        client.send(JSON.stringify({ id: 1, method: "Target.setAutoAttach", params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true } }))
+        await waitFor(() => messages.some((message) => message.method === "Target.attachedToTarget"))
+        const oldAttach = messages.find((message) => message.method === "Target.attachedToTarget")
+        const oldSessionId = typeof oldAttach?.params?.sessionId === "string" ? oldAttach.params.sessionId : undefined
+        expect(oldSessionId).toBeDefined()
+
+        currentTargetId = "root-new"
+        autoAttachFailures = 1
+        extension.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 1 } }))
+        extension.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 1 } }))
+
+        await waitFor(() => messages.some((message) => {
+          return message.method === "Target.attachedToTarget" && message.params?.targetInfo &&
+            typeof message.params.targetInfo === "object" && !Array.isArray(message.params.targetInfo) &&
+            message.params.targetInfo.targetId === "root-final"
+        }))
+        const detachIndex = messages.findIndex((message) => message.method === "Target.detachedFromTarget" && message.params?.sessionId === oldSessionId)
+        const replacementAttachIndexes = messages.flatMap((message, index) => {
+          const info = message.method === "Target.attachedToTarget" ? message.params?.targetInfo : undefined
+          return info && typeof info === "object" && !Array.isArray(info) && info.targetId === "root-final" ? [index] : []
+        })
+        expect(detachIndex).toBeGreaterThanOrEqual(0)
+        expect(replacementAttachIndexes).toHaveLength(1)
+        expect(detachIndex).toBeLessThan(replacementAttachIndexes[0]!)
+        expect(messages.some((message) => {
+          const info = message.method === "Target.attachedToTarget" ? message.params?.targetInfo : undefined
+          return info && typeof info === "object" && !Array.isArray(info) && info.targetId === "root-new"
+        })).toBe(false)
+        expect(extensionCommands.filter((command) => {
+          return command.method === "debugger.sendCommand" && command.params?.method === "Target.setAutoAttach"
+        }).length).toBeGreaterThanOrEqual(3)
 
         client.close()
         extension.close()

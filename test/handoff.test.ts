@@ -100,6 +100,22 @@ describe("HandoffRegistry", () => {
     expect(registry.complete({ id: wait.id, tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-new" })).toBe(true)
     await expect(wait.outcome).resolves.toBe("resolved")
   })
+
+  it("rebinds a pending handoff to a replacement root generation", async () => {
+    const registry = registryWithIds("handoff-1")
+    const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-old", targetSessionId: "bc-tab-old", message: "m", timeoutMs: 5_000 })
+
+    expect(registry.rebindTarget({
+      tabId: 7,
+      previousTargetId: "target-old",
+      previousTargetSessionId: "bc-tab-old",
+      targetId: "target-new",
+      targetSessionId: "bc-tab-new",
+    })).toBe(true)
+    expect(registry.complete({ id: wait.id, tabId: 7, targetId: "target-old", targetSessionId: "bc-tab-old" })).toBe(false)
+    expect(registry.complete({ id: wait.id, tabId: 7, targetId: "target-new", targetSessionId: "bc-tab-new" })).toBe(true)
+    await expect(wait.outcome).resolves.toBe("resolved")
+  })
 })
 
 describe("resolveExactHandoffTarget", () => {

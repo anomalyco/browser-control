@@ -381,10 +381,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
 const relayLayer = Layer.effectDiscard(
   Effect.gen(function* () {
     const relay = yield* RelayClient.Service
-    const readiness = yield* RelayLifecycle.ensureRelay({ relay })
-    if (readiness.buildProblem) {
-      return yield* Effect.fail(new Error(readiness.buildProblem))
-    }
+    yield* RelayLifecycle.ensureRelay({ relay })
   }),
 )
 
@@ -411,7 +408,14 @@ const registerTools = Effect.gen(function* () {
       }),
       annotations: Context.empty(),
       handle: (payload: unknown) => {
-        return spec.handle(payload).pipe(
+        const operation = mcpToolRequiresRelayCompatibility(spec.name)
+          ? RelayLifecycle.ensureRelay({ relay }).pipe(
+            Effect.flatMap((readiness) => readiness.buildProblem
+              ? Effect.fail(new Error(readiness.buildProblem))
+              : spec.handle(payload)),
+          )
+          : spec.handle(payload)
+        return operation.pipe(
           Effect.match({
             onFailure: (error) => toolResult({ text: mcpErrorMessage(spec.name, error.message), isError: true }),
             onSuccess: (value) => toolResultForValue(value),
@@ -421,6 +425,10 @@ const registerTools = Effect.gen(function* () {
     })
   }, { discard: true })
 })
+
+export function mcpToolRequiresRelayCompatibility(name: string): boolean {
+  return name !== "status" && name !== "session_current" && name !== "skill"
+}
 
 export const runMcpServer: Effect.Effect<never, Error> = Layer.launch(
   Layer.mergeAll(

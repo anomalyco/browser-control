@@ -18,8 +18,8 @@ type PendingHandoff = {
   readonly id: string
   readonly sessionId: string
   readonly tabId: number
-  readonly targetId: string
-  readonly targetSessionId: string
+  targetId: string
+  targetSessionId: string
   readonly message: string
   readonly resolve: (outcome: HandoffOutcome) => void
 }
@@ -128,6 +128,24 @@ export class HandoffRegistry {
 
   get pendingCount(): number {
     return this.pending.size
+  }
+
+  rebindTarget(options: {
+    readonly tabId: number
+    readonly previousTargetId: string
+    readonly previousTargetSessionId: string
+    readonly targetId: string
+    readonly targetSessionId: string
+  }): boolean {
+    const pending = Array.from(this.pending.values()).find((candidate) => {
+      return candidate.tabId === options.tabId &&
+        candidate.targetId === options.previousTargetId &&
+        candidate.targetSessionId === options.previousTargetSessionId
+    })
+    if (!pending) return false
+    pending.targetId = options.targetId
+    pending.targetSessionId = options.targetSessionId
+    return true
   }
 
   cancelForTarget(options: {

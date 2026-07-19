@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { selectAdoptCandidateByUrl, selectTarget, shouldCloseCurrentPageOnAdopt } from "../src/execute.ts"
+import { selectTarget, shouldCloseCurrentPageOnAdopt, waitForExactTarget } from "../src/execute.ts"
 import { TargetRegistry } from "../src/target-registry.ts"
 
 describe("target selection", () => {
@@ -17,46 +17,78 @@ describe("target selection", () => {
     expect(selectTarget({ targets, selection: { index: 1 }, getUrl: (target) => target.url })?.url).toBe("https://kit.example/b")
   })
 
+  it("waits for the exact replacement target instead of selecting a same-URL decoy", async () => {
+    const old = { id: "old", url: "https://example.com/same" }
+    const decoy = { id: "decoy", url: "https://example.com/same" }
+    const replacement = { id: "replacement", url: "https://example.com/same" }
+    let attempts = 0
+
+    await expect(waitForExactTarget({
+      targetId: "replacement",
+      timeoutMs: 20,
+      candidates: () => ++attempts < 2 ? [old, decoy] : [old, decoy, replacement],
+      getTargetId: async (candidate) => candidate.id,
+      delay: () => Promise.resolve(),
+    })).resolves.toBe(replacement)
+  })
+
+  it("bounds a target id resolver that never settles", async () => {
+    const startedAt = Date.now()
+    await expect(waitForExactTarget({
+      targetId: "replacement",
+      timeoutMs: 20,
+      candidates: () => [{ id: "stale" }],
+      getTargetId: () => new Promise<string>(() => {}),
+    })).resolves.toBeUndefined()
+    expect(Date.now() - startedAt).toBeLessThan(100)
+  })
+
+  it("returns an exact match without waiting for a stale candidate", async () => {
+    const stale = { id: "stale" }
+    const replacement = { id: "replacement" }
+    await expect(waitForExactTarget({
+      targetId: "replacement",
+      timeoutMs: 20,
+      candidates: () => [stale, replacement],
+      getTargetId: (candidate) => candidate === stale
+        ? new Promise<string>(() => {})
+        : Promise.resolve(candidate.id),
+    })).resolves.toBe(replacement)
+  })
+
+  it("discovers a replacement that appears while a stale probe is pending", async () => {
+    const stale = { id: "stale" }
+    const replacement = { id: "replacement" }
+    let polls = 0
+    await expect(waitForExactTarget({
+      targetId: "replacement",
+      timeoutMs: 250,
+      candidates: () => ++polls === 1 ? [stale] : [stale, replacement],
+      getTargetId: (candidate) => candidate === stale
+        ? new Promise<string>(() => {})
+        : Promise.resolve(candidate.id),
+    })).resolves.toBe(replacement)
+    expect(polls).toBeGreaterThan(1)
+  })
+
+  it("retries a candidate whose target id was temporarily unavailable", async () => {
+    const candidate = { id: "replacement" }
+    let attempts = 0
+    await expect(waitForExactTarget({
+      targetId: "replacement",
+      timeoutMs: 20,
+      candidates: () => [candidate],
+      getTargetId: async () => ++attempts === 1 ? undefined : candidate.id,
+      delay: () => Promise.resolve(),
+    })).resolves.toBe(candidate)
+    expect(attempts).toBe(2)
+  })
+
   it("explains that target selectors do not navigate or create pages", () => {
     expect(() => selectTarget({ targets, selection: { urlIncludes: "missing.example" }, getUrl: (target) => target.url }))
       .toThrow("Target selectors do not navigate or open pages")
     expect(() => selectTarget({ targets, selection: { index: 4 }, getUrl: (target) => target.url }))
       .toThrow("Target selectors do not create pages")
-  })
-
-  it("threads the validation target URL so adoption agrees when page order differs", () => {
-    const registryTargets = [
-      { targetId: "target-a", url: "https://first.example" },
-      { targetId: "target-b", url: "https://second.example" },
-    ]
-    const selectedByHttpValidation = selectTarget({
-      targets: registryTargets,
-      selection: { index: 1 },
-      getUrl: (target) => target.url,
-    })
-    const playwrightPagesInDifferentOrder = [
-      { targetId: "target-b", url: "https://second.example" },
-      { targetId: "target-a", url: "https://first.example" },
-    ]
-
-    const adoptedBySandbox = selectAdoptCandidateByUrl({
-      candidates: playwrightPagesInDifferentOrder,
-      targetUrl: selectedByHttpValidation?.url ?? "",
-      getUrl: (page) => page.url,
-    })
-
-    expect(selectedByHttpValidation?.url).toBe("https://second.example")
-    expect(adoptedBySandbox?.url).toBe("https://second.example")
-  })
-
-  it("refuses URL-based adopt mapping when multiple Playwright pages have the validated URL", () => {
-    expect(() =>
-      selectAdoptCandidateByUrl({
-        candidates: [{ url: "https://same.example" }, { url: "https://same.example" }],
-        targetUrl: "https://same.example",
-        getUrl: (page) => page.url,
-      })
-    ).toThrow("cannot safely map")
   })
 
   it("closes only a different open relay-owned page when adopting", () => {
