@@ -13,7 +13,7 @@ prompt: |
 
 Browser Control is a local browser driver for agents. It lets trusted agents
 operate the user's visible Chromium-family browser through an installed
-extension and a local bridge.
+extension and a local driver daemon.
 
 ## Language
 
@@ -31,6 +31,19 @@ _Avoid_: Driver
 The user's already-running Chromium-family browser with the Browser Control
 extension installed.
 _Avoid_: Chrome-only, managed browser
+
+**Local Driver Daemon**:
+The persistent Node process that owns Playwright execution, Browser Control
+sessions, target ownership, cross-process serialization, artifacts, and the
+transport to the browser extension. It is a deep module, not a pass-through
+message relay.
+_Avoid_: Temporary bridge, extension reload helper
+
+**Extension Protocol**:
+The compatibility version reported by the extension when it connects to the
+Local Driver Daemon. Store and npm release versions may differ while this
+protocol remains compatible.
+_Avoid_: Extension package version, relay build id
 
 **Attached Tab**:
 A browser tab whose debugger connection is active and therefore visible and
@@ -88,6 +101,14 @@ The endpoint-scoped, private relay file that preserves session identity,
 read-only mode, and the exact default-target pointer across relay processes.
 Lifecycle operations acknowledge only after its atomic replacement is durable.
 It does not serialize Execute Sandbox JavaScript state or snapshot refs.
+
+**Dead Persisted Target**:
+A relay-owned target identity retained in the Session Catalog that is absent
+after the current extension finishes reconciling its attached-tab inventory, or
+after a bounded reconnect grace when no inventory arrives. Explicit reset or
+delete may forget this identity but must never guess which physical tab to
+close.
+_Avoid_: Detached tab, closed user tab
 _Avoid_: Current-session store, session journal, sandbox snapshot
 
 **MCP Process Session**:

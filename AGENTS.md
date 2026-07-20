@@ -151,6 +151,10 @@ local Node relay.
   navigation timestamps.
 - Session delete/reset must acquire the session's execute permit before closing
   the sandbox, so running scripts are never yanked mid-flight.
+- Reset/delete of an absent persisted relay-owned target waits for protocol-v1
+  inventory reconciliation or a bounded grace, then forgets the dead identity
+  without guessing a physical tab to close. Never apply this dead-target path
+  to adopted user tabs.
 - The version string and build id are injected by `scripts/build-cli.ts`
   (`src/version.ts`; source runs use `0.0.0-dev` and a deterministic source
   and dependency-lock fingerprint). The relay
@@ -238,7 +242,8 @@ browser-control skill
 
 - Load `extension/dist` as the unpacked extension.
 - The relay listens on `127.0.0.1:19989` by default.
-- Current shim version is `0.0.18`.
+- Current shim version is `0.0.22` and extension protocol version is `1`.
+- Store and npm versions may differ when protocol `1` remains compatible.
 - On socket open the shim sends `hello` and then re-announces every tab it still
   has `chrome.debugger` attached to (`debugger.attached` events), so a restarted
   relay rebuilds its target registry without the user re-clicking the toolbar.

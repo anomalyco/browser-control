@@ -34,6 +34,14 @@ export class ExtensionDisconnected extends Schema.TaggedErrorClass<ExtensionDisc
   { message: Schema.String },
 ) {}
 
+export class ExtensionProtocolIncompatible extends Schema.TaggedErrorClass<ExtensionProtocolIncompatible>()(
+  "RelayLifecycle.ExtensionProtocolIncompatible",
+  {
+    message: Schema.String,
+    protocolVersion: Schema.NullOr(Schema.Number),
+  },
+) {}
+
 export function relayBuildProblem(version: RelayVersion, buildId = browserControlBuildId): string | undefined {
   if (!version.buildId) {
     return `Running relay does not report a build id; restart it with the current CLI (${buildId}).`
@@ -82,20 +90,29 @@ export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensio
   readonly retryTimes?: number
   readonly retryDelayMs?: number
 }) {
-  const check = options.relay.extensionStatus.pipe(
-    Effect.flatMap((status) => status.connected
+  const check = options.relay.extensionStatus.pipe(Effect.flatMap((status): Effect.Effect<
+    ExtensionStatus,
+    ExtensionProtocolIncompatible | ExtensionDisconnected
+  > => {
+    if (status.protocolCompatible === false) {
+      return Effect.fail(new ExtensionProtocolIncompatible({
+        message: `Browser Control extension protocol ${status.protocolVersion ?? "unknown"} is incompatible with this relay.`,
+        protocolVersion: status.protocolVersion ?? null,
+      }))
+    }
+    return status.connected
       ? Effect.succeed(status)
       : Effect.fail(new ExtensionDisconnected({
         message: "Browser Control extension is not connected. Load extension/dist in Chromium; it reconnects automatically when the relay starts.",
-      }))),
-  )
+      }))
+  }))
   if (!options.waitForReconnect) {
     return yield* check
   }
   return yield* check.pipe(
     Effect.retry({
-      times: options.retryTimes ?? 40,
-      schedule: Schedule.spaced(options.retryDelayMs ?? 50),
+      times: options.retryTimes ?? 50,
+      schedule: Schedule.spaced(options.retryDelayMs ?? 200),
       while: (error) => error instanceof ExtensionDisconnected || isRelayStartingOrUnreachable(error),
     }),
   )

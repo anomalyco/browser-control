@@ -4,6 +4,22 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { readonly [key: string]: 
 
 export type JsonObject = { readonly [key: string]: JsonValue }
 
+export const extensionProtocolVersion = 1
+export const legacyExtensionProtocolVersion = 1
+
+export type ExtensionProtocolCompatibility = {
+  readonly version: number | null
+  readonly compatible: boolean
+  readonly legacy: boolean
+}
+
+export function extensionProtocolCompatibility(value: JsonValue | undefined): ExtensionProtocolCompatibility {
+  const legacy = value === undefined
+  const valid = typeof value === "number" && Number.isSafeInteger(value) && value > 0
+  const version = valid ? value : legacy ? legacyExtensionProtocolVersion : null
+  return { version, compatible: version === extensionProtocolVersion, legacy }
+}
+
 export type CdpRequest = {
   readonly id: number
   readonly method: string
@@ -79,6 +95,7 @@ export type ExtensionResponse = {
 export type ExtensionEvent = {
   readonly method:
     | "hello"
+    | "ready"
     | "toolbar.clicked"
     | "handoff.completed"
     | "debugger.event"
@@ -123,6 +140,7 @@ const extensionCommandMethods = new Set<ExtensionCommand["method"]>([
 
 const extensionEventMethods = new Set<ExtensionEvent["method"]>([
   "hello",
+  "ready",
   "toolbar.clicked",
   "handoff.completed",
   "debugger.event",

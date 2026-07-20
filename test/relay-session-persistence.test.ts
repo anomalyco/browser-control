@@ -131,7 +131,7 @@ describe("relay session persistence", () => {
     })))
   })
 
-  it("retains a restored relay target when reset runs before extension re-announcement", async () => {
+  it("waits for a delayed relay target re-announcement before resetting", async () => {
     const port = await freePort()
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "browser-control-relay-sessions-"))
     temporaryDirectories.push(directory)
@@ -146,22 +146,125 @@ describe("relay session persistence", () => {
     }])
 
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
-      const relay = yield* startRelay({ port, sessionCatalogPath })
+      const relay = yield* startRelay({ port, sessionCatalogPath, releaseTargetGraceMs: 1_000 })
       yield* Effect.tryPromise(async () => {
-        const reset = await fetch(new URL("/cli/session/reset", relay.url), {
+        let settled = false
+        const resetPromise = fetch(new URL("/cli/session/reset", relay.url), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: "restored" }),
+        }).then((response) => {
+          settled = true
+          return response
+        })
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        expect(settled).toBe(false)
+
+        const extension = await openProtocolExtension(relay.url, "relay-target")
+        const reset = await resetPromise
+        expect(reset.status).toBe(200)
+        expect(extension.commands.some((command) => command.method === "tabs.remove" && command.params?.tabId === 7)).toBe(true)
+        await expect(catalog.load()).resolves.toMatchObject([{
+          id: "restored",
+        }])
+        expect((await catalog.load())[0]?.target).toBeUndefined()
+        extension.close()
+      })
+    })))
+  })
+
+  for (const operation of ["reset", "delete"] as const) {
+    it(`${operation} forgets a relay target missing from a completed extension inventory`, async () => {
+      const port = await freePort()
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "browser-control-relay-sessions-"))
+      temporaryDirectories.push(directory)
+      const sessionCatalogPath = path.join(directory, "sessions.json")
+      const catalog = new SessionCatalog(sessionCatalogPath)
+      await catalog.save([{
+        id: "restored",
+        createdAt: "2026-07-19T00:00:00.000Z",
+        updatedAt: "2026-07-19T00:01:00.000Z",
+        readOnly: false,
+        target: { id: "dead-target", owner: "relay" },
+      }])
+
+      await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+        const relay = yield* startRelay({ port, sessionCatalogPath, releaseTargetGraceMs: 1_000 })
+        yield* Effect.tryPromise(async () => {
+          const lifecycle = fetch(new URL(`/cli/session/${operation}`, relay.url), {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ id: "restored" }),
+          })
+          const extension = await openProtocolExtension(relay.url)
+          const response = await lifecycle
+
+          expect(response.status).toBe(200)
+          expect(extension.commands.some((command) => command.method === "tabs.remove")).toBe(false)
+          const entries = await catalog.load()
+          if (operation === "reset") {
+            expect(entries).toMatchObject([{ id: "restored" }])
+            expect(entries[0]?.target).toBeUndefined()
+          } else {
+            expect(entries).toEqual([])
+          }
+          extension.close()
+        })
+      })))
+    })
+  }
+
+  it("bounds stale relay target cleanup when no extension inventory arrives", async () => {
+    const port = await freePort()
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "browser-control-relay-sessions-"))
+    temporaryDirectories.push(directory)
+    const sessionCatalogPath = path.join(directory, "sessions.json")
+    const catalog = new SessionCatalog(sessionCatalogPath)
+    await catalog.save([{
+      id: "restored",
+      createdAt: "2026-07-19T00:00:00.000Z",
+      updatedAt: "2026-07-19T00:01:00.000Z",
+      readOnly: false,
+      target: { id: "dead-target", owner: "relay" },
+    }])
+
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port, sessionCatalogPath, releaseTargetGraceMs: 20 })
+      yield* Effect.tryPromise(async () => {
+        const response = await fetch(new URL("/cli/session/reset", relay.url), {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ id: "restored" }),
         })
-        expect(reset.status).toBe(500)
-        await expect(catalog.load()).resolves.toMatchObject([{
-          id: "restored",
-          target: { id: "relay-target", owner: "relay" },
-        }])
+        expect(response.status).toBe(200)
+        expect((await catalog.load())[0]?.target).toBeUndefined()
       })
     })))
   })
 })
+
+type FakeExtensionCommand = {
+  readonly id: number
+  readonly method: string
+  readonly params?: { readonly method?: string; readonly tabId?: number }
+}
+
+async function openProtocolExtension(relayUrl: string, targetId?: string): Promise<WebSocket & { readonly commands: FakeExtensionCommand[] }> {
+  const commands: FakeExtensionCommand[] = []
+  const extension = await openSocket(`${relayUrl.replace("http://", "ws://")}/extension`)
+  extension.on("message", (data) => {
+    const command = JSON.parse(data.toString()) as FakeExtensionCommand
+    commands.push(command)
+    const result = command.method === "debugger.sendCommand" && command.params?.method === "Target.getTargetInfo" && targetId
+      ? { targetInfo: { targetId, type: "page", title: "Restored", url: "https://example.com/", attached: true, canAccessOpener: false } }
+      : {}
+    extension.send(JSON.stringify({ id: command.id, result }))
+  })
+  extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.22", protocolVersion: 1 } }))
+  if (targetId) extension.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 7 } }))
+  extension.send(JSON.stringify({ method: "ready" }))
+  return Object.assign(extension, { commands })
+}
 
 async function openFakeExtension(relayUrl: string, targetId: string): Promise<WebSocket> {
   const extension = await openSocket(`${relayUrl.replace("http://", "ws://")}/extension`)
@@ -178,7 +281,7 @@ async function openFakeExtension(relayUrl: string, targetId: string): Promise<We
 }
 
 async function openSocket(url: string): Promise<WebSocket> {
-  const socket = new WebSocket(url)
+  const socket = new WebSocket(url, { origin: "chrome-extension://browser-control-test" })
   await new Promise<void>((resolve, reject) => {
     socket.once("open", resolve)
     socket.once("error", reject)

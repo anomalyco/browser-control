@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Browser Control",
-  "version": "0.0.18",
-  "description": "Attach visible browser tabs to the local browser-control relay.",
-  "permissions": ["activeTab", "alarms", "debugger", "offscreen", "tabs", "tabCapture", "tabGroups"],
-  "host_permissions": ["<all_urls>"],
+  "version": "0.0.22",
+  "description": "Connect browser tabs to the local Browser Control driver.",
+  "minimum_chrome_version": "120",
+  "permissions": ["activeTab", "alarms", "debugger", "offscreen", "tabCapture", "tabGroups"],
+  "homepage_url": "https://github.com/anomalyco/browser-control",
   "background": {
     "service_worker": "background.js",
     "type": "module"
@@ -16,7 +17,17 @@
       "run_at": "document_start"
     }
   ],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "action": {
-    "default_title": "Attach tab to Browser Control"
+    "default_title": "Attach tab to Browser Control",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
   }
 }

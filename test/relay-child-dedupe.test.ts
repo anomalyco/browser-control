@@ -21,7 +21,7 @@ async function freePort(): Promise<number> {
 }
 
 async function openSocket(url: string): Promise<WebSocket> {
-  const socket = new WebSocket(url)
+  const socket = new WebSocket(url, { origin: "chrome-extension://browser-control-test" })
   await new Promise<void>((resolve, reject) => {
     socket.once("open", resolve)
     socket.once("error", reject)

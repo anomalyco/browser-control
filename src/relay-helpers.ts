@@ -57,7 +57,7 @@ export function validateWebSocketOrigin(options: {
   readonly requireChromeExtension?: boolean
 }): string | undefined {
   if (!options.origin) {
-    return undefined
+    return options.requireChromeExtension ? "Extension WebSocket origin is required" : undefined
   }
   if (options.origin.startsWith("chrome-extension://")) {
     return undefined

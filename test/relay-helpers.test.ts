@@ -48,12 +48,13 @@ describe("validateBrowserFetchSite", () => {
 })
 
 describe("validateWebSocketOrigin", () => {
-  it("accepts extension origins and missing origins", () => {
+  it("accepts extension origins and missing origins for non-extension clients", () => {
     expect(validateWebSocketOrigin({ origin: "chrome-extension://abc" })).toBeUndefined()
     expect(validateWebSocketOrigin({ origin: undefined })).toBeUndefined()
   })
 
   it("rejects web origins for the extension endpoint", () => {
+    expect(validateWebSocketOrigin({ origin: undefined, requireChromeExtension: true })).toBeDefined()
     expect(validateWebSocketOrigin({ origin: "https://example.com", requireChromeExtension: true })).toBeDefined()
     expect(validateWebSocketOrigin({ origin: "https://example.com" })).toBeDefined()
   })

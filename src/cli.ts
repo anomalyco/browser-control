@@ -19,6 +19,27 @@ const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const sessionIdConfig = Config.option(Config.string("BROWSER_CONTROL_SESSION"))
 const targetUrlConfig = Config.option(Config.string("BROWSER_CONTROL_TARGET_URL"))
 const targetIndexConfig = Config.option(Config.int("BROWSER_CONTROL_TARGET_INDEX"))
+const encodedCliOperandsMarker = "bc-cli-operands:v1"
+const encodedCliOperandPrefix = "bc-cli-operand:"
+
+export function normalizeCliArguments(args: ReadonlyArray<string>): ReadonlyArray<string> {
+  const delimiter = args.indexOf("--")
+  const secretsRun = args.findIndex((argument, index) => argument === "secrets" && args[index + 1] === "run")
+  if (delimiter === -1 || secretsRun === -1 || secretsRun > delimiter) return args
+  return [
+    ...args.slice(0, delimiter),
+    encodedCliOperandsMarker,
+    ...args.slice(delimiter + 1).map((operand) => `${encodedCliOperandPrefix}${encodeURIComponent(operand)}`),
+  ]
+}
+
+function decodeCliOperands(operands: ReadonlyArray<string>): ReadonlyArray<string> {
+  if (operands[0] !== encodedCliOperandsMarker) return operands
+  return operands.slice(1).map((operand) => {
+    if (!operand.startsWith(encodedCliOperandPrefix)) throw new Error("Invalid encoded secrets run operand")
+    return decodeURIComponent(operand.slice(encodedCliOperandPrefix.length))
+  })
+}
 
 const readExecuteFile = Effect.fnUntraced(function* (filePath: string) {
   const fs = yield* FileSystem.FileSystem
@@ -485,6 +506,11 @@ const status = Command.make(
       yield* Console.log(`Warning: ${buildProblem}`)
     }
     yield* Console.log(`Extension: ${extensionStatus.connected ? "connected" : "disconnected"}${extensionStatus.version ? ` (${extensionStatus.version})` : ""}`)
+    if (extensionStatus.protocolVersion !== undefined && extensionStatus.protocolVersion !== null) {
+      const compatibility = extensionStatus.protocolCompatible === false ? "incompatible" : "compatible"
+      const legacy = extensionStatus.protocolLegacy === true ? ", inferred from legacy hello" : ""
+      yield* Console.log(`Extension protocol: ${extensionStatus.protocolVersion} (${compatibility}${legacy})`)
+    }
     yield* Console.log(`Active targets: ${extensionStatus.activeTargets}`)
     if (extensionStatus.childTargets !== undefined) {
       yield* Console.log(`Child targets: ${extensionStatus.childTargets}`)
@@ -788,7 +814,7 @@ const secretsRun = Command.make(
   Effect.fn("Cli.secretsRun")(function* ({ name, command, cwd, timeoutMs }) {
     const relay = yield* RelayClient.Service
     yield* ensureCliRelay()
-    const [executable, ...args] = command
+    const [executable, ...args] = decodeCliOperands(command)
     if (!executable) return yield* Effect.fail(new Error("secrets run requires a command after --"))
     const cwdValue = optionString(cwd)
     const timeoutMsValue = optionNumber(timeoutMs)
@@ -896,4 +922,7 @@ const mainLayer = Layer.mergeAll(RelayClient.layerFetch, SessionStore.layer).pip
   Layer.provideMerge(NodeServices.layer),
 )
 
-browserControl.pipe(Command.run({ version: browserControlVersion }), Effect.provide(mainLayer), NodeRuntime.runMain)
+Command.runWith(browserControl, { version: browserControlVersion })(normalizeCliArguments(process.argv.slice(2))).pipe(
+  Effect.provide(mainLayer),
+  NodeRuntime.runMain,
+)

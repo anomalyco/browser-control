@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
+  extensionProtocolCompatibility,
+  extensionProtocolVersion,
   isCdpRequest,
   isExtensionEvent,
   isExtensionResponse,
@@ -29,5 +31,24 @@ describe("protocol validation", () => {
     expect(isExtensionResponse(parseJsonObject('{"id":1,"result":{},"error":"ambiguous"}'))).toBe(false)
     expect(isExtensionEvent(parseJsonObject('{"method":"toolbar.clicked","params":{"tabId":7}}'))).toBe(true)
     expect(isExtensionEvent(parseJsonObject('{"method":"unknown"}'))).toBe(false)
+  })
+
+  it("treats legacy hellos as protocol v1 and rejects unknown protocol versions", () => {
+    expect(extensionProtocolCompatibility(undefined)).toEqual({
+      version: extensionProtocolVersion,
+      compatible: true,
+      legacy: true,
+    })
+    expect(extensionProtocolCompatibility(extensionProtocolVersion)).toEqual({
+      version: extensionProtocolVersion,
+      compatible: true,
+      legacy: false,
+    })
+    expect(extensionProtocolCompatibility(extensionProtocolVersion + 1)).toMatchObject({ compatible: false, legacy: false })
+    expect(extensionProtocolCompatibility("invalid")).toEqual({ version: null, compatible: false, legacy: false })
+    expect(extensionProtocolCompatibility(null)).toEqual({ version: null, compatible: false, legacy: false })
+    expect(extensionProtocolCompatibility(1.5)).toEqual({ version: null, compatible: false, legacy: false })
+    expect(extensionProtocolCompatibility(-1)).toEqual({ version: null, compatible: false, legacy: false })
+    expect(extensionProtocolCompatibility({})).toEqual({ version: null, compatible: false, legacy: false })
   })
 })

@@ -31,6 +31,7 @@ import {
   SessionIdRequest,
   SessionEnsureRequest,
   SessionNewRequest,
+  type ExtensionStatus,
   type TargetSummary,
 } from "./relay-schema.ts"
 import { SessionError, type BrowserControlSessions } from "./session-manager.ts"
@@ -43,7 +44,9 @@ export function createHttpRequestHandler(options: {
   readonly port: number
   readonly browserId: string
   readonly relayInstance: { readonly id: string; readonly startedAt: string; readonly pid: number }
-  readonly extensionStatus: () => { readonly connected: boolean; readonly version: string | null; readonly cdpClients?: number }
+  readonly extensionStatus: () => Pick<ExtensionStatus,
+    "connected" | "version" | "protocolVersion" | "protocolCompatible" | "protocolLegacy" | "cdpClients"
+  >
   readonly recordingRelay: RecordingRelay
   readonly registry: TargetRegistry
   readonly sessions: BrowserControlSessions
@@ -98,6 +101,9 @@ export function createHttpRequestHandler(options: {
       sendJson(response, {
         connected: extensionStatus.connected,
         version: extensionStatus.version,
+        ...(extensionStatus.protocolVersion === undefined ? {} : { protocolVersion: extensionStatus.protocolVersion }),
+        ...(extensionStatus.protocolCompatible === undefined ? {} : { protocolCompatible: extensionStatus.protocolCompatible }),
+        ...(extensionStatus.protocolLegacy === undefined ? {} : { protocolLegacy: extensionStatus.protocolLegacy }),
         ...(extensionStatus.cdpClients === undefined ? {} : { cdpClients: extensionStatus.cdpClients }),
         activeTargets: options.registry.rootTargetCount(),
         childTargets: options.registry.childTargets.size,

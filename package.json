@@ -39,8 +39,9 @@
     "build:cli": "tsx scripts/build-cli.ts",
     "build": "pnpm build:cli && pnpm build:extension",
     "build:extension": "tsx scripts/build-extension.ts",
+    "package:extension": "pnpm build:extension && tsx scripts/package-extension.ts",
     "changeset": "changeset",
-    "ci": "pnpm typecheck && pnpm test && pnpm build",
+    "ci": "pnpm typecheck && pnpm test && pnpm build && pnpm package:extension",
     "prepack": "pnpm build",
     "release": "changeset publish",
     "smoke": "tsx scripts/smoke.ts",
@@ -60,6 +61,7 @@
     "@types/node": "^25.0.3",
     "@types/ws": "^8.18.1",
     "esbuild": "^0.27.2",
+    "fflate": "^0.8.3",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.9"

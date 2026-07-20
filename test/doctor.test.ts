@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { formatTargetSummary, relayBuildCheck, unhealthyTargetsCheck } from "../src/doctor.ts"
+import { extensionProtocolCheck, formatTargetSummary, relayBuildCheck, unhealthyTargetsCheck } from "../src/doctor.ts"
 
 describe("formatTargetSummary", () => {
   it("shows crashed target state", () => {
@@ -65,5 +65,35 @@ describe("relayBuildCheck", () => {
       cliBuildId: "dev",
       relayResult: { ok: true, value: { version: "0.1.0", buildId: "build-from-dist" } },
     })).toMatchObject({ status: "warn", message: "runtime build-from-dist does not match CLI dev" })
+  })
+})
+
+describe("extensionProtocolCheck", () => {
+  it("accepts independently-versioned extensions on the supported protocol", () => {
+    expect(extensionProtocolCheck({
+      ok: true,
+      value: {
+        connected: true,
+        version: "9.4.2",
+        protocolVersion: 1,
+        protocolCompatible: true,
+        protocolLegacy: false,
+        activeTargets: 0,
+      },
+    })).toMatchObject({ status: "ok", message: "runtime 1 is compatible with relay 1" })
+  })
+
+  it("fails an incompatible extension protocol", () => {
+    expect(extensionProtocolCheck({
+      ok: true,
+      value: {
+        connected: false,
+        version: "10.0.0",
+        protocolVersion: 2,
+        protocolCompatible: false,
+        protocolLegacy: false,
+        activeTargets: 0,
+      },
+    })).toMatchObject({ status: "fail", message: "runtime 2 is incompatible with relay 1" })
   })
 })

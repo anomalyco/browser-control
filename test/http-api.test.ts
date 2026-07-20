@@ -41,7 +41,13 @@ describe("HTTP request schemas", () => {
       host: "127.0.0.1",
       port,
       browserId: "test-browser",
-      extensionStatus: () => ({ connected: true, version: "test" }),
+      extensionStatus: () => ({
+        connected: true,
+        version: "9.4.2",
+        protocolVersion: 1,
+        protocolCompatible: true,
+        protocolLegacy: false,
+      }),
       recordingRelay: new RecordingRelay({
         isExtensionConnected: () => true,
         sendToExtension: async () => ({}),
@@ -57,6 +63,14 @@ describe("HTTP request schemas", () => {
         instanceId: "relay-test",
         startedAt: "2026-07-19T00:00:00.000Z",
         pid: 123,
+      })
+      const extension = await fetch(`http://127.0.0.1:${port}/extension/status`).then((response) => response.json())
+      expect(extension).toMatchObject({
+        connected: true,
+        version: "9.4.2",
+        protocolVersion: 1,
+        protocolCompatible: true,
+        protocolLegacy: false,
       })
       await expect(postJson(port, "/cli/session/new", { id: "alpha", readOnly: "yes" })).resolves.toMatchObject({
         status: 400,

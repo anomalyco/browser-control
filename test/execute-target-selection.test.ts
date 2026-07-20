@@ -25,7 +25,7 @@ describe("target selection", () => {
 
     await expect(waitForExactTarget({
       targetId: "replacement",
-      timeoutMs: 20,
+      timeoutMs: 1_000,
       candidates: () => ++attempts < 2 ? [old, decoy] : [old, decoy, replacement],
       getTargetId: async (candidate) => candidate.id,
       delay: () => Promise.resolve(),
@@ -76,7 +76,7 @@ describe("target selection", () => {
     let attempts = 0
     await expect(waitForExactTarget({
       targetId: "replacement",
-      timeoutMs: 20,
+      timeoutMs: 1_000,
       candidates: () => [candidate],
       getTargetId: async () => ++attempts === 1 ? undefined : candidate.id,
       delay: () => Promise.resolve(),

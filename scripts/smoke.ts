@@ -23,6 +23,8 @@ const selectedCaseNames = parseCaseFilter(process.env.SMOKE_CASE)
 type ExtensionStatus = {
   readonly connected: boolean
   readonly version: string | null
+  readonly protocolVersion: number | null
+  readonly protocolCompatible: boolean | null
   readonly activeTargets: number
   readonly childTargets: number
   readonly cdpClients: number
@@ -881,8 +883,8 @@ return { result: await page.locator('#class-result').textContent() }
     name: "handoff-navigation",
     run: Effect.fnUntraced(function* (page) {
       const extension = yield* fetchStatus()
-      if (extension.version !== "0.0.18") {
-        return yield* Effect.fail(new Error(`handoff-navigation requires the built 0.0.18 shim; connected extension is ${extension.version ?? "unknown"}`))
+      if (extension.protocolVersion !== 1 || extension.protocolCompatible !== true) {
+        return yield* Effect.fail(new Error(`handoff-navigation requires extension protocol 1; connected extension reports ${extension.protocolVersion ?? "unknown"}`))
       }
       const marker = `bc-handoff-${Date.now()}`
       const smokeSession = `${marker}-session`
@@ -926,8 +928,8 @@ return { result: await page.locator('#class-result').textContent() }
     name: "handoff-cross-tab",
     run: Effect.fnUntraced(function* (page) {
       const extension = yield* fetchStatus()
-      if (extension.version !== "0.0.18") {
-        return yield* Effect.fail(new Error(`handoff-cross-tab requires the built 0.0.18 shim; connected extension is ${extension.version ?? "unknown"}`))
+      if (extension.protocolVersion !== 1 || extension.protocolCompatible !== true) {
+        return yield* Effect.fail(new Error(`handoff-cross-tab requires extension protocol 1; connected extension reports ${extension.protocolVersion ?? "unknown"}`))
       }
       const marker = `bc-handoff-a-${Date.now()}`
       const peerMarker = `bc-handoff-b-${Date.now()}`
@@ -2131,13 +2133,15 @@ function parseExtensionStatus(value: unknown): ExtensionStatus {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Expected extension status object")
   }
-  const status = value as { readonly connected?: unknown; readonly version?: unknown; readonly activeTargets?: unknown; readonly childTargets?: unknown; readonly cdpClients?: unknown; readonly sessions?: unknown }
+  const status = value as { readonly connected?: unknown; readonly version?: unknown; readonly protocolVersion?: unknown; readonly protocolCompatible?: unknown; readonly activeTargets?: unknown; readonly childTargets?: unknown; readonly cdpClients?: unknown; readonly sessions?: unknown }
   if (typeof status.connected !== "boolean" || typeof status.activeTargets !== "number") {
     throw new Error("Invalid extension status shape")
   }
   return {
     connected: status.connected,
     version: typeof status.version === "string" ? status.version : null,
+    protocolVersion: typeof status.protocolVersion === "number" ? status.protocolVersion : null,
+    protocolCompatible: typeof status.protocolCompatible === "boolean" ? status.protocolCompatible : null,
     activeTargets: status.activeTargets,
     childTargets: typeof status.childTargets === "number" ? status.childTargets : 0,
     cdpClients: typeof status.cdpClients === "number" ? status.cdpClients : 0,

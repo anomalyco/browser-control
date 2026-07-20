@@ -56,7 +56,8 @@ const makeFakeSocket = (): FakeSocket => {
 const connect = (rpc: ExtensionRpc): FakeSocket => {
   const socket = makeFakeSocket()
   rpc.replaceSocket(socket)
-  rpc.markReady("0.0.5")
+  rpc.markHandshake("0.0.5", 1)
+  rpc.markReady()
   return socket
 }
 
@@ -76,6 +77,19 @@ describe("ExtensionRpc", () => {
     await expect(Effect.runPromise(rpc.send({ method: "tabs.create", params: {} }))).rejects.toThrow(
       "extension is not connected",
     )
+  })
+
+  it("refuses commands from an incompatible extension protocol", async () => {
+    const rpc = new ExtensionRpc()
+    const socket = makeFakeSocket()
+    rpc.replaceSocket(socket)
+    rpc.markHandshake("1.0.0", 2)
+
+    expect(rpc.connected).toBe(false)
+    await expect(Effect.runPromise(rpc.send({ method: "tabs.create", params: {} }))).rejects.toThrow(
+      "extension protocol 2 is incompatible",
+    )
+    expect(socket.sent).toHaveLength(0)
   })
 
   it("a command timeout fails only that command and leaves the socket open", async () => {

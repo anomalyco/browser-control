@@ -349,8 +349,8 @@ Control returns them.
 Browser Control trusts the local agent code it executes. It is a driver, not an
 untrusted-code sandbox.
 
-The extension requires broad browser permissions, including `debugger`, `tabs`,
-`tabCapture`, and access to page content on all URLs. Attaching a user tab gives
+The extension requires broad browser permissions, including `debugger`,
+`tabCapture`, and a status content script on all URLs. Attaching a user tab gives
 Browser Control access to that tab through your existing browser profile.
 
 The relay blocks destructive browser-wide CDP commands that clear cookies,
@@ -362,7 +362,9 @@ of Node.js filesystem and network APIs.
 Current limitations:
 
 - The extension is installed unpacked; Chrome Web Store distribution is not
-  available yet.
+  available yet. The repository can produce the review artifact with
+  `pnpm package:extension`; the first Store release will begin as an unlisted
+  beta.
 - Playwright download artifacts are unavailable because Chromium blocks the
   required download commands through `chrome.debugger`. Fetch exposed response
   bytes and write them with the provided `fs` module instead.
@@ -377,8 +379,8 @@ Current limitations:
 - **Extension disconnected**: confirm the unpacked extension is enabled, then
   reload it from the browser's extensions page. The extension reconnects to a
   running relay automatically.
-- **After an npm upgrade**: reload the unpacked extension so its browser code
-  matches the newly installed CLI and relay.
+- **After an npm upgrade**: reload the unpacked extension. Extension and relay
+  versions may differ when they use the same reported protocol version.
 - **Stale relay warning**: run `browser-control doctor`, stop the old relay
   process it identifies, then rerun a relay-backed command.
 
