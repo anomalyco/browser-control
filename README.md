@@ -18,11 +18,17 @@ the result, logs, warnings, and a summary of what changed.
 Browser Control requires Node.js 20 or newer and a Chromium-family browser such
 as Chrome, Brave, Edge, Arc, or Chromium.
 
-Setup has three parts: install the npm package, install the agent skill, and
-load the included browser extension. Add MCP only when your agent prefers MCP
-tools over shell commands.
+Setup has three parts: install the CLI, install the agent skill, and load the
+included browser extension. Add MCP only when your agent prefers MCP tools over
+shell commands.
 
 ### 1. Install the CLI
+
+```bash
+brew install anomalyco/tap/browser-control
+```
+
+Or install from npm:
 
 ```bash
 npm install --global @opencode-ai/browser-control
@@ -86,11 +92,15 @@ does not stop the relay or interrupt an active CLI session.
 ### 3. Load the extension
 
 Browser Control currently ships its extension as an unpacked extension inside
-the npm package.
+the installed package.
 
 1. Print the extension directory:
 
    ```bash
+   # Homebrew
+   printf '%s\n' "$(brew --prefix browser-control)/libexec/lib/node_modules/@opencode-ai/browser-control/extension/dist"
+
+   # npm
    printf '%s\n' "$(npm root --global)/@opencode-ai/browser-control/extension/dist"
    ```
 
