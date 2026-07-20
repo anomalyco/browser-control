@@ -97,10 +97,8 @@ requires a separate explicit CLI request.
 Store assets live under `docs/chrome-web-store/`:
 
 - `icon-128.png`
+- `browser-control-1280x800.jpg`
 - `small-promo-440x280.png`
-
-A 1280x800 or 640x400 product screenshot is still required before submission;
-capture it from the final Store-ID-pinned build rather than staging a mock.
 
 Run:
 
