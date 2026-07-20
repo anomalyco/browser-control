@@ -3,6 +3,7 @@ import { defaultPageClosedWarning, ExecuteSandbox, hasExplicitTargetSelection, t
 import type { NetworkCaptureOptions, NetworkCaptureResult, NetworkCaptureStatus, NetworkCaptureStopOptions } from "./network-capture.ts"
 import { generateSessionId } from "./relay-helpers.ts"
 import type { BrowserControlSession, ExecuteSandboxLike, SessionSummary, SessionTarget } from "./relay-types.ts"
+import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest } from "./relay-schema.ts"
 import type { PersistedSession } from "./session-catalog.ts"
 import {
   MemoryTargetOwnership,
@@ -177,6 +178,35 @@ export class BrowserControlSessions {
         return yield* Effect.fail(error)
       })))
       return session
+    })
+  }
+
+  ensure(id: string, options?: { readonly readOnly?: boolean }): Effect.Effect<SessionSummary, Error> {
+    const manager = this
+    return Effect.gen(function* () {
+      if (manager.closing) {
+        return yield* Effect.fail(sessionError("inactive", "Browser Control sessions are closing", id))
+      }
+      const existing = manager.sessions.get(id)
+      if (existing) {
+        if (options?.readOnly === true && !existing.readOnly) {
+          return yield* Effect.fail(sessionError(
+            "invalid-request",
+            `Session ${id} already exists with write access and cannot be ensured as read-only`,
+            id,
+          ))
+        }
+        return manager.sessionSummary(existing)
+      }
+      const session = manager.createNew(id, options)
+      yield* manager.flushPersistence().pipe(Effect.catch((error) => Effect.gen(function* () {
+        if (manager.sessions.get(session.id) === session) manager.sessions.delete(session.id)
+        yield* manager.closeBrowserControlSession(session)
+        manager.schedulePersistence()
+        yield* manager.flushPersistence().pipe(Effect.ignore)
+        return yield* Effect.fail(error)
+      })))
+      return manager.sessionSummary(session)
     })
   }
 
@@ -358,6 +388,37 @@ export class BrowserControlSessions {
       }
       return yield* session.sandbox.authRefresh(options)
     }))
+  }
+
+  authenticatedJson(
+    request: AuthenticatedJsonRequest,
+  ): Effect.Effect<AuthenticatedJsonOutcome, Error> {
+    const manager = this
+    const session = this.sessions.get(request.sessionId)
+    if (!session) {
+      return Effect.fail(sessionError("not-found", `Session not found: ${request.sessionId}`, request.sessionId))
+    }
+    if (session.readOnly && request.method !== "GET") {
+      return Effect.fail(sessionError(
+        "invalid-request",
+        `Read-only session ${request.sessionId} cannot make ${request.method} authenticated requests`,
+        request.sessionId,
+      ))
+    }
+    const { sessionId: _sessionId, ...pageRequest } = request
+    return this.withLifecyclePermit(session, "authenticated request", Effect.gen(function* () {
+      if (manager.sessions.get(session.id) !== session) {
+        return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${session.id}`, session.id))
+      }
+      manager.setExecuting(session.id, true)
+      const result = yield* session.sandbox.authenticatedJson(pageRequest).pipe(
+        Effect.ensuring(Effect.sync(() => manager.setExecuting(session.id, false))),
+      )
+      session.updatedAt = new Date().toISOString()
+      manager.schedulePersistence()
+      yield* manager.flushPersistence()
+      return result
+    }).pipe(Effect.uninterruptible))
   }
 
   execute(options: {

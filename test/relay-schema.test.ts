@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest"
 import { Schema } from "effect"
 import {
+  AuthenticatedJsonOutcome,
+  AuthenticatedJsonRequest,
   ExecuteRequest,
   ExecuteResponse,
   ExecuteSessionSummary,
@@ -15,6 +17,8 @@ import {
   SessionAdoptRequest,
   SessionAdoptResponse,
   SessionContainer,
+  SessionEnsureRequest,
+  SessionEnsureResponse,
   SessionNewRequest,
   SessionsContainer,
   SessionSummary,
@@ -41,6 +45,10 @@ const decodeRelayVersion = Schema.decodeUnknownSync(RelayVersion)
 const decodeErrorEnvelope = Schema.decodeUnknownSync(ErrorEnvelope)
 const decodeNetworkStartRequest = Schema.decodeUnknownSync(NetworkStartRequest)
 const decodeNetworkStopResponse = Schema.decodeUnknownSync(NetworkStopResponse)
+const decodeAuthenticatedJsonRequest = Schema.decodeUnknownSync(AuthenticatedJsonRequest)
+const decodeAuthenticatedJsonOutcome = Schema.decodeUnknownSync(AuthenticatedJsonOutcome)
+const decodeSessionEnsureRequest = Schema.decodeUnknownSync(SessionEnsureRequest)
+const decodeSessionEnsureResponse = Schema.decodeUnknownSync(SessionEnsureResponse)
 
 const session = {
   id: "rapid-otter-633",
@@ -113,6 +121,42 @@ describe("relay-schema", () => {
   it("decodes the optional readOnly flag on sessions", () => {
     expect(decodeSession(session).readOnly).toBeUndefined()
     expect(decodeSession({ ...session, readOnly: true }).readOnly).toBe(true)
+  })
+
+  it("decodes session ensure and authenticated origin contracts", () => {
+    expect(decodeSessionEnsureRequest({ id: "x-live-chat-auth" })).toEqual({ id: "x-live-chat-auth" })
+    expect(decodeSessionEnsureResponse({ session }).session.id).toBe(session.id)
+    expect(decodeAuthenticatedJsonRequest({
+      sessionId: "x-live-chat-auth",
+      origin: "https://studio.x.com",
+      startUrl: "https://studio.x.com/live",
+      method: "POST",
+      path: "/api/live/get-chat-session",
+      body: { broadcastId: "1" },
+      sensitive: true,
+    }).sensitive).toBe(true)
+    expect(decodeAuthenticatedJsonOutcome({
+      _tag: "Success",
+      status: 200,
+      value: { ok: true },
+    })._tag).toBe("Success")
+  })
+
+  it("rejects non-JSON bodies and invalid authenticated request limits", () => {
+    expect(() => decodeAuthenticatedJsonRequest({
+      sessionId: "x-live-chat-auth",
+      origin: "https://studio.x.com",
+      method: "POST",
+      path: "/api",
+      body: { invalid: undefined },
+    })).toThrow()
+    expect(() => decodeAuthenticatedJsonRequest({
+      sessionId: "x-live-chat-auth",
+      origin: "https://studio.x.com",
+      method: "GET",
+      path: "/api",
+      maxResponseBytes: 0,
+    })).toThrow()
   })
 
   it("decodes an execute response with warnings and aftermath", () => {

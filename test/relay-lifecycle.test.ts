@@ -5,6 +5,7 @@ import {
   ensureExtensionConnected,
   ensureRelay,
   managedRelayEntrypoint,
+  managedRelayLaunch,
   relayBuildProblem,
   statusCollections,
   stoppedRelayStatus,
@@ -158,7 +159,16 @@ describe("relay lifecycle", () => {
   it("starts a managed relay through the CLI entrypoint from MCP builds and source", () => {
     expect(managedRelayEntrypoint("/package/dist/mcp.js")).toBe("/package/dist/cli.js")
     expect(managedRelayEntrypoint("/package/src/mcp-main.ts")).toBe("/package/src/cli.ts")
+    expect(managedRelayEntrypoint("/package/dist/index.js")).toBe("/package/dist/cli.js")
+    expect(managedRelayEntrypoint("/package/src/browser-control-client.ts")).toBe("/package/src/cli.ts")
     expect(managedRelayEntrypoint("/package/dist/cli.js")).toBe("/package/dist/cli.js")
+  })
+
+  it("can launch the Node relay independently of a Bun consumer runtime", () => {
+    expect(managedRelayLaunch("/package/dist/index.js", "node", [])).toEqual({
+      executable: "node",
+      args: ["/package/dist/cli.js", "serve"],
+    })
   })
 
   it("gives source processes a deterministic content-sensitive build id", () => {

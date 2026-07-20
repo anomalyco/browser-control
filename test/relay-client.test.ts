@@ -126,6 +126,35 @@ describe("RelayClient", () => {
     expect(lastRequestBody).toEqual({ sessionId: session.id, code: "6 * 7", createIfMissing: false })
   })
 
+  it("ensures sessions and performs structured authenticated origin requests", async () => {
+    routes.set("POST /v1/sessions/ensure", { status: 200, body: { session } })
+    const ensured = await withClient((client) => client.sessionEnsure(session.id))
+    expect(ensured.id).toBe(session.id)
+    expect(lastRequestBody).toEqual({ id: session.id })
+
+    routes.set("POST /v1/authenticated-origin/json", {
+      status: 200,
+      body: { _tag: "Success", status: 200, value: { ok: true } },
+    })
+    const result = await withClient((client) => client.authenticatedJson({
+      sessionId: session.id,
+      origin: "https://example.com",
+      method: "POST",
+      path: "/api/private",
+      body: { value: 1 },
+      sensitive: true,
+    }))
+    expect(result).toEqual({ _tag: "Success", status: 200, value: { ok: true } })
+    expect(lastRequestBody).toEqual({
+      sessionId: session.id,
+      origin: "https://example.com",
+      method: "POST",
+      path: "/api/private",
+      body: { value: 1 },
+      sensitive: true,
+    })
+  })
+
   it("decodes execute image media", async () => {
     routes.set("POST /cli/execute", {
       status: 200,

@@ -2,6 +2,8 @@ import { Config, Context, Effect, Layer, Option, Schema } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest, type HttpClientResponse } from "effect/unstable/http"
 import {
   type AuthProfileRequest,
+  type AuthenticatedJsonRequest,
+  AuthenticatedJsonOutcome,
   AuthProfileSummary,
   type AuthRefreshRequest,
   type AuthRunRequest,
@@ -27,6 +29,7 @@ import {
   SessionAdoptResponse,
   SessionContainer,
   SessionDeleted,
+  SessionEnsureResponse,
   SessionsContainer,
   TargetSummaries,
   type SessionAdoptRequest,
@@ -100,10 +103,12 @@ export interface Interface {
   readonly targets: Effect.Effect<readonly TargetSummary[], RelayClientError>
   readonly sessions: Effect.Effect<readonly SessionSummary[], RelayClientError>
   readonly sessionNew: (id?: string | undefined, options?: { readonly readOnly?: boolean }) => Effect.Effect<SessionSummary, RelayClientError>
+  readonly sessionEnsure: (id: string, options?: { readonly readOnly?: boolean }) => Effect.Effect<SessionSummary, RelayClientError>
   readonly sessionReset: (id: string) => Effect.Effect<SessionSummary, RelayClientError>
   readonly sessionAdopt: (request: SessionAdoptRequest) => Effect.Effect<SessionAdoptResponse, RelayClientError>
   readonly sessionDelete: (id: string) => Effect.Effect<SessionDeleted, RelayClientError>
   readonly execute: (request: ExecuteRequest) => Effect.Effect<ExecuteResponse, RelayClientError>
+  readonly authenticatedJson: (request: AuthenticatedJsonRequest) => Effect.Effect<AuthenticatedJsonOutcome, RelayClientError>
   readonly networkStart: (request: NetworkStartRequest) => Effect.Effect<NetworkStatusResponse, RelayClientError>
   readonly networkStatus: (request: NetworkSessionRequest) => Effect.Effect<NetworkStatusResponse, RelayClientError>
   readonly networkStop: (request: NetworkStopRequest) => Effect.Effect<NetworkStopResponse, RelayClientError>
@@ -236,6 +241,11 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
         ...(id ? { id } : {}),
         ...(options?.readOnly ? { readOnly: true } : {}),
       }, SessionContainer).pipe(Effect.map((container) => container.session)),
+    sessionEnsure: (id, options) =>
+      postJson("/v1/sessions/ensure", {
+        id,
+        ...(options?.readOnly === undefined ? {} : { readOnly: options.readOnly }),
+      }, SessionEnsureResponse).pipe(Effect.map((container) => container.session)),
     sessionReset: (id) =>
       postJson("/cli/session/reset", { id }, SessionContainer).pipe(Effect.map((container) => container.session)),
     sessionAdopt: (request) =>
@@ -252,6 +262,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
         createIfMissing: request.createIfMissing,
         ...(request.targetSelection === undefined ? {} : { targetSelection: request.targetSelection }),
       }, ExecuteResponse),
+    authenticatedJson: (request) => postJson("/v1/authenticated-origin/json", { ...request }, AuthenticatedJsonOutcome),
     networkStart: (request) => postJson("/network/start", { ...request }, NetworkStatusResponse),
     networkStatus: (request) => postJson("/network/status", { ...request }, NetworkStatusResponse),
     networkStop: (request) => postJson("/network/stop", { ...request }, NetworkStopResponse),

@@ -1,6 +1,7 @@
 import http from "node:http"
 import { Effect, Schema } from "effect"
 import * as AuthProfile from "./auth-profile.ts"
+import { AuthenticatedOriginError } from "./authenticated-origin.ts"
 import { NetworkCaptureError } from "./network-capture.ts"
 import {
   HttpRouteError,
@@ -17,6 +18,7 @@ import {
 import { selectTarget, TargetSelectionError } from "./execute.ts"
 import {
   AuthProfileRequest,
+  AuthenticatedJsonRequest,
   AuthRefreshRequest,
   AuthRunRequest,
   ExecuteRequest,
@@ -27,6 +29,7 @@ import {
   RecordingTargetRequest,
   SessionAdoptRequest,
   SessionIdRequest,
+  SessionEnsureRequest,
   SessionNewRequest,
   type TargetSummary,
 } from "./relay-schema.ts"
@@ -115,6 +118,15 @@ export function createHttpRequestHandler(options: {
       runRequestEffect(response, handleAuthRequest({ request, response, pathname, sessions: options.sessions }))
       return
     }
+    if (pathname.startsWith("/v1/")) {
+      runRequestEffect(response, handleClientRequest({
+        request,
+        response,
+        pathname,
+        sessions: options.sessions,
+      }))
+      return
+    }
     if (pathname.startsWith("/cli/")) {
       runRequestEffect(response, handleCliRequest({
         request,
@@ -128,6 +140,33 @@ export function createHttpRequestHandler(options: {
     response.writeHead(404)
     response.end("Not found")
   }
+}
+
+function handleClientRequest(options: {
+  readonly request: http.IncomingMessage
+  readonly response: http.ServerResponse
+  readonly pathname: string
+  readonly sessions: BrowserControlSessions
+}): Effect.Effect<void, Error> {
+  return Effect.gen(function* () {
+    if (options.pathname === "/v1/sessions/ensure" && options.request.method === "POST") {
+      const request = yield* decodeRequest(SessionEnsureRequest, yield* readJsonBody(options.request), "session ensure")
+      sendJson(options.response, {
+        session: yield* options.sessions.ensure(request.id, {
+          ...(request.readOnly === undefined ? {} : { readOnly: request.readOnly }),
+        }),
+      })
+      return
+    }
+    if (options.pathname === "/v1/authenticated-origin/json" && options.request.method === "POST") {
+      const request = yield* decodeRequest(AuthenticatedJsonRequest, yield* readJsonBody(options.request), "authenticated origin")
+      options.response.setHeader("cache-control", "no-store")
+      sendJson(options.response, yield* options.sessions.authenticatedJson(request))
+      return
+    }
+    options.response.writeHead(404)
+    options.response.end("Not found")
+  })
 }
 
 function handleNetworkRequest(options: {
@@ -502,6 +541,13 @@ export function relayHttpError(error: unknown): HttpRouteError {
       message: error.message,
       status: error.reason === "invalid-name" ? 400 : error.reason === "not-found" ? 404 : 500,
       code: error.reason === "invalid-name" ? "invalid-request" : error.reason === "not-found" ? "auth-profile-not-found" : "internal",
+    })
+  }
+  if (error instanceof AuthenticatedOriginError) {
+    return new HttpRouteError({
+      message: error.message,
+      status: error.reason === "invalid-request" ? 400 : 500,
+      code: error.reason === "invalid-request" ? "invalid-request" : "setup-failed",
     })
   }
   if (error instanceof TargetSelectionError) {

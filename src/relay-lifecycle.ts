@@ -57,7 +57,7 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
     return yield* Effect.fail(initial.failure)
   }
 
-  if (relayWasAbsent) yield* options.start ?? spawnManagedRelay()
+  if (relayWasAbsent) yield* options.start ?? startManagedRelay()
   const version = yield* probe.pipe(
     Effect.retry({
       times: options.retryTimes ?? 200,
@@ -118,14 +118,18 @@ export function statusCollections(status: ExtensionStatus): {
   return status.sessions && status.targets ? { sessions: status.sessions, targets: status.targets } : undefined
 }
 
-function spawnManagedRelay(): Effect.Effect<void, Error> {
+export function startManagedRelay(
+  entrypoint = process.argv[1],
+  executable = process.execPath,
+  execArgv: readonly string[] = process.execArgv,
+): Effect.Effect<void, Error> {
   return Effect.try({
     try: () => {
-      const entrypoint = process.argv[1]
       if (!entrypoint) {
         throw new Error("Cannot locate the browser-control CLI entrypoint")
       }
-      const child = spawn(process.execPath, [...process.execArgv, managedRelayEntrypoint(entrypoint), "serve"], {
+      const launch = managedRelayLaunch(entrypoint, executable, execArgv)
+      const child = spawn(launch.executable, launch.args, {
         detached: true,
         stdio: "ignore",
         env: { ...process.env, BROWSER_CONTROL_MANAGED_RELAY: "1" },
@@ -136,12 +140,23 @@ function spawnManagedRelay(): Effect.Effect<void, Error> {
   })
 }
 
+export function managedRelayLaunch(
+  entrypoint: string,
+  executable = process.execPath,
+  execArgv: readonly string[] = process.execArgv,
+): { readonly executable: string; readonly args: string[] } {
+  return {
+    executable,
+    args: [...execArgv, managedRelayEntrypoint(entrypoint), "serve"],
+  }
+}
+
 export function managedRelayEntrypoint(entrypoint: string): string {
   const name = path.basename(entrypoint)
-  if (name === "mcp.js") {
+  if (name === "mcp.js" || name === "index.js" || name === "browser-control-client.js") {
     return path.join(path.dirname(entrypoint), "cli.js")
   }
-  if (name === "mcp-main.ts") {
+  if (name === "mcp-main.ts" || name === "index.ts" || name === "browser-control-client.ts") {
     return path.join(path.dirname(entrypoint), "cli.ts")
   }
   return entrypoint

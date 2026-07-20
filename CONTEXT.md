@@ -116,6 +116,21 @@ An environment-variable name such as `BC_SECRET_1` that retains its identity
 when a Secret Profile is refreshed from the same request source.
 _Avoid_: Token value, hardcoded credential
 
+**Authenticated Origin**:
+A session capability pinned to one HTTP origin. It performs bounded,
+schema-decoded `window.fetch` requests in the session's live default page so
+ambient browser authentication stays inside the User Browser. An explicit
+start URL may establish the page; request paths and redirects cannot escape the
+pinned origin.
+_Avoid_: Cookie export, Secret Profile request, arbitrary execute callback
+
+**Sensitive Response**:
+An Authenticated Origin result that bypasses execute journals and active Network
+Capture, crosses the local relay with `no-store`, and is returned to the caller
+as an Effect `Redacted` value. This prevents accidental disclosure; it is not
+cryptographic isolation from the trusted caller.
+_Avoid_: Secret Profile, encrypted response
+
 ## Relationships
 
 - A **Driver** serves one or more external **Agents**.
@@ -136,6 +151,10 @@ _Avoid_: Token value, hardcoded credential
 - An **Execute Sandbox** owns at most one active **Network Capture**.
 - A **Capture Artifact** refers to values in a **Secret Profile** through
   **Stable Secret References**.
+- An **Authenticated Origin** uses the current page's browser context without
+  reading a **Secret Profile** or exporting cookies.
+- A **Sensitive Response** is never appended to the execute journal or admitted
+  while **Network Capture** is active.
 - **Detach** removes an **Attached Tab** from the **Attached-Tab Pool**.
 
 ## Example Dialogue
