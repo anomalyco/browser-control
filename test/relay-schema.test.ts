@@ -248,6 +248,9 @@ describe("relay-schema", () => {
     const full = decodeExtensionStatus({
       connected: true,
       version: "0.0.5",
+      protocolVersion: 1,
+      protocolCompatible: true,
+      protocolLegacy: false,
       activeTargets: 2,
       childTargets: 1,
       cdpClients: 3,
@@ -255,6 +258,8 @@ describe("relay-schema", () => {
       targets: [],
     })
     expect(full.childTargets).toBe(1)
+    expect(full.protocolCompatible).toBe(true)
+    expect(full.protocolLegacy).toBe(false)
     expect(full.sessions).toHaveLength(1)
   })
 

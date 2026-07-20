@@ -1,4 +1,4 @@
-import { parseExtensionCommand, type ExtensionCommand as ShimCommand, type JsonObject } from "../../src/protocol.ts"
+import { extensionProtocolVersion, parseExtensionCommand, type ExtensionCommand as ShimCommand, type JsonObject } from "../../src/protocol.ts"
 import type {
   OffscreenCancelRecordingResult,
   OffscreenOutgoingMessage,
@@ -12,10 +12,10 @@ import { debuggerDetachedEvent } from "./debugger-detach.ts"
 
 const relayHost = "127.0.0.1"
 const relayPort = 19989
-const shimVersion = "0.0.18"
 const offscreenDocumentPath = "offscreen.html"
 
 let socket: WebSocket | undefined
+let connectionPromise: Promise<void> | undefined
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined
 let offscreenDocumentCreating: Promise<void> | undefined
 const activeRecordings = new Map<number, { readonly startedAt: number }>()
@@ -36,10 +36,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 })
 
 chrome.action.onClicked.addListener((tab) => {
-  if (!tab.id) {
-    return
-  }
-  sendMessage({ method: "toolbar.clicked", params: { tabId: tab.id } })
+  if (tab.id) sendMessage({ method: "toolbar.clicked", params: { tabId: tab.id } })
 })
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
@@ -81,21 +78,23 @@ chrome.runtime.onMessage.addListener((message: unknown, sender) => {
 })
 
 connect()
-void reconcileBrowserControlGroups().catch(() => {})
 
 function connect(): void {
-  if (socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) {
-    return
-  }
+  void ensureConnection().catch(() => {})
+}
+
+function startConnection(): WebSocket {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer)
     reconnectTimer = undefined
   }
   const currentSocket = new WebSocket(`ws://${relayHost}:${relayPort}/extension`)
   socket = currentSocket
-  currentSocket.onopen = announceHelloAndAttachedTabs
+  currentSocket.onopen = () => {
+    void announceHelloAndAttachedTabs(currentSocket).catch((error) => reportAnnouncementFailure(currentSocket, error))
+  }
   currentSocket.onmessage = (event) => {
-    void handleSocketMessage(event.data)
+    void handleSocketMessage(currentSocket, event.data)
   }
   currentSocket.onclose = () => {
     if (socket !== currentSocket) {
@@ -105,77 +104,119 @@ function connect(): void {
     socket = undefined
     reconnectTimer = setTimeout(connect, 1000)
   }
+  return currentSocket
 }
 
 async function ensureConnection(): Promise<void> {
   if (socket?.readyState === WebSocket.OPEN) {
     return
   }
-  connect()
-  await new Promise<void>((resolve, reject) => {
-    const current = socket
-    if (!current) {
-      reject(new Error("No socket"))
-      return
-    }
-    const timeout = setTimeout(() => {
-      reject(new Error("Relay connection timed out"))
-    }, 5000)
+  if (connectionPromise) {
+    return connectionPromise
+  }
+  const current = socket?.readyState === WebSocket.CONNECTING ? socket : startConnection()
+  const pending = new Promise<void>((resolve, reject) => {
     if (current.readyState === WebSocket.OPEN) {
-      clearTimeout(timeout)
       resolve()
       return
     }
-    current.onopen = () => {
+    let timeout: ReturnType<typeof setTimeout>
+    const cleanup = () => {
       clearTimeout(timeout)
-      announceHelloAndAttachedTabs()
+      current.removeEventListener("open", onOpen)
+      current.removeEventListener("error", onError)
+      current.removeEventListener("close", onClose)
+    }
+    const onOpen = () => {
+      cleanup()
       resolve()
     }
-    current.onerror = () => {
-      clearTimeout(timeout)
+    const onError = () => {
+      cleanup()
       reject(new Error("Relay connection failed"))
     }
+    const onClose = () => {
+      cleanup()
+      reject(new Error("Relay connection closed"))
+    }
+    timeout = setTimeout(() => {
+      cleanup()
+      current.close()
+      reject(new Error("Relay connection timed out"))
+    }, 5000)
+    current.addEventListener("open", onOpen, { once: true })
+    current.addEventListener("error", onError, { once: true })
+    current.addEventListener("close", onClose, { once: true })
   })
+  connectionPromise = pending
+  try {
+    await pending
+  } finally {
+    if (connectionPromise === pending) connectionPromise = undefined
+  }
 }
 
-function announceHelloAndAttachedTabs(): void {
-  sendMessage({ method: "hello", params: { version: shimVersion } })
-  void reannounceAttachedTabsAndReconcileGroups().catch((error: unknown) => {
-    sendMessage({ method: "log", params: { level: "error", message: `Failed to re-announce attached tabs and reconcile groups: ${error instanceof Error ? error.message : String(error)}` } })
+async function announceHelloAndAttachedTabs(currentSocket: WebSocket): Promise<void> {
+  sendOnSocket(currentSocket, {
+    method: "hello",
+    params: {
+      version: chrome.runtime.getManifest().version,
+      protocolVersion: extensionProtocolVersion,
+    },
   })
+  await reannounceAttachedTabsAndReconcileGroups(currentSocket)
+  sendOnSocket(currentSocket, { method: "ready" })
 }
 
-async function reannounceAttachedTabsAndReconcileGroups(): Promise<void> {
+function reportAnnouncementFailure(currentSocket: WebSocket, error: unknown): void {
+  if (socket !== currentSocket || currentSocket.readyState !== WebSocket.OPEN) return
+  currentSocket.send(JSON.stringify({ method: "log", params: { level: "error", message: `Failed to re-announce attached tabs and reconcile groups: ${error instanceof Error ? error.message : String(error)}` } }))
+  currentSocket.close(1011, "Attached-tab inventory failed")
+}
+
+async function reannounceAttachedTabsAndReconcileGroups(currentSocket: WebSocket): Promise<void> {
   const attachedTabIds = new Set<number>()
   const targets = await chrome.debugger.getTargets()
   for (const target of targets) {
     if (target.attached && typeof target.tabId === "number") {
       attachedTabIds.add(target.tabId)
-      sendMessage({ method: "debugger.attached", params: { tabId: target.tabId } })
+      sendOnSocket(currentSocket, { method: "debugger.attached", params: { tabId: target.tabId } })
     }
   }
   await reconcileBrowserControlGroups(attachedTabIds)
 }
 
-async function handleSocketMessage(data: unknown): Promise<void> {
+function sendOnSocket(currentSocket: WebSocket, message: JsonObject): void {
+  if (socket !== currentSocket || currentSocket.readyState !== WebSocket.OPEN) {
+    throw new Error("Extension connection changed during attached-tab inventory")
+  }
+  currentSocket.send(JSON.stringify(message))
+}
+
+async function handleSocketMessage(currentSocket: WebSocket, data: unknown): Promise<void> {
   let command: ShimCommand
   try {
     command = parseExtensionCommand(String(data))
   } catch (error) {
-    sendMessage({ method: "log", params: { level: "error", message: error instanceof Error ? error.message : String(error) } })
+    sendOnCurrentSocket(currentSocket, { method: "log", params: { level: "error", message: error instanceof Error ? error.message : String(error) } })
     return
   }
   try {
     const result = await handleCommand(command)
-    sendMessage({ id: command.id, result })
+    sendOnCurrentSocket(currentSocket, { id: command.id, result })
   } catch (error) {
-    sendMessage({ id: command.id, error: error instanceof Error ? error.message : String(error) })
+    sendOnCurrentSocket(currentSocket, { id: command.id, error: error instanceof Error ? error.message : String(error) })
+  }
+}
+
+function sendOnCurrentSocket(currentSocket: WebSocket, message: JsonObject): void {
+  if (socket === currentSocket && currentSocket.readyState === WebSocket.OPEN) {
+    currentSocket.send(JSON.stringify(message))
   }
 }
 
 async function handleCommand(command: ShimCommand): Promise<JsonObject> {
   if (command.method === "ping") {
-    sendMessage({ method: "pong" })
     return {}
   }
   if (command.method === "debugger.attach") {
@@ -527,15 +568,16 @@ async function sendPageStatusMessage(tabId: number, message: JsonObject, require
 }
 
 function sendMessage(message: JsonObject): void {
+  void sendMessageAfterConnection(message).catch(() => {})
+}
+
+async function sendMessageAfterConnection(message: JsonObject): Promise<void> {
   if (socket?.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(message))
     return
   }
-  void ensureConnection().then(() => {
-    if (socket?.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify(message))
-    }
-  })
+  await ensureConnection()
+  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
 }
 
 function sendBinary(data: Uint8Array): void {

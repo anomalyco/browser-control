@@ -332,7 +332,7 @@ existence, and report the viewport, state, and interaction path actually tested.
 ## Troubleshooting
 
 1. Run `browser-control doctor`; it checks package metadata, CLI/relay build
-   identity, extension connection/version, sessions, targets, and artifacts.
+   identity, extension protocol compatibility, sessions, targets, and artifacts.
 2. Use `status --json` to inspect exact sessions and target ownership.
 3. Reproduce once with the smallest execute before changing code.
 
@@ -340,6 +340,8 @@ Common diagnoses:
 
 - `connected:false`: run a relay-backed command, then reload the unpacked
   extension only if its reconnect loop does not recover.
+- Incompatible extension protocol: update either the extension or npm package;
+  exact extension and relay release versions do not need to match.
 - Stale relay build: operational commands reject it with restart guidance;
   rebuild the CLI and restart the relay.
 - `Target not found`: attach the intended tab, then select or adopt it using a
@@ -348,6 +350,10 @@ Common diagnoses:
   tab. Reattach through the toolbar.
 - Relay restarted: named sessions reclaim exact targets, but JavaScript `state`
   and snapshot refs reset. Continue after the warning.
+- Reset/delete after an extension update may wait briefly for target
+  re-announcement; if the old relay-owned target is absent from the completed
+  inventory, Browser Control forgets the dead identity without closing a
+  guessed tab.
 - Repeated execution-context errors: run one short follow-up so Browser Control
   can health-check the page. It may recreate a relay-owned page, but it never
   replaces an unhealthy adopted user tab; reset or re-adopt that tab.

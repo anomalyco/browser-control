@@ -239,6 +239,9 @@ export const TargetSummaries = Schema.Array(TargetSummary)
 export const ExtensionStatus = Schema.Struct({
   connected: Schema.Boolean,
   version: Schema.NullOr(Schema.String),
+  protocolVersion: Schema.optionalKey(Schema.NullOr(Schema.Number)),
+  protocolCompatible: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+  protocolLegacy: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
   activeTargets: Schema.Number,
   childTargets: Schema.optionalKey(Schema.Number),
   cdpClients: Schema.optionalKey(Schema.Number),

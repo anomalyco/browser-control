@@ -2,6 +2,7 @@ import { Effect, FileSystem, Path, Schema } from "effect"
 import * as RelayClient from "./relay-client.ts"
 import { relayBuildProblem } from "./relay-lifecycle.ts"
 import type { ExtensionStatus, RelayVersion, SessionSummary, TargetSummary } from "./relay-schema.ts"
+import { extensionProtocolVersion } from "./protocol.ts"
 import * as SessionStore from "./session-store.ts"
 import { browserControlBuildId, browserControlVersion } from "./version.ts"
 
@@ -78,6 +79,10 @@ export type DoctorReport = {
     readonly version: string | null
     readonly expectedVersion: string | null
     readonly versionMatches: boolean | null
+    readonly protocolVersion: number | null
+    readonly expectedProtocolVersion: number
+    readonly protocolCompatible: boolean | null
+    readonly protocolLegacy: boolean | null
     readonly error: string | null
   }
   readonly targets: {
@@ -252,6 +257,10 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
       version: extensionVersion,
       expectedVersion,
       versionMatches: extensionVersionMatches,
+      protocolVersion: extensionResult.ok ? extensionResult.value.protocolVersion ?? null : null,
+      expectedProtocolVersion: extensionProtocolVersion,
+      protocolCompatible: extensionResult.ok ? extensionResult.value.protocolCompatible ?? null : null,
+      protocolLegacy: extensionResult.ok ? extensionResult.value.protocolLegacy ?? null : null,
       error: extensionResult.ok ? null : extensionResult.error,
     },
     targets: {
@@ -352,6 +361,7 @@ function buildDoctorChecks(options: {
       status: extensionVersionCheckStatus({ extensionResult: options.extensionResult, sourceManifestVersion: options.sourceManifestVersion, versionMatches: options.extensionVersionMatches }),
       message: extensionVersionCheckMessage({ extensionResult: options.extensionResult, sourceManifestVersion: options.sourceManifestVersion, versionMatches: options.extensionVersionMatches }),
     },
+    extensionProtocolCheck(options.extensionResult),
     {
       id: "targets-readable",
       label: "targets readable",
@@ -459,7 +469,7 @@ function extensionVersionCheckStatus(options: {
   if (!options.sourceManifestVersion.ok || !options.extensionResult.value.version) {
     return "warn"
   }
-  return options.versionMatches ? "ok" : "warn"
+  return "ok"
 }
 
 function extensionVersionCheckMessage(options: {
@@ -480,8 +490,51 @@ function extensionVersionCheckMessage(options: {
     return "extension did not report a version"
   }
   return options.versionMatches
-    ? `matches extension/manifest.json (${options.sourceManifestVersion.value})`
-    : `runtime ${options.extensionResult.value.version} does not match extension/manifest.json ${options.sourceManifestVersion.value}`
+    ? `matches bundled extension (${options.sourceManifestVersion.value})`
+    : `runtime ${options.extensionResult.value.version} differs from bundled ${options.sourceManifestVersion.value}; protocol compatibility determines support`
+}
+
+export function extensionProtocolCheck(extensionResult: ProbeResult<ExtensionStatus>): DoctorCheck {
+  if (!extensionResult.ok) {
+    return {
+      id: "extension-protocol",
+      label: "extension protocol",
+      status: "warn",
+      message: extensionResult.error,
+    }
+  }
+  const protocolVersion = extensionResult.value.protocolVersion
+  const protocolCompatible = extensionResult.value.protocolCompatible
+  if (protocolCompatible === false) {
+    return {
+      id: "extension-protocol",
+      label: "extension protocol",
+      status: "fail",
+      message: `runtime ${protocolVersion ?? "unknown"} is incompatible with relay ${extensionProtocolVersion}`,
+    }
+  }
+  if (extensionResult.value.protocolLegacy === true) {
+    return {
+      id: "extension-protocol",
+      label: "extension protocol",
+      status: "warn",
+      message: `legacy extension does not report its protocol; relay infers ${protocolVersion ?? "unknown"}`,
+    }
+  }
+  if (protocolVersion === undefined || protocolVersion === null) {
+    return {
+      id: "extension-protocol",
+      label: "extension protocol",
+      status: "warn",
+      message: "extension protocol is unknown",
+    }
+  }
+  return {
+    id: "extension-protocol",
+    label: "extension protocol",
+    status: "ok",
+    message: `runtime ${protocolVersion} is compatible with relay ${extensionProtocolVersion}`,
+  }
 }
 
 function buildDoctorRecommendations(options: {
@@ -501,9 +554,11 @@ function buildDoctorRecommendations(options: {
   const relayBuildRecommendations = options.relayResult.ok && options.relayBuildMatches !== true ? [
     "Restart the relay with `browser-control serve` so it uses the current CLI build.",
   ] : []
-  const extensionRecommendations = options.relayResult.ok && options.extensionResult.ok && !options.extensionResult.value.connected ? [
-    "Load or reload `extension/dist` as an unpacked extension, then click the Browser Control toolbar button on a normal web tab.",
-  ] : []
+  const extensionRecommendations = options.relayResult.ok && options.extensionResult.ok && !options.extensionResult.value.connected
+    ? options.extensionResult.value.protocolCompatible === false
+      ? ["Update the Browser Control extension or npm package so their extension protocols are compatible."]
+      : ["Load or reload `extension/dist` as an unpacked extension, then click the Browser Control toolbar button on a normal web tab."]
+    : []
   const artifactRecommendations = options.artifacts.some((artifact) => {
     return !artifact.exists
   }) ? ["Run `pnpm build` to regenerate missing CLI or extension artifacts."] : []
@@ -581,8 +636,11 @@ function formatExtensionSummary(report: DoctorReport): string {
     return `unknown (${report.extension.error ?? "relay unreachable"})`
   }
   const version = report.extension.version ? ` (${report.extension.version})` : ""
-  const match = report.extension.versionMatches === null ? "" : report.extension.versionMatches ? ", version matches manifest" : ", version differs from manifest"
-  return `${report.extension.connected ? "connected" : "disconnected"}${version}${match}`
+  const protocol = report.extension.protocolVersion === null
+    ? ""
+    : `, protocol ${report.extension.protocolVersion} ${report.extension.protocolCompatible === false ? "incompatible" : "compatible"}`
+  const match = report.extension.versionMatches === null ? "" : report.extension.versionMatches ? ", matches bundled version" : ", differs from bundled version"
+  return `${report.extension.connected ? "connected" : "disconnected"}${version}${protocol}${match}`
 }
 
 function formatNullableNumber(value: number | null): string {

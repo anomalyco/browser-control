@@ -137,6 +137,47 @@ describe("relay lifecycle", () => {
     expect(attempts).toBe(2)
   })
 
+  it("allows a cold extension more than two seconds of reconnect probes", async () => {
+    let attempts = 0
+    const client = relay({
+      version: Effect.succeed(version),
+      extensionStatus: Effect.sync(() => ({ connected: ++attempts >= 42, version: "0.0.11", activeTargets: 0 })),
+    })
+
+    const status = await Effect.runPromise(ensureExtensionConnected({
+      relay: client,
+      waitForReconnect: true,
+      retryDelayMs: 0,
+    }))
+
+    expect(status.connected).toBe(true)
+    expect(attempts).toBe(42)
+  })
+
+  it("fails an incompatible extension protocol without retrying", async () => {
+    let attempts = 0
+    const client = relay({
+      version: Effect.succeed(version),
+      extensionStatus: Effect.sync(() => {
+        attempts++
+        return {
+          connected: false,
+          version: "1.0.0",
+          protocolVersion: 2,
+          protocolCompatible: false,
+          activeTargets: 0,
+        }
+      }),
+    })
+
+    await expect(Effect.runPromise(ensureExtensionConnected({
+      relay: client,
+      waitForReconnect: true,
+      retryDelayMs: 0,
+    }))).rejects.toThrow("protocol 2 is incompatible")
+    expect(attempts).toBe(1)
+  })
+
   it("formats stopped and consolidated status without extra relay requests", () => {
     expect(stoppedRelayStatus("http://127.0.0.1:19989")).toEqual({
       endpoint: "http://127.0.0.1:19989",

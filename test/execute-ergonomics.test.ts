@@ -238,6 +238,7 @@ describe("snapshot helpers", () => {
     const helpers = createSnapshotHelpers(page, { selectors: new Map() })
 
     await expect(helpers.snapshot()).resolves.toBe('- heading "Settings" [level=1]\n  - button "Save" [ref=e1]')
+    expect(evaluate.mock.calls[0]?.[0].toString()).toContain("const __name = (target) => target")
     expect(evaluate.mock.calls[0]?.[1]).toMatchObject({ maxItems: 80, rootSelector: undefined })
     expect(helpers.ref("@e1")).toBe(resolvedLocator)
     expect(page.locator).toHaveBeenLastCalledWith("#save")

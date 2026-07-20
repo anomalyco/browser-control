@@ -1,6 +1,13 @@
 import { Effect } from "effect"
 import { WebSocket } from "ws"
-import type { ExtensionCommand, ExtensionResponse, JsonObject } from "./protocol.ts"
+import {
+  extensionProtocolCompatibility,
+  type ExtensionCommand,
+  type ExtensionProtocolCompatibility,
+  type ExtensionResponse,
+  type JsonObject,
+  type JsonValue,
+} from "./protocol.ts"
 import type { PendingExtensionRequest } from "./relay-types.ts"
 
 export type ExtensionRpcTimeouts = {
@@ -24,11 +31,22 @@ export class ExtensionRpc {
   private readonly pendingRequests = new Map<number, PendingExtensionRequest>()
   private livenessProbe: NodeJS.Timeout | undefined
   version: string | undefined
+  protocolVersion: number | null | undefined
+  protocolCompatible: boolean | undefined
+  protocolLegacy: boolean | undefined
 
   constructor(private readonly timeouts: ExtensionRpcTimeouts = {}) {}
 
   get connected(): boolean {
-    return this.socket?.readyState === WebSocket.OPEN && this.ready
+    return this.socket?.readyState === WebSocket.OPEN && this.ready && this.protocolCompatible !== false
+  }
+
+  get acceptsEvents(): boolean {
+    return this.socket?.readyState === WebSocket.OPEN && this.protocolCompatible === true
+  }
+
+  isCurrent(socket: WebSocket): boolean {
+    return this.socket === socket
   }
 
   replaceSocket(socket: WebSocket): void {
@@ -38,11 +56,24 @@ export class ExtensionRpc {
     this.socket = socket
     this.ready = false
     this.version = undefined
+    this.protocolVersion = undefined
+    this.protocolCompatible = undefined
+    this.protocolLegacy = undefined
   }
 
-  markReady(version: string | undefined): void {
-    this.ready = true
+  markHandshake(version: string | undefined, reportedProtocolVersion: JsonValue | undefined): ExtensionProtocolCompatibility {
+    const protocol = extensionProtocolCompatibility(reportedProtocolVersion)
     this.version = version
+    this.protocolVersion = protocol.version
+    this.protocolCompatible = protocol.compatible
+    this.protocolLegacy = protocol.legacy
+    return protocol
+  }
+
+  markReady(): void {
+    if (this.protocolCompatible === true) {
+      this.ready = true
+    }
   }
 
   disconnectIfCurrent(socket: WebSocket): boolean {
@@ -52,6 +83,9 @@ export class ExtensionRpc {
     this.socket = undefined
     this.ready = false
     this.version = undefined
+    this.protocolVersion = undefined
+    this.protocolCompatible = undefined
+    this.protocolLegacy = undefined
     this.cancelLivenessProbe()
     this.rejectPending(new Error("Extension disconnected"))
     return true
@@ -99,7 +133,11 @@ export class ExtensionRpc {
   send(command: Omit<ExtensionCommand, "id">): Effect.Effect<JsonObject, Error> {
     return Effect.callback<JsonObject, Error>((resume) => {
       const socket = this.socket
-      if (!socket || socket.readyState !== WebSocket.OPEN || !this.ready) {
+      if (this.protocolCompatible === false) {
+        resume(Effect.fail(new Error(`Browser Control extension protocol ${this.protocolVersion ?? "unknown"} is incompatible`)))
+        return Effect.void
+      }
+      if (!socket || socket.readyState !== WebSocket.OPEN || !this.acceptsEvents) {
         resume(Effect.fail(new Error("Browser Control extension is not connected")))
         return Effect.void
       }

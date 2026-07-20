@@ -165,13 +165,19 @@ require a new extension capture protocol and permission model.
 - The package is published publicly on npm. Normal setup installs the npm
   artifact; source development uses `pnpm install`, `pnpm build`, and `bun
   link`.
-- The browser extension remains unpacked for v1 and is loaded from
-  the npm package's `extension/dist` directory or a source build. Its current
-  shim version is `0.0.18`.
+- Until the first Store review completes, the browser extension is loaded
+  unpacked from the npm package's `extension/dist` directory or a source build.
+  Its current shim version is `0.0.22`.
+- Extension and npm releases are independently versioned. The extension hello
+  reports an explicit protocol version, and compatibility rather than exact
+  package-version equality determines whether the local driver may use it.
+- Browser data crosses only the loopback connection unless an authorized local
+  caller sends returned data elsewhere.
 - Extension source changes require rebuilding and reloading the unpacked
   extension. Relay-only changes do not.
-- Chrome Web Store distribution is deferred until behavior stabilizes. A
-  bundled unpacked extension belongs to future managed-browser launch flows.
+- `pnpm package:extension` produces the deterministic Chrome Web Store review
+  ZIP. Distribution starts as an unlisted beta before becoming public. A bundled
+  unpacked extension belongs to future managed-browser launch flows.
 
 ## Session And Tab Model
 
@@ -207,6 +213,11 @@ arbitrary tab from the attached pool.
 - Reset, delete, or detach releases an adopted tab without closing it.
 - Reset and delete acquire the execute permit before closing a sandbox, so they
   cannot interrupt a running script.
+- Reset and delete give an absent persisted relay target a bounded opportunity
+  to re-announce. A completed protocol-v1 inventory, or expiry of the reconnect
+  grace, declares that identity dead so recovery cannot require catalog edits.
+  The relay never guesses a physical tab to close when the live target identity
+  is unavailable.
 - Corrupt session catalogs fail relay startup without being overwritten.
 - The relay wins the endpoint port before loading the catalog or enabling
   catalog writes. Lifecycle responses wait for atomic file replacement, file
@@ -458,7 +469,8 @@ These items are accepted directions but are not current priorities:
   relay endpoint, if multiple profiles become a supported workflow.
 - Add stricter workspace or session ownership only if the loose shared attached
   tab pool causes concrete failures.
-- Publish the extension through the Chrome Web Store after behavior stabilizes.
+- Promote the reviewed Chrome Web Store extension from unlisted beta to public
+  after one successful extension/relay compatibility cycle.
 - Bundle an unpacked extension for managed and development browser launch.
 - Add token-authenticated remote relay mode only if the relay must bind beyond
   trusted local interfaces.

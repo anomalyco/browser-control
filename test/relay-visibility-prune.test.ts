@@ -25,14 +25,20 @@ describe("relay target visibility pruning", () => {
 
         expect(sessionClient.events.some((event) => event.method === "Target.attachedToTarget" && event.params?.sessionId === "bc-tab-1")).toBe(true)
 
-        const ownedCreate = yield* Effect.promise(() => sendCdp(sessionClient, { id: 5, method: "Target.createTarget", params: { url: "about:blank" } }))
-        expect(ownedCreate.result?.targetId).toBe("target-2")
+      const ownedCreate = yield* Effect.promise(() => sendCdp(sessionClient, { id: 5, method: "Target.createTarget", params: { url: "about:blank" } }))
+      expect(ownedCreate.result?.targetId).toBe("target-2")
 
         expect(sessionClient.events).toContainEqual({
           method: "Target.detachedFromTarget",
           params: { sessionId: "bc-tab-1", targetId: "target-1" },
         })
-        expect(sessionClient.events.some((event) => event.method === "Target.attachedToTarget" && event.params?.sessionId === "bc-tab-2")).toBe(true)
+      expect(sessionClient.events.some((event) => event.method === "Target.attachedToTarget" && event.params?.sessionId === "bc-tab-2")).toBe(true)
+
+        extension.commands.length = 0
+        yield* Effect.promise(() => sendCdp(sessionClient, { id: 6, method: "Target.setAutoAttach", params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true } }))
+        expect(extension.commands.filter((command) => {
+          return command.method === "debugger.sendCommand" && command.params?.method === "Target.setAutoAttach"
+        }).map((command) => command.params?.tabId)).toEqual([2])
 
         const beforeRawEventCount = sessionClient.events.filter((event) => event.method === "Runtime.consoleAPICalled" && event.sessionId === "bc-tab-1").length
         extension.send(JSON.stringify({
@@ -55,18 +61,26 @@ describe("relay target visibility pruning", () => {
   })
 })
 
-function connectFakeExtension(relayUrl: string): Promise<WebSocket> {
+type ExtensionCommand = {
+  readonly id: number
+  readonly method: string
+  readonly params?: { readonly tabId?: number; readonly method?: string }
+}
+
+function connectFakeExtension(relayUrl: string): Promise<WebSocket & { readonly commands: ExtensionCommand[] }> {
   return new Promise((resolve, reject) => {
     let nextTabId = 1
+    const commands: ExtensionCommand[] = []
     const socket = new WebSocket(`${relayUrl.replace(/^http/, "ws")}/extension`, { origin: "chrome-extension://browser-control-test" })
     socket.on("open", () => {
       socket.send(JSON.stringify({ method: "hello", params: { version: "test" } }))
-      resolve(socket)
+      resolve(Object.assign(socket, { commands }))
     })
     socket.on("error", reject)
     socket.on("message", (data) => {
-      const command = JSON.parse(data.toString()) as { readonly id: number; readonly method: string; readonly params?: JsonObject }
-      const params = command.params as { readonly tabId?: number; readonly method?: string } | undefined
+      const command = JSON.parse(data.toString()) as ExtensionCommand
+      commands.push(command)
+      const params = command.params
       let result: JsonObject = {}
       if (command.method === "tabs.create") {
         result = { tabId: nextTabId++ }

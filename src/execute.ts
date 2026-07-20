@@ -1648,22 +1648,32 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         .map(({ entry }) => entry)
       return { entries: selected, truncated: truncated || selected.length < entries.length }
     }
+    // tsx/esbuild can inject calls to its module-scoped __name helper into this
+    // callback. Playwright serializes only the callback, so provide that helper
+    // inside the serialized function rather than leaking a build detail into the
+    // page execution context.
+    const browserCapture = new Function(
+      "rootOrSettings",
+      "locatorSettings",
+      `const __name = (target) => target
+return (${capture.toString()})(rootOrSettings, locatorSettings)`,
+    ) as typeof capture
     const timeoutMs = options.timeout ?? defaultSnapshotTimeoutMs
     let result: Awaited<ReturnType<typeof capture>>
     if (locator) {
-      result = await locator.evaluate(capture, settings, { timeout: timeoutMs })
+      result = await locator.evaluate(browserCapture, settings, { timeout: timeoutMs })
     } else {
       try {
         result = await Effect.runPromise(runPlaywrightOperation({
           label: "Compact snapshot",
           timeoutMs,
-          run: () => page.evaluate(capture, settings),
+          run: () => page.evaluate(browserCapture, settings),
         }))
       } catch (error) {
         if (typeof within !== "string" || !/not a valid selector|querySelectorAll/i.test(error instanceof Error ? error.message : String(error))) {
           throw error
         }
-        result = await page.locator(within).evaluate(capture, { ...settings, rootSelector: undefined }, { timeout: timeoutMs })
+        result = await page.locator(within).evaluate(browserCapture, { ...settings, rootSelector: undefined }, { timeout: timeoutMs })
       }
     }
 

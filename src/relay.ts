@@ -1,7 +1,7 @@
 import http from "node:http"
 import stream from "node:stream"
 import crypto from "node:crypto"
-import { Config, Effect, Fiber, Semaphore } from "effect"
+import { Clock, Config, Effect, Fiber, Semaphore } from "effect"
 import { WebSocket, WebSocketServer, type RawData } from "ws"
 import {
   chromeSessionIdForClientRequest,
@@ -20,7 +20,7 @@ import { canClientSeeTarget } from "./cdp-visibility.ts"
 import { ExtensionRpc } from "./extension-rpc.ts"
 import { createHttpRequestHandler } from "./http-api.ts"
 import type { CdpEvent, CdpRequest, JsonObject, PageStatus } from "./protocol.ts"
-import { isCdpRequest, isExtensionEvent, isExtensionResponse, parseJsonObject } from "./protocol.ts"
+import { extensionProtocolCompatibility, isCdpRequest, isExtensionEvent, isExtensionResponse, parseJsonObject } from "./protocol.ts"
 import {
   closeHttpServer,
   closeWebSocketServer,
@@ -64,6 +64,7 @@ export type { RelayServer } from "./relay-types.ts"
 export const startRelay = Effect.fn("Relay.start")(function* (options: {
   readonly host?: string
   readonly port?: number
+  readonly releaseTargetGraceMs?: number
   readonly sessionCatalogPath?: string | null
 } = {}) {
   yield* installRelayProcessGuard
@@ -138,10 +139,12 @@ function debugEnvironmentEnabled(value: string | undefined): boolean {
 const makeRelay = Effect.fnUntraced(function* (options: {
   readonly host?: string
   readonly port?: number
+  readonly releaseTargetGraceMs?: number
   readonly sessionCatalogPath?: string | null
 } = {}) {
   const host = options.host ?? defaultHost
   const port = options.port ?? defaultPort
+  const releaseTargetGraceMs = Math.max(0, options.releaseTargetGraceMs ?? 10_000)
   const browserId = crypto.randomUUID()
   const endpointUrl = `http://${formatHostForUrl(host)}:${port}`
   const sessionCatalog = options.sessionCatalogPath === null
@@ -152,12 +155,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const rootLifecycleSemaphores = new Map<number, Semaphore.Semaphore>()
   type RootReconciliationWorker = {
     attachIfMissing: boolean
+    generation: number
     pending: boolean
-    promise: Promise<void>
+    promise: Promise<boolean>
     verificationRetries: number
   }
-  const rootReconciliationWorkers = new Map<number, RootReconciliationWorker>()
+  const rootReconciliationWorkers = new Map<string, RootReconciliationWorker>()
   let relayClosing = false
+  let extensionGeneration = 0
   const extensionRpc = new ExtensionRpc()
   const sendToExtension = Effect.fnUntraced(function* (command: Parameters<ExtensionRpc["send"]>[0]) {
     return yield* extensionRpc.send(command)
@@ -191,6 +196,30 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   })
   const handoffs = new HandoffRegistry()
   const activeHandoffTabs = new Map<string, Set<number>>()
+  const clearLiveExtensionState = (reason: string) => {
+    void recordingRelay.cleanupAll(reason).catch(() => {})
+    for (const target of [...registry.listRootTargets()]) {
+      detachTargetState(target.tabId, { preserveSessionTarget: true, updateExtension: false })
+    }
+    registry.clear()
+    suppressedChildSessions.clear()
+  }
+  const releaseRelayTarget = Effect.fnUntraced(function* (targetId: string) {
+    const deadline = (yield* Clock.currentTimeMillis) + releaseTargetGraceMs
+    while (true) {
+      const target = registry.targetsByTargetId.get(targetId)
+      if (target && (extensionRpc.connected || extensionRpc.protocolLegacy === true)) {
+        yield* sendToExtension({ method: "tabs.remove", params: { tabId: target.tabId } })
+        return
+      }
+      // Protocol v1 reports ready only after its complete attached-tab inventory
+      // has reconciled. Legacy shims need the full grace because hello came first.
+      if (extensionRpc.connected && extensionRpc.protocolLegacy === false) return
+      const remaining = deadline - (yield* Clock.currentTimeMillis)
+      if (remaining <= 0) return
+      yield* Effect.sleep(Math.min(50, remaining))
+    }
+  })
   const journalBaseDir = defaultJournalBaseDir()
   const attachedBadge = { text: "ON", color: "#7c3aed", title: "Detach from Browser Control" }
   const executingBadge = { text: "RUN", color: "#f59e0b", title: "Browser Control is running a script" }
@@ -354,12 +383,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       onTargetOwnershipChange: (change) => {
         reconcileTargetOwnership(change)
       },
-      onReleaseRelayTarget: (targetId) => {
-        const target = registry.targetsByTargetId.get(targetId)
-        return target
-          ? sendToExtension({ method: "tabs.remove", params: { tabId: target.tabId } }).pipe(Effect.asVoid)
-          : Effect.fail(new Error(`Relay-owned target ${targetId} has not re-announced yet; retry after the extension reconnects`))
-      },
+      onReleaseRelayTarget: (targetId) => releaseRelayTarget(targetId),
       onSessionsChanged: async (entries) => {
         if (catalogWritesEnabled) await sessionCatalog?.save(entries)
       },
@@ -454,7 +478,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     recordingRelay,
     sessions,
     extensionStatus: () => {
-      return { connected: extensionRpc.connected, version: extensionRpc.version ?? null, cdpClients: cdpClients.size }
+      return {
+        connected: extensionRpc.connected,
+        version: extensionRpc.version ?? null,
+        protocolVersion: extensionRpc.protocolVersion ?? null,
+        protocolCompatible: extensionRpc.protocolCompatible ?? null,
+        protocolLegacy: extensionRpc.protocolLegacy ?? null,
+        cdpClients: cdpClients.size,
+      }
     },
   })
   let relayReady = false
@@ -598,26 +629,36 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   websocketServer.on("connection", (socket, request) => {
     const requestUrl = new URL(request.url ?? "/", endpointUrl)
     if (requestUrl.pathname === "/extension") {
-      extensionRpc.replaceSocket(socket)
+      let handshaken = false
+      let socketGeneration = 0
+      const announcedRootTabIds = new Set<number>()
       socket.on("message", (data, isBinary) => {
         try {
+          if (!handshaken) {
+            const acceptedGeneration = isBinary ? undefined : acceptExtensionHello(socket, data.toString())
+            if (acceptedGeneration === undefined) {
+              socket.close(4002, "Extension hello required")
+              return
+            }
+            socketGeneration = acceptedGeneration
+            handshaken = true
+            return
+          }
+          if (!extensionRpc.isCurrent(socket) || !extensionRpc.acceptsEvents) {
+            return
+          }
           if (isBinary) {
             recordingRelay.handleBinaryData(rawDataToBuffer(data))
             return
           }
-          handleExtensionMessage(data.toString())
+          handleExtensionMessage(socket, data.toString(), socketGeneration, announcedRootTabIds)
         } catch (error) {
           console.error("Extension message handling failed", error)
         }
       })
       socket.on("close", () => {
         if (extensionRpc.disconnectIfCurrent(socket)) {
-          void recordingRelay.cleanupAll("Extension disconnected").catch(() => {})
-          for (const target of registry.listRootTargets()) {
-            cancelTargetHandoffs(target, "target-detached")
-          }
-          registry.clear()
-          suppressedChildSessions.clear()
+          clearLiveExtensionState("Extension disconnected")
         }
       })
       return
@@ -666,7 +707,30 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     detachTargetState(target.tabId)
   })
 
-  function handleExtensionMessage(raw: string): void {
+  function acceptExtensionHello(socket: WebSocket, raw: string): number | undefined {
+    const message = parseJsonObject(raw)
+    if (!isExtensionEvent(message) || message.method !== "hello") {
+      return undefined
+    }
+    const protocol = extensionProtocolCompatibility(message.params?.protocolVersion)
+    if (!protocol.compatible && extensionRpc.connected) {
+      socket.close(4003, "Extension protocol incompatible")
+      return extensionGeneration
+    }
+    extensionGeneration += 1
+    clearLiveExtensionState("Extension replaced")
+    extensionRpc.replaceSocket(socket)
+    extensionRpc.markHandshake(
+      typeof message.params?.version === "string" ? message.params.version : undefined,
+      message.params?.protocolVersion,
+    )
+    if (protocol.legacy) {
+      extensionRpc.markReady()
+    }
+    return extensionGeneration
+  }
+
+  function handleExtensionMessage(socket: WebSocket, raw: string, generation: number, announcedRootTabIds: Set<number>): void {
     const message = parseJsonObject(raw)
     if (isExtensionResponse(message)) {
       extensionRpc.handleResponse(message)
@@ -678,19 +742,37 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     const extensionMethod = message.method as string
     if (extensionMethod === "hello") {
-      extensionRpc.markReady(typeof message.params?.version === "string" ? message.params.version : undefined)
+      return
+    }
+    if (extensionMethod === "ready") {
+      const workers = Array.from(rootReconciliationWorkers.values())
+        .filter((worker) => worker.generation === generation)
+        .map((worker) => worker.promise)
+      void Promise.all(workers).then((reconciled) => {
+        if (!extensionRpc.isCurrent(socket) || generation !== extensionGeneration) return
+        if (reconciled.every(Boolean)) {
+          for (const target of registry.listRootTargets()) {
+            if (!announcedRootTabIds.has(target.tabId)) detachTargetState(target.tabId)
+          }
+          extensionRpc.markReady()
+        } else {
+          socket.close(1011, "Target inventory reconciliation failed")
+        }
+      })
       return
     }
     if (extensionMethod === "debugger.attached") {
       const tabId = typeof message.params?.tabId === "number" ? message.params.tabId : undefined
       if (tabId) {
-        queueRootReconciliation(tabId, true, 0, "Debugger re-announce failed")
+        announcedRootTabIds.add(tabId)
+        queueRootReconciliation(tabId, true, 0, "Debugger re-announce failed", generation)
       }
       return
     }
     if (extensionMethod === "toolbar.clicked") {
       const tabId = typeof message.params?.tabId === "number" ? message.params.tabId : undefined
       if (tabId) {
+        announcedRootTabIds.add(tabId)
         handleToolbarClick(tabId)
       }
       return
@@ -1057,10 +1139,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (message.method === "Target.setAutoAttach" && !message.sessionId) {
       autoAttachParams = message.params
       for (const target of registry.targets.values()) {
+        if (!canSeeTarget(socket, target)) continue
         yield* Effect.ignore(sendDebuggerCommand({ tabId: target.tabId, method: "Target.setAutoAttach", params: message.params ?? {} }))
-        if (canSeeTarget(socket, target)) {
-          sendAttachedToTarget({ socket, clientAnnouncements: cdpClientAnnouncements, target, onDuplicateTarget: logDuplicateTargetAnnouncement })
-        }
+        sendAttachedToTarget({ socket, clientAnnouncements: cdpClientAnnouncements, target, onDuplicateTarget: logDuplicateTargetAnnouncement })
       }
       return {}
     }
@@ -1363,11 +1444,15 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     readonly owner: "relay" | "user"
     readonly browserControlSessionId?: string
     readonly alreadyAttached?: boolean
+    readonly expectedExtensionGeneration?: number
   }) {
     const semaphore = rootLifecycleSemaphores.get(options.tabId) ?? Semaphore.makeUnsafe(1)
     rootLifecycleSemaphores.set(options.tabId, semaphore)
     return yield* semaphore.withPermit(Effect.gen(function* () {
       if (relayClosing) return yield* Effect.fail(new Error("Relay is closing"))
+      if (options.expectedExtensionGeneration !== undefined && options.expectedExtensionGeneration !== extensionGeneration) {
+        return yield* Effect.fail(new Error("Extension changed before target reconciliation acquired its permit"))
+      }
       return yield* attachTabUnlocked(options)
     }))
   })
@@ -1406,18 +1491,28 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     })
   })
 
-  const reconcileAttachedRoot = Effect.fnUntraced(function* (tabId: number) {
+  const reconcileAttachedRoot = Effect.fnUntraced(function* (tabId: number, expectedExtensionGeneration?: number) {
     const semaphore = rootLifecycleSemaphores.get(tabId) ?? Semaphore.makeUnsafe(1)
     rootLifecycleSemaphores.set(tabId, semaphore)
     yield* semaphore.withPermit(Effect.gen(function* () {
       if (relayClosing) return
+      if (expectedExtensionGeneration !== undefined && expectedExtensionGeneration !== extensionGeneration) {
+        return yield* Effect.fail(new Error("Extension changed before target reconciliation acquired its permit"))
+      }
       yield* reconcileAttachedRootUnlocked(tabId)
     }))
   })
 
-  function queueRootReconciliation(tabId: number, attachIfMissing: boolean, verificationRetries: number, errorMessage: string): void {
+  function queueRootReconciliation(
+    tabId: number,
+    attachIfMissing: boolean,
+    verificationRetries: number,
+    errorMessage: string,
+    generation = extensionGeneration,
+  ): void {
     if (relayClosing) return
-    const existing = rootReconciliationWorkers.get(tabId)
+    const workerKey = `${generation}:${tabId}`
+    const existing = rootReconciliationWorkers.get(workerKey)
     if (existing) {
       existing.pending = true
       existing.attachIfMissing ||= attachIfMissing
@@ -1426,21 +1521,33 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     const worker: RootReconciliationWorker = {
       attachIfMissing,
+      generation,
       pending: false,
-      promise: Promise.resolve(),
+      promise: Promise.resolve(true),
       verificationRetries,
     }
     worker.promise = (async () => {
       let retries = 0
+      let reconciled = true
       do {
+        if (generation !== extensionGeneration) return false
         worker.pending = false
         const mayAttach = worker.attachIfMissing
         worker.attachIfMissing = false
         try {
           if (registry.tabTargets.has(tabId)) {
-            await Effect.runPromise(reconcileAttachedRoot(tabId))
+            await Effect.runPromise(reconcileAttachedRoot(tabId, generation))
           } else if (mayAttach && !relayClosing) {
-            await Effect.runPromise(attachTab({ tabId, owner: "user", alreadyAttached: true }))
+            await Effect.runPromise(attachTab({
+              tabId,
+              owner: "user",
+              alreadyAttached: true,
+              expectedExtensionGeneration: generation,
+            }))
+          }
+          if (generation !== extensionGeneration) {
+            detachTargetState(tabId, { preserveSessionTarget: true, updateExtension: false })
+            return false
           }
           retries = 0
           if (worker.verificationRetries > 0 && !relayClosing) {
@@ -1451,20 +1558,27 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           }
         } catch (error) {
           console.error(errorMessage, error)
-          if (registry.stagedRootTarget(tabId) && retries < 2 && !relayClosing) {
+          if (generation !== extensionGeneration) {
+            detachTargetState(tabId, { preserveSessionTarget: true, updateExtension: false })
+            reconciled = false
+          } else if (retries < 2 && !relayClosing) {
             retries += 1
+            worker.attachIfMissing ||= mayAttach
             await new Promise((resolve) => setTimeout(resolve, 100 * retries))
             worker.pending = true
+          } else {
+            reconciled = false
           }
         }
       } while (worker.pending && !relayClosing)
+      return reconciled
     })().finally(() => {
-      if (rootReconciliationWorkers.get(tabId) === worker) {
-        rootReconciliationWorkers.delete(tabId)
+      if (rootReconciliationWorkers.get(workerKey) === worker) {
+        rootReconciliationWorkers.delete(workerKey)
       }
       if (!registry.tabTargets.has(tabId)) rootLifecycleSemaphores.delete(tabId)
     })
-    rootReconciliationWorkers.set(tabId, worker)
+    rootReconciliationWorkers.set(workerKey, worker)
   }
 
   const injectGhostCursor = Effect.fnUntraced(function* (tabId: number) {
@@ -1511,19 +1625,24 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     })
   })
 
-  function detachTargetState(tabId: number): void {
-    Effect.runPromise(Effect.ignore(sendToExtension({ method: "pageStatus.clear", params: { tabId } }))).catch(() => {})
-    Effect.runPromise(Effect.ignore(sendToExtension({ method: "tabs.ungroup", params: { tabId } }))).catch(() => {})
-    Effect.runPromise(Effect.ignore(sendToExtension({ method: "action.setAttached", params: { tabId, attached: false } }))).catch(() => {})
-    void recordingRelay.abortRecordingForTab({ tabId, reason: "Tab detached" }).catch((error: unknown) => {
-      console.error("Failed to abort recording for detached tab", error)
-    })
+  function detachTargetState(tabId: number, options: {
+    readonly preserveSessionTarget?: boolean
+    readonly updateExtension?: boolean
+  } = {}): void {
+    if (options.updateExtension !== false) {
+      Effect.runPromise(Effect.ignore(sendToExtension({ method: "pageStatus.clear", params: { tabId } }))).catch(() => {})
+      Effect.runPromise(Effect.ignore(sendToExtension({ method: "tabs.ungroup", params: { tabId } }))).catch(() => {})
+      Effect.runPromise(Effect.ignore(sendToExtension({ method: "action.setAttached", params: { tabId, attached: false } }))).catch(() => {})
+      void recordingRelay.abortRecordingForTab({ tabId, reason: "Tab detached" }).catch((error: unknown) => {
+        console.error("Failed to abort recording for detached tab", error)
+      })
+    }
     const detached = registry.detachRootTargetState(tabId)
     if (!detached) {
       return
     }
     cancelTargetHandoffs(detached.target, "target-detached")
-    sessions.markTargetDetached(detached.target.targetInfo.targetId)
+    if (!options.preserveSessionTarget) sessions.markTargetDetached(detached.target.targetInfo.targetId)
     removeClientTargetAliases(cdpClientSessionAliases.values(), (alias) => alias.tabId === tabId)
     mainFrameIdsByTab.delete(tabId)
     ghostCursorPositionsByTab.delete(tabId)

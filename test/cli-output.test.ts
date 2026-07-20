@@ -11,7 +11,7 @@ vi.mock("@effect/platform-node", async (importOriginal) => {
   }
 })
 
-import { executeJsonEnvelope, formatSessionContinuation } from "../src/cli.ts"
+import { executeJsonEnvelope, formatSessionContinuation, normalizeCliArguments } from "../src/cli.ts"
 import type { ExecuteResponse } from "../src/relay-schema.ts"
 
 const session: ExecuteResponse["session"] = {
@@ -75,5 +75,46 @@ describe("session continuation", () => {
     expect(formatSessionContinuation("cosmic-otter-866")).toBe(
       "Session: cosmic-otter-866. Continue with --session cosmic-otter-866.",
     )
+  })
+})
+
+describe("CLI argument normalization", () => {
+  it("preserves secrets run operands after the end-of-options delimiter", () => {
+    const normalized = normalizeCliArguments([
+      "secrets",
+      "run",
+      "github",
+      "--",
+      "/usr/bin/node",
+      "-e",
+      "process.stdout.write(process.env.BC_SECRET_1 || '')",
+    ])
+
+    expect(normalized).toEqual([
+      "secrets",
+      "run",
+      "github",
+      "bc-cli-operands:v1",
+      "bc-cli-operand:%2Fusr%2Fbin%2Fnode",
+      "bc-cli-operand:-e",
+      "bc-cli-operand:process.stdout.write(process.env.BC_SECRET_1%20%7C%7C%20'')",
+    ])
+  })
+
+  it("leaves other commands unchanged", () => {
+    const args = ["execute", "--", "return page.url()"]
+    expect(normalizeCliArguments(args)).toBe(args)
+  })
+
+  it("finds secrets run after leading command flags", () => {
+    expect(normalizeCliArguments(["--help", "secrets", "run", "github", "--", "printf", "-n"])).toEqual([
+      "--help",
+      "secrets",
+      "run",
+      "github",
+      "bc-cli-operands:v1",
+      "bc-cli-operand:printf",
+      "bc-cli-operand:-n",
+    ])
   })
 })
