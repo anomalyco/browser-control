@@ -1,5 +1,12 @@
 # @opencode-ai/browser-control
 
+## 0.3.2
+
+### Patch Changes
+
+- 4699f7d: Pin production WebSocket access to the assigned Chrome Web Store extension ID
+  while retaining an explicit source-development path for unpacked extensions.
+
 ## 0.3.1
 
 ### Patch Changes

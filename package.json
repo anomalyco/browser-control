@@ -1,6 +1,6 @@
 {
   "name": "@opencode-ai/browser-control",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Local browser driver for trusted agents: control your existing Chromium-family browser through a small extension and a local relay.",
   "license": "MIT",
   "packageManager": "pnpm@11.13.0",
