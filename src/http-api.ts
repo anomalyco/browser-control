@@ -302,7 +302,7 @@ function handleCliRequest(options: {
     if (options.pathname === "/cli/session/new" && options.request.method === "POST") {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(SessionNewRequest, body, "session new")
-      const session = options.sessions.createNew(optionalSessionId(request.id), { readOnly: request.readOnly === true })
+      const session = yield* options.sessions.create(optionalSessionId(request.id), { readOnly: request.readOnly === true })
       sendJson(options.response, { session: options.sessions.summary(session.id) })
       return
     }

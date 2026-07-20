@@ -167,7 +167,7 @@ require a new extension capture protocol and permission model.
   link`.
 - The browser extension remains unpacked for v1 and is loaded from
   the npm package's `extension/dist` directory or a source build. Its current
-  shim version is `0.0.17`.
+  shim version is `0.0.18`.
 - Extension source changes require rebuilding and reloading the unpacked
   extension. Relay-only changes do not.
 - Chrome Web Store distribution is deferred until behavior stabilizes. A
@@ -189,6 +189,10 @@ arbitrary tab from the attached pool.
 - The CLI never infers an agent's session from human-shell current state.
 - Human session-management commands store their endpoint-scoped current id in
   `~/.browser-control/session.json`.
+- The relay stores private session descriptors under
+  `~/.browser-control/relays/<port>/sessions.json`. Relay restart restores ids,
+  read-only mode, and exact target ownership when the tab reappears; JavaScript
+  `state` and snapshot refs reset with an explicit warning.
 - A session owns one default page. Relay-created pages persist across
   short-lived CLI connections.
 - `session adopt` makes an attached user tab the session's default page and
@@ -203,6 +207,10 @@ arbitrary tab from the attached pool.
 - Reset, delete, or detach releases an adopted tab without closing it.
 - Reset and delete acquire the execute permit before closing a sandbox, so they
   cannot interrupt a running script.
+- Corrupt session catalogs fail relay startup without being overwritten.
+- The relay wins the endpoint port before loading the catalog or enabling
+  catalog writes. Lifecycle responses wait for atomic file replacement, file
+  sync, and directory sync before acknowledging durable state.
 - Session-owned tabs share a purple `control` group within each browser window.
   Merely attached, unowned tabs stay in their existing location.
 - Explicit URL selection must match exactly one page. URL and index selectors
@@ -277,11 +285,17 @@ reconciles existing client announcements, browser grouping, and page status.
 
 - The extension toolbar attaches or detaches the active tab. A toolbar click
   cannot detach a tab while its session is executing or waiting for a handoff.
-- `handoff(message, { timeoutMs })` binds a waiter to the exact page target,
+- `handoff(message, { timeoutMs, start? })` binds a waiter to the exact page target,
   survives top-level navigation, and resumes only from the matching in-page
   completion control. The relay ignores ambiguous `target_closed` events from
   extension child targets, so the extension preserves the WAIT UI until the
   relay confirms a root detach or the tab is removed.
+- `start` registers WAIT state before invoking a prompt-triggering action, so
+  native WebAuthn or payment UI cannot block the script before handoff exists.
+  It runs only after the extension acknowledges WAIT. Human completion waits
+  for the action to settle; timeout or target cancellation disconnects the
+  sandbox's Playwright connection before releasing the execute permit, so a
+  non-settling action cannot mutate the page later.
 - Destructive browser-state CDP methods such as `Browser.close` and cookie or
   cache clearing are always blocked.
 - Read-only sessions additionally reject `Input.*`. They reduce trusted

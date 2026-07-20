@@ -3,6 +3,10 @@ import type { AdoptTarget, ExecuteOptions, ExecuteResult } from "./execute.ts"
 import type { NetworkCaptureOptions, NetworkCaptureResult, NetworkCaptureStatus, NetworkCaptureStopOptions } from "./network-capture.ts"
 import type { JsonObject, TargetInfo } from "./protocol.ts"
 import type { SessionSummary } from "./relay-schema.ts"
+export type SessionTarget = {
+  readonly id: string
+  readonly owner: "relay" | "user"
+}
 
 export type ConnectedTarget = {
   readonly tabId: number
@@ -47,6 +51,10 @@ export interface ExecuteSandboxLike {
   execute(code: string, options?: ExecuteOptions): Effect.Effect<ExecuteResult>
   adoptPage(target: AdoptTarget): Effect.Effect<string, Error>
   close(): Effect.Effect<void, Error>
+  /** Relay shutdown disconnects Playwright without closing or forgetting the default tab. */
+  disconnect(): Effect.Effect<void, Error>
+  /** Handoff cancellation waits for Playwright disconnection before releasing the execute permit. */
+  disconnectSettled(): Effect.Effect<void, Error>
   /** Adoption rollback cleanup does not settle before started Playwright close promises settle. */
   closeSettled(): Effect.Effect<void, Error>
   networkStart(options?: NetworkCaptureOptions): Effect.Effect<NetworkCaptureStatus, Error>
@@ -58,6 +66,7 @@ export interface ExecuteSandboxLike {
   markTargetCrashed(targetId: string): boolean
   markTargetDetached(targetId: string): boolean
   markTargetReplaced(previousTargetId: string, targetId: string): boolean
+  restore(target: SessionTarget | undefined): void
   getStatus(): {
     readonly sessionId?: string
     readonly connected: boolean
@@ -72,8 +81,8 @@ export type BrowserControlSession = {
   readonly readOnly: boolean
   readonly sandbox: ExecuteSandboxLike
   readonly executeSemaphore: Semaphore.Semaphore
-  /** The adopted default-page pointer. Target ownership lives in TargetRegistry. */
-  adoptedTargetId?: string
+  /** Durable default-target identity. Authoritative live ownership remains in TargetRegistry. */
+  target?: SessionTarget
   updatedAt: string
 }
 

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 import { Deferred, Effect, Fiber } from "effect"
 import { adoptionTipForUrl, BrowserControlSessions, shouldAppendAdoptionTip } from "../src/session-manager.ts"
 import type { ExecuteSandboxLike } from "../src/relay-types.ts"
+import type { PersistedSession } from "../src/session-catalog.ts"
 import { TargetRegistry } from "../src/target-registry.ts"
 
 type FakeSandbox = ExecuteSandboxLike & {
@@ -10,6 +11,7 @@ type FakeSandbox = ExecuteSandboxLike & {
   readonly crashedTargets: () => string[]
   readonly detachedTargets: () => string[]
   readonly replacedTargets: () => Array<readonly [string, string]>
+  readonly restoredTarget: () => PersistedSession["target"]
 }
 
 const makeFakeSandbox = (options?: {
@@ -26,7 +28,14 @@ const makeFakeSandbox = (options?: {
   const crashedTargets: string[] = []
   const detachedTargets: string[] = []
   const replacedTargets: Array<readonly [string, string]> = []
+  let persistenceTarget: PersistedSession["target"] = options?.defaultTargetId
+    ? { id: options.defaultTargetId, owner: "relay" }
+    : undefined
   const close = () => Effect.sync(() => {
+    closes += 1
+    persistenceTarget = undefined
+  }).pipe(Effect.andThen(options?.onClose ?? Effect.void))
+  const disconnect = () => Effect.sync(() => {
     closes += 1
   }).pipe(Effect.andThen(options?.onClose ?? Effect.void))
   return {
@@ -50,6 +59,8 @@ const makeFakeSandbox = (options?: {
             }),
       ),
     close,
+    disconnect,
+    disconnectSettled: disconnect,
     closeSettled: close,
     networkStart: () => Effect.succeed({ active: true, entryCount: 0, responseCount: 0, failureCount: 0, capturedBodyBytes: 0, truncatedBodyCount: 0, droppedEntryCount: 0 }),
     networkStatus: () => ({ active: false, entryCount: 0, responseCount: 0, failureCount: 0, capturedBodyBytes: 0, truncatedBodyCount: 0, droppedEntryCount: 0 }),
@@ -57,25 +68,34 @@ const makeFakeSandbox = (options?: {
     networkCancel: () => Effect.succeed({ cancelled: false }),
     authRefresh: () => Effect.fail(new Error("auth refresh is not configured")),
     redactNetworkCaptureText: (text) => options?.redactText?.(text) ?? text,
-    adoptPage: (selection) => options?.onAdopt
+    adoptPage: (selection) => (options?.onAdopt
       ? options.onAdopt(selection)
       : options?.adoptFailure
       ? Effect.fail(options.adoptFailure)
       : Effect.sync(() => {
           adoptedSelections.push(selection)
           return "https://example.com/adopted"
-        }),
+        })).pipe(Effect.tap(() => Effect.sync(() => {
+          persistenceTarget = { id: selection.targetId, owner: "user" }
+        }))),
     markTargetCrashed: (targetId) => {
       crashedTargets.push(targetId)
-      return options?.defaultTargetId === undefined || options.defaultTargetId === targetId
+      return persistenceTarget?.id === targetId
     },
     markTargetDetached: (targetId) => {
       detachedTargets.push(targetId)
-      return options?.defaultTargetId === undefined || options.defaultTargetId === targetId
+      const affected = persistenceTarget?.id === targetId
+      if (affected) persistenceTarget = undefined
+      return affected
     },
     markTargetReplaced: (previousTargetId, targetId) => {
       replacedTargets.push([previousTargetId, targetId])
-      return options?.defaultTargetId === undefined || options.defaultTargetId === previousTargetId
+      const affected = persistenceTarget?.id === previousTargetId
+      if (affected && persistenceTarget) persistenceTarget = { ...persistenceTarget, id: targetId }
+      return affected
+    },
+    restore: (target) => {
+      persistenceTarget = target
     },
     getStatus: () => ({ connected: false, pageUrl: null, stateKeys: [] }),
     closes: () => closes,
@@ -83,10 +103,178 @@ const makeFakeSandbox = (options?: {
     crashedTargets: () => crashedTargets,
     detachedTargets: () => detachedTargets,
     replacedTargets: () => replacedTargets,
+    restoredTarget: () => persistenceTarget,
   }
 }
 
 describe("BrowserControlSessions", () => {
+  it("restores persisted identity and target ownership with reset JavaScript state", async () => {
+    const persisted: PersistedSession[][] = []
+    const sessions = new BrowserControlSessions(
+      "http://127.0.0.1:0",
+      () => makeFakeSandbox({ defaultTargetId: "target-1" }),
+      { onSessionsChanged: (entries) => persisted.push([...entries]) },
+    )
+    sessions.createNew("alpha", { readOnly: true })
+    sessions.updateTarget("alpha", { id: "target-1", owner: "relay" })
+    await Effect.runPromise(sessions.persist())
+    const descriptor = persisted.at(-1)?.[0]
+    expect(descriptor).toMatchObject({ id: "alpha", readOnly: true, target: { id: "target-1", owner: "relay" } })
+
+    const restoredSandboxes: FakeSandbox[] = []
+    const restored = new BrowserControlSessions("http://127.0.0.1:0", () => {
+      const sandbox = makeFakeSandbox()
+      restoredSandboxes.push(sandbox)
+      return sandbox
+    })
+    restored.restore(descriptor ? [descriptor] : [])
+
+    expect(restored.listSummaries()).toMatchObject([{ id: "alpha", readOnly: true, stateKeys: [] }])
+    expect(restored.persistedTargetOwner("target-1")).toEqual({ sessionId: "alpha", owner: "relay" })
+    expect(restoredSandboxes[0]?.restoredTarget()).toEqual({ id: "target-1", owner: "relay" })
+  })
+
+  it("rejects duplicate target ownership in a persisted catalog", () => {
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox())
+    const entry = {
+      createdAt: "2026-07-19T00:00:00.000Z",
+      updatedAt: "2026-07-19T00:01:00.000Z",
+      readOnly: false,
+      target: { id: "target-1", owner: "relay" as const },
+    }
+
+    expect(() => sessions.restore([{ ...entry, id: "alpha" }, { ...entry, id: "beta" }]))
+      .toThrow("Duplicate persisted target owner: target-1")
+  })
+
+  it("persists target identity while disconnecting sessions for relay shutdown", async () => {
+    const persisted: PersistedSession[][] = []
+    const sessions = new BrowserControlSessions(
+      "http://127.0.0.1:0",
+      () => makeFakeSandbox({ defaultTargetId: "target-1" }),
+      { onSessionsChanged: (entries) => persisted.push([...entries]) },
+    )
+    sessions.createNew("alpha")
+    sessions.updateTarget("alpha", { id: "target-1", owner: "relay" })
+
+    await Effect.runPromise(sessions.closeAll())
+
+    expect(persisted.at(-1)).toMatchObject([{
+      id: "alpha",
+      target: { id: "target-1", owner: "relay" },
+    }])
+    expect(sessions.listSummaries()).toEqual([])
+  })
+
+  it("does not acknowledge reset until the targetless catalog state is committed", async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      let markCommitStarted: (() => void) | undefined
+      let releaseCommit: (() => void) | undefined
+      const commitStarted = new Promise<void>((resolve) => {
+        markCommitStarted = resolve
+      })
+      const commitGate = new Promise<void>((resolve) => {
+        releaseCommit = resolve
+      })
+      let blockWrites = false
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox(), {
+        onSessionsChanged: () => {
+          if (!blockWrites) return
+          markCommitStarted?.()
+          return commitGate
+        },
+      })
+      sessions.createNew("alpha")
+      yield* sessions.persist()
+      blockWrites = true
+
+      const reset = yield* Effect.forkChild(sessions.reset("alpha"))
+      yield* Effect.promise(() => commitStarted)
+      expect(reset.pollUnsafe()).toBeUndefined()
+
+      releaseCommit?.()
+      expect((yield* Fiber.join(reset))?.id).toBe("alpha")
+    }))
+  })
+
+  it("does not let a target callback resurrect a session during a blocked delete commit", async () => {
+    let markCommitStarted: (() => void) | undefined
+    let releaseCommit: (() => void) | undefined
+    const commitStarted = new Promise<void>((resolve) => {
+      markCommitStarted = resolve
+    })
+    const commitGate = new Promise<void>((resolve) => {
+      releaseCommit = resolve
+    })
+    let blockWrites = false
+    const committed: PersistedSession[][] = []
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox(), {
+      onSessionsChanged: async (entries) => {
+        if (blockWrites) {
+          markCommitStarted?.()
+          await commitGate
+        }
+        committed.push([...entries])
+      },
+    })
+    sessions.createNew("alpha")
+    sessions.createNew("beta")
+    await Effect.runPromise(sessions.persist())
+    blockWrites = true
+
+    const deletion = Effect.runPromise(sessions.delete("alpha"))
+    await commitStarted
+    sessions.updateTarget("beta", { id: "target-beta", owner: "relay" })
+    releaseCommit?.()
+    await expect(deletion).resolves.toBe(true)
+    await Effect.runPromise(sessions.persist())
+
+    expect(committed.slice(-2).every((entries) => entries.every((entry) => entry.id !== "alpha"))).toBe(true)
+  })
+
+  it("fails durable lifecycle operations when the catalog cannot commit", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    let failWrites = false
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox(), {
+      onSessionsChanged: () => failWrites ? Promise.reject(new Error("catalog unavailable")) : undefined,
+    })
+    sessions.createNew("alpha")
+    await Effect.runPromise(sessions.persist())
+    failWrites = true
+
+    try {
+      await expect(Effect.runPromise(sessions.reset("alpha"))).rejects.toThrow("catalog unavailable")
+      expect(sessions.summary("alpha")).toBeDefined()
+      await expect(Effect.runPromise(sessions.delete("alpha"))).rejects.toThrow("catalog unavailable")
+      expect(sessions.summary("alpha")).toBeDefined()
+      await expect(Effect.runPromise(sessions.create("beta"))).rejects.toThrow("catalog unavailable")
+      expect(sessions.summary("beta")).toBeUndefined()
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
+  it("releases a restored relay-owned target during reset", async () => {
+    const released: string[] = []
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox(), {
+      onReleaseRelayTarget: (targetId) => Effect.sync(() => {
+        released.push(targetId)
+      }),
+    })
+    sessions.restore([{
+      id: "alpha",
+      createdAt: "2026-07-19T00:00:00.000Z",
+      updatedAt: "2026-07-19T00:01:00.000Z",
+      readOnly: false,
+      target: { id: "target-1", owner: "relay" },
+    }])
+
+    await Effect.runPromise(sessions.reset("alpha"))
+
+    expect(released).toEqual(["target-1"])
+    expect(sessions.persistedTargetOwner("target-1")).toBeUndefined()
+  })
+
   it("creates a readable session id inside the first execute request", async () => {
     const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox())
 
@@ -656,6 +844,83 @@ describe("BrowserControlSessions", () => {
     )
   })
 
+  it("finishes execute journaling after an interrupted request once browser work settles", async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const executeStarted = yield* Deferred.make<void>()
+      const releaseExecute = yield* Deferred.make<void>()
+      let markJournalStarted: (() => void) | undefined
+      let releaseJournal: (() => void) | undefined
+      let markJournalCompleted: (() => void) | undefined
+      const journalStarted = new Promise<void>((resolve) => {
+        markJournalStarted = resolve
+      })
+      const journalGate = new Promise<void>((resolve) => {
+        releaseJournal = resolve
+      })
+      const journalCompleted = new Promise<void>((resolve) => {
+        markJournalCompleted = resolve
+      })
+      const sessions = new BrowserControlSessions(
+        "http://127.0.0.1:0",
+        () => makeFakeSandbox({
+          onExecute: Deferred.succeed(executeStarted, undefined).pipe(
+            Effect.andThen(Deferred.await(releaseExecute)),
+            Effect.uninterruptible,
+          ),
+        }),
+        {
+          onExecuteRecord: () => {
+            markJournalStarted?.()
+            return journalGate.then(() => {
+              markJournalCompleted?.()
+            })
+          },
+        },
+      )
+      sessions.createNew("alpha")
+      const execute = yield* Effect.forkChild(sessions.execute({ sessionId: "alpha", code: "wait", createIfMissing: false }))
+      yield* Deferred.await(executeStarted)
+      yield* Fiber.interrupt(execute)
+
+      yield* Deferred.succeed(releaseExecute, undefined)
+      yield* Effect.promise(() => journalStarted)
+
+      releaseJournal?.()
+      yield* Effect.promise(() => journalCompleted)
+      expect(sessions.isExecuting("alpha")).toBe(false)
+    }))
+  })
+
+  it("bounds best-effort journal I/O without retaining the execute permit", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox(), {
+      journalTimeoutMs: 20,
+      onExecuteRecord: () => new Promise(() => {}),
+    })
+    sessions.createNew("alpha")
+    try {
+      await expect(Effect.runPromise(sessions.execute({ sessionId: "alpha", code: "noop", createIfMissing: false })))
+        .resolves.toMatchObject({ result: { text: "ok" } })
+      await expect(Effect.runPromise(sessions.delete("alpha"))).resolves.toBe(true)
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
+  it("removes an implicitly created session when its durable execute commit fails", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox(), {
+      onSessionsChanged: () => Promise.reject(new Error("catalog unavailable")),
+    })
+    try {
+      await expect(Effect.runPromise(sessions.execute({ sessionId: "ghost", code: "noop", createIfMissing: true })))
+        .rejects.toThrow("catalog unavailable")
+      expect(sessions.summary("ghost")).toBeUndefined()
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
   it("hook failures do not fail execute", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
     const sessions = new BrowserControlSessions(
@@ -813,7 +1078,7 @@ describe("BrowserControlSessions", () => {
       expect(implicitResult._tag).toBe("Failure")
       expect(sessions.listSummaries().map((session) => session.id).sort()).toEqual(["alpha", "beta"])
 
-      expect(sessions.releaseAdoptedTarget("target-1")).toBe("alpha")
+      expect(sessions.markTargetDetached("target-1")).toEqual(["alpha"])
       expect((yield* sessions.adopt({ sessionId: "beta", createIfMissing: false, targetId: "target-1", targetUrl: "https://example.com/adopted" })).session.id).toBe("beta")
     }))
   })
@@ -910,6 +1175,76 @@ describe("BrowserControlSessions", () => {
     expect(sessions.adoptedTargetId("alpha")).toBe("target-b")
     expect(registry.targetsByTargetId.get("target-a2")?.browserControlSessionId).toBeUndefined()
     expect(registry.targetsByTargetId.get("target-b")?.browserControlSessionId).toBe("alpha")
+  })
+
+  it("explicitly releases the previous target when a later adoption fails", async () => {
+    const registry = new TargetRegistry()
+    const addTarget = (tabId: number, targetId: string) => registry.addRootTarget({
+      tabId,
+      sessionId: `bc-tab-${tabId}`,
+      owner: "user" as const,
+      targetInfo: {
+        targetId,
+        type: "page" as const,
+        title: targetId,
+        url: `https://example.com/${targetId}`,
+        attached: true,
+        canAccessOpener: false,
+      },
+    })
+    addTarget(1, "target-a")
+    addTarget(2, "target-b")
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox({
+      onAdopt: (target) => target.targetId === "target-b"
+        ? Effect.fail(new Error("prompt target vanished"))
+        : Effect.succeed(target.url),
+    }), undefined, registry)
+    sessions.createNew("alpha")
+    await Effect.runPromise(sessions.adopt({
+      sessionId: "alpha",
+      createIfMissing: false,
+      targetId: "target-a",
+      targetUrl: "https://example.com/target-a",
+    }))
+
+    await expect(Effect.runPromise(sessions.adopt({
+      sessionId: "alpha",
+      createIfMissing: false,
+      targetId: "target-b",
+      targetUrl: "https://example.com/target-b",
+    }))).rejects.toThrow("prompt target vanished")
+
+    expect(sessions.adoptedTargetId("alpha")).toBeUndefined()
+    expect(registry.targetsByTargetId.get("target-a")?.browserControlSessionId).toBeUndefined()
+    expect(registry.targetsByTargetId.get("target-b")?.browserControlSessionId).toBeUndefined()
+  })
+
+  it("surfaces a durable adoption rollback failure", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    let failRollback = false
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox({
+      adoptFailure: new Error("target vanished"),
+    }), {
+      onSessionsChanged: (entries) => failRollback && entries.some((entry) => entry.id === "alpha" && !entry.target)
+        ? Promise.reject(new Error("rollback catalog unavailable"))
+        : undefined,
+    })
+    sessions.createNew("alpha")
+    await Effect.runPromise(sessions.persist())
+    sessions.updateTarget("alpha", { id: "target-a", owner: "user" })
+    await Effect.runPromise(sessions.persist())
+    failRollback = true
+
+    try {
+      await expect(Effect.runPromise(sessions.adopt({
+        sessionId: "alpha",
+        createIfMissing: false,
+        targetId: "target-b",
+        targetUrl: "https://example.com/target-b",
+      }))).rejects.toThrow("rollback catalog unavailable")
+    } finally {
+      consoleError.mockRestore()
+    }
   })
 
   it("preserves an existing sandbox when adoption times out before starting", async () => {

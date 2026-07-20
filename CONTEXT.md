@@ -83,6 +83,13 @@ _Avoid_: Security sandbox, permission boundary
 The per-session `state` object that survives across multiple execute calls.
 _Avoid_: Browser storage, tab state
 
+**Session Catalog**:
+The endpoint-scoped, private relay file that preserves session identity,
+read-only mode, and the exact default-target pointer across relay processes.
+Lifecycle operations acknowledge only after its atomic replacement is durable.
+It does not serialize Execute Sandbox JavaScript state or snapshot refs.
+_Avoid_: Current-session store, session journal, sandbox snapshot
+
 **MCP Process Session**:
 The implicit persistent execute sandbox owned by one running MCP server process.
 _Avoid_: Explicit MCP session id
@@ -124,6 +131,8 @@ _Avoid_: Token value, hardcoded credential
 - An **Agent** controls the browser by running code in an **Execute Sandbox**.
 - An **Execute Sandbox** owns **Persistent State**; the Target Registry owns
   target assignment.
+- A **Session Catalog** restores session and target identity after relay restart;
+  the restored **Execute Sandbox** starts with empty **Persistent State**.
 - An **Execute Sandbox** owns at most one active **Network Capture**.
 - A **Capture Artifact** refers to values in a **Secret Profile** through
   **Stable Secret References**.

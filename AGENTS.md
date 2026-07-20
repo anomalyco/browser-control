@@ -56,9 +56,9 @@ local Node relay.
   `ErrorEnvelope`; keep the relay message top-level while mapping tagged domain
   errors to stable codes and HTTP statuses.
 - Tie relay HTTP effects to the response lifetime with an `AbortSignal`.
-  Browser execute itself is uninterruptible at the underlying Playwright
-  Promise boundary so interruption cannot release its session permit while the
-  script still mutates the page.
+  Execute workers outlive an interrupted request once browser work starts;
+  retain the session permit through final journal and catalog writes so aborted
+  clients cannot lose aftermath bookkeeping or overlap later page mutations.
 - The CLI and MCP server talk to the relay only through the shared
   `src/relay-client.ts` service (`RelayClient.Service`), never through ad-hoc
   fetch/node:http calls. Failures are tagged errors that keep the relay's own
@@ -67,6 +67,13 @@ local Node relay.
   `~/.browser-control/session.json`; execute and adopt never use it implicitly.
   Invalid persisted session JSON is reported and preserved, never treated as an
   empty store that a later write may overwrite.
+- Relay session descriptors persist per port under
+  `~/.browser-control/relays/<port>/sessions.json`. After a relay restart,
+  restore session ids, read-only mode, and exact target ownership when that tab
+  reappears; JavaScript `state` and snapshot refs intentionally reset and warn.
+  Win the endpoint port before loading or writing this catalog. Successful
+  durable lifecycle operations await atomic replacement plus file and directory
+  sync. Corrupt catalogs fail relay startup and are never overwritten.
 - An extension RPC timeout fails only that command; the extension socket is
   closed only when a websocket-level ping probe also fails.
 - CDP guardrails are pure logic in `src/cdp-guardrails.ts`, enforced at the top
@@ -80,8 +87,14 @@ local Node relay.
   status directly from `chrome.debugger.onDetach`: the relay owns root-detach
   classification, and ambiguous `target_closed` events from extension child
   targets must preserve the handoff UI.
-- `TargetRegistry` is the sole production target-ownership authority. Session
-  state keeps only the adopted default-page pointer. Adoption reserves,
+- Handoff `start` actions run only after the waiter and WAIT UI are registered.
+  Require extension acknowledgement of WAIT before invoking `start`. Human
+  completion waits for the action to settle. Timeout or target cancellation
+  disconnects the sandbox before releasing its execute permit, preventing a
+  non-settling prompt action from mutating the page later. Cancel the waiter if
+  WAIT presentation or action startup fails.
+- `TargetRegistry` is the sole production live target-ownership authority.
+  Session state keeps one durable default-target identity and owner. Adoption reserves,
   commits, or rolls back registry ownership transactionally and reconciles CDP
   visibility, grouping, and page status for every changed target.
 - Same-tab root target generations are explicit replacements, never map
@@ -225,7 +238,7 @@ browser-control skill
 
 - Load `extension/dist` as the unpacked extension.
 - The relay listens on `127.0.0.1:19989` by default.
-- Current shim version is `0.0.17`.
+- Current shim version is `0.0.18`.
 - On socket open the shim sends `hello` and then re-announces every tab it still
   has `chrome.debugger` attached to (`debugger.attached` events), so a restarted
   relay rebuilds its target registry without the user re-clicking the toolbar.

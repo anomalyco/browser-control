@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { HandoffRegistry, resolveExactHandoffTarget, toolbarClickAction } from "../src/handoff.ts"
+import { awaitHandoffAction, HandoffRegistry, resolveExactHandoffTarget, toolbarClickAction } from "../src/handoff.ts"
 
 function registryWithIds(...ids: string[]): HandoffRegistry {
   return new HandoffRegistry(() => ids.shift() ?? "unexpected-id")
@@ -115,6 +115,131 @@ describe("HandoffRegistry", () => {
     expect(registry.complete({ id: wait.id, tabId: 7, targetId: "target-old", targetSessionId: "bc-tab-old" })).toBe(false)
     expect(registry.complete({ id: wait.id, tabId: 7, targetId: "target-new", targetSessionId: "bc-tab-new" })).toBe(true)
     await expect(wait.outcome).resolves.toBe("resolved")
+  })
+
+  it("cancels a registered handoff when its start action fails", async () => {
+    const registry = registryWithIds("handoff-1")
+    const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-1", targetSessionId: "bc-tab-1", message: "m", timeoutMs: 5_000 })
+
+    await expect(awaitHandoffAction({
+      outcome: wait.outcome,
+      start: () => Promise.reject(new Error("prompt action failed")),
+      cancel: () => {
+        registry.cancel(wait.id)
+      },
+    })).rejects.toThrow("prompt action failed")
+    expect(registry.cancel(wait.id)).toBe(false)
+    await expect(wait.outcome).resolves.toBe("timeout")
+    expect(registry.pendingCount).toBe(0)
+  })
+
+  it("does not start the prompt action until WAIT presentation is acknowledged", async () => {
+    const registry = registryWithIds("handoff-1")
+    const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-1", targetSessionId: "bc-tab-1", message: "m", timeoutMs: 5_000 })
+    let acknowledgePresentation: (() => void) | undefined
+    const presented = new Promise<void>((resolve) => {
+      acknowledgePresentation = resolve
+    })
+    let markStarted: (() => void) | undefined
+    const startCalled = new Promise<void>((resolve) => {
+      markStarted = resolve
+    })
+    let started = false
+    const result = awaitHandoffAction({
+      outcome: wait.outcome,
+      present: () => presented,
+      start: () => {
+        started = true
+        markStarted?.()
+      },
+      cancel: () => {
+        registry.cancel(wait.id)
+      },
+    })
+
+    await Promise.resolve()
+    expect(started).toBe(false)
+    acknowledgePresentation?.()
+    await startCalled
+    expect(started).toBe(true)
+    expect(registry.complete({ id: wait.id, tabId: 7, targetId: "target-1", targetSessionId: "bc-tab-1" })).toBe(true)
+    await expect(result).resolves.toBe("resolved")
+  })
+
+  it("does not start the prompt action when the handoff ends before WAIT is acknowledged", async () => {
+    const registry = registryWithIds("handoff-1")
+    const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-1", targetSessionId: "bc-tab-1", message: "m", timeoutMs: 5_000 })
+    let acknowledgePresentation: (() => void) | undefined
+    const presented = new Promise<void>((resolve) => {
+      acknowledgePresentation = resolve
+    })
+    let started = false
+    const result = awaitHandoffAction({
+      outcome: wait.outcome,
+      present: () => presented,
+      start: () => {
+        started = true
+      },
+      cancel: () => {
+        registry.cancel(wait.id)
+      },
+    })
+
+    expect(registry.cancel(wait.id)).toBe(true)
+    await expect(result).resolves.toBe("timeout")
+    acknowledgePresentation?.()
+    await Promise.resolve()
+    expect(started).toBe(false)
+  })
+
+  it("starts a blocking action after registration and waits for both outcomes", async () => {
+    const registry = registryWithIds("handoff-1")
+    const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-1", targetSessionId: "bc-tab-1", message: "m", timeoutMs: 5_000 })
+    let finishAction: (() => void) | undefined
+    const action = new Promise<void>((resolve) => {
+      finishAction = resolve
+    })
+    let settled = false
+    const result = awaitHandoffAction({
+      outcome: wait.outcome,
+      start: () => {
+        expect(registry.pendingCount).toBe(1)
+        return action
+      },
+      cancel: () => {
+        registry.cancel(wait.id)
+      },
+    }).finally(() => {
+      settled = true
+    })
+
+    await Promise.resolve()
+    expect(registry.pendingCount).toBe(1)
+    registry.complete({ id: wait.id, tabId: 7, targetId: "target-1", targetSessionId: "bc-tab-1" })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    finishAction?.()
+    await expect(result).resolves.toBe("resolved")
+  })
+
+  it("disconnects a non-settling start action after the handoff times out", async () => {
+    const registry = registryWithIds("handoff-1")
+    const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-1", targetSessionId: "bc-tab-1", message: "m", timeoutMs: 5_000 })
+    let cancelled = false
+    const result = awaitHandoffAction({
+      outcome: wait.outcome,
+      start: () => new Promise(() => {}),
+      cancel: () => {
+        registry.cancel(wait.id)
+      },
+      cancelStart: async () => {
+        cancelled = true
+      },
+    })
+
+    expect(registry.cancel(wait.id)).toBe(true)
+    await expect(result).resolves.toBe("timeout")
+    expect(cancelled).toBe(true)
   })
 })
 
