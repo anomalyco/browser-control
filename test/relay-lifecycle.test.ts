@@ -77,6 +77,21 @@ describe("relay lifecycle", () => {
     expect(starts).toBe(1)
   })
 
+  it("allows a cold managed relay more than two seconds of readiness probes", async () => {
+    let attempts = 0
+    const result = await Effect.runPromise(ensureRelay({
+      relay: relay({
+        version: Effect.suspend(() => ++attempts >= 42 ? Effect.succeed(version) : Effect.fail(unreachable())),
+      }),
+      buildId: "build-current",
+      start: Effect.void,
+      retryDelayMs: 0,
+    }))
+
+    expect(result.started).toBe(true)
+    expect(attempts).toBe(42)
+  })
+
   it("waits for a bound relay to finish restoring without starting another process", async () => {
     let attempts = 0
     let starts = 0

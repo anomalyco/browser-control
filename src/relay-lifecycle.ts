@@ -60,7 +60,7 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
   if (relayWasAbsent) yield* options.start ?? spawnManagedRelay()
   const version = yield* probe.pipe(
     Effect.retry({
-      times: options.retryTimes ?? 40,
+      times: options.retryTimes ?? 200,
       schedule: Schedule.spaced(options.retryDelayMs ?? 50),
       while: isRelayStartingOrUnreachable,
     }),
