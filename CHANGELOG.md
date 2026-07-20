@@ -1,5 +1,19 @@
 # @opencode-ai/browser-control
 
+## 0.3.0
+
+### Minor Changes
+
+- 7aee5fd: Add a public Effect client with atomic named sessions and schema-decoded, same-origin JSON requests authenticated by the live browser page. Sensitive responses are returned as `Redacted` values and bypass execute journals and active network captures.
+
+### Patch Changes
+
+- 7aee5fd: Add `BrowserControlClient.reveal` for consuming sensitive authenticated responses across package-manager layouts with separate Effect runtime instances, plus `resetSession` for recovering disconnected named sessions without invoking the CLI.
+- 7aee5fd: Reorganize the Browser Control agent skill around an inspect-act-verify golden
+  path, explicit completion criteria, and concise optional workflows.
+- 4427f40: Allow cold managed relays up to ten seconds to restore persisted sessions and
+  become ready before reporting startup failure.
+
 ## 0.2.0
 
 ### Minor Changes
