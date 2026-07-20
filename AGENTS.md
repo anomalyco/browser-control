@@ -242,7 +242,7 @@ browser-control skill
 
 - Load `extension/dist` as the unpacked extension.
 - The relay listens on `127.0.0.1:19989` by default.
-- Current shim version is `0.0.22` and extension protocol version is `1`.
+- Current shim version is `0.0.23` and extension protocol version is `1`.
 - Store and npm versions may differ when protocol `1` remains compatible.
 - On socket open the shim sends `hello` and then re-announces every tab it still
   has `chrome.debugger` attached to (`debugger.attached` events), so a restarted

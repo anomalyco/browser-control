@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Browser Control",
-  "version": "0.0.22",
+  "version": "0.0.23",
   "description": "Connect browser tabs to the local Browser Control driver.",
   "minimum_chrome_version": "120",
   "permissions": ["activeTab", "alarms", "debugger", "offscreen", "tabCapture", "tabGroups"],

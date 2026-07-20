@@ -111,6 +111,6 @@ pnpm package:extension
 Upload `artifacts/browser-control-extension-<version>.zip`. Record the printed
 SHA-256 digest with the release notes.
 
-Before submission, add the Store-assigned extension ID to the relay's accepted
-production extension origins while preserving an explicit source-development
-path.
+The production relay accepts Store extension ID
+`gmjpoplfomnnjipeiojccjbpjlodkjhn`. Source-mode relays additionally accept
+unpacked development extension origins.

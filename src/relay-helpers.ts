@@ -9,6 +9,7 @@ import { RelayErrorCode } from "./relay-schema.ts"
 
 export const defaultHost = "127.0.0.1"
 export const defaultPort = 19989
+export const chromeWebStoreExtensionOrigin = "chrome-extension://gmjpoplfomnnjipeiojccjbpjlodkjhn"
 
 const maxCliBodyBytes = 1_000_000
 
@@ -54,16 +55,20 @@ export function validateBrowserFetchSite(request: http.IncomingMessage): string 
 
 export function validateWebSocketOrigin(options: {
   readonly origin: string | undefined
+  readonly allowAnyChromeExtension?: boolean
   readonly requireChromeExtension?: boolean
 }): string | undefined {
   if (!options.origin) {
     return options.requireChromeExtension ? "Extension WebSocket origin is required" : undefined
   }
-  if (options.origin.startsWith("chrome-extension://")) {
+  if (options.origin === chromeWebStoreExtensionOrigin) {
+    return undefined
+  }
+  if (options.allowAnyChromeExtension && options.origin.startsWith("chrome-extension://")) {
     return undefined
   }
   if (options.requireChromeExtension) {
-    return "Extension WebSocket origin must be chrome-extension://"
+    return "Extension WebSocket origin is not allowed"
   }
   return "WebSocket origin is not allowed"
 }
