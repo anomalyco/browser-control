@@ -12,7 +12,7 @@ import { debuggerDetachedEvent } from "./debugger-detach.ts"
 
 const relayHost = "127.0.0.1"
 const relayPort = 19989
-const shimVersion = "0.0.17"
+const shimVersion = "0.0.18"
 const offscreenDocumentPath = "offscreen.html"
 
 let socket: WebSocket | undefined
@@ -276,7 +276,7 @@ async function handleCommand(command: ShimCommand): Promise<JsonObject> {
     if (!status) {
       throw new Error("Invalid page status")
     }
-    await sendPageStatusMessage(tabId, { action: "page-status.set", status })
+    await sendPageStatusMessage(tabId, { action: "page-status.set", status }, true)
     return {}
   }
   if (command.method === "pageStatus.clear") {
@@ -516,10 +516,11 @@ function handleRuntimeMessage(message: unknown, sender: chrome.runtime.MessageSe
   }
 }
 
-async function sendPageStatusMessage(tabId: number, message: JsonObject): Promise<void> {
+async function sendPageStatusMessage(tabId: number, message: JsonObject, required = false): Promise<void> {
   try {
     await chrome.tabs.sendMessage(tabId, message)
-  } catch {
+  } catch (error) {
+    if (required) throw error
     // Restricted pages do not accept content scripts. Visibility is best-effort
     // and must never interfere with debugger attachment or detachment.
   }

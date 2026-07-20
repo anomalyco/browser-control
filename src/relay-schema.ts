@@ -373,6 +373,7 @@ export interface RecordingCancelResponse extends Schema.Schema.Type<typeof Recor
 
 export const RelayErrorCode = Schema.Literals([
   "invalid-request",
+  "relay-starting",
   "auth-profile-not-found",
   "capture-conflict",
   "session-already-exists",

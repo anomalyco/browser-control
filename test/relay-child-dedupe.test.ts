@@ -43,7 +43,7 @@ describe("relay child target announce dedupe", () => {
   it("keeps an extension-owned child from replacing the tab root", async () => {
     const port = await freePort()
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
-      const relay = yield* startRelay({ port })
+      const relay = yield* startRelay({ port, sessionCatalogPath: null })
       yield* Effect.tryPromise(async () => {
         const extension = await openSocket(`${relay.url.replace("http://", "ws://")}/extension`)
         const extensionCommands: Array<{ readonly method: string; readonly params?: JsonObject }> = []
@@ -180,7 +180,7 @@ describe("relay child target announce dedupe", () => {
   it("commits one replacement generation after setup retries", async () => {
     const port = await freePort()
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
-      const relay = yield* startRelay({ port })
+      const relay = yield* startRelay({ port, sessionCatalogPath: null })
       yield* Effect.tryPromise(async () => {
         const extension = await openSocket(`${relay.url.replace("http://", "ws://")}/extension`)
         let currentTargetId = "root-old"
@@ -252,7 +252,7 @@ describe("relay child target announce dedupe", () => {
   it("suppresses service workers while preserving dedicated worker routing", async () => {
     const port = await freePort()
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
-      yield* startRelay({ port })
+      yield* startRelay({ port, sessionCatalogPath: null })
       yield* Effect.tryPromise(async () => {
         const extension = await openSocket(`ws://127.0.0.1:${port}/extension`)
         const extensionCommands: Array<{ readonly method: string; readonly params?: JsonObject }> = []
@@ -370,7 +370,7 @@ describe("relay child target announce dedupe", () => {
   it("detaches the old child session before broadcasting a live re-attach for the same child target id", async () => {
     const port = await freePort()
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
-      const relay = yield* startRelay({ port })
+      const relay = yield* startRelay({ port, sessionCatalogPath: null })
       yield* Effect.tryPromise(async () => {
         const extension = await openSocket(`${relay.url.replace("http://", "ws://")}/extension`)
         const extensionCommands: string[] = []

@@ -18,6 +18,7 @@ import type { HandoffOutcome } from "./handoff.ts"
 import * as AuthProfile from "./auth-profile.ts"
 import * as NetworkCapture from "./network-capture.ts"
 import type { ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary, ExecuteMedia } from "./relay-schema.ts"
+import type { SessionTarget } from "./relay-types.ts"
 import { executionContextFailureDiagnostic, runtimeFailureKind } from "./runtime-diagnostics.ts"
 
 const nodeModules = { fs, path, os, crypto, url, util, events, stream, buffer, http, https, zlib }
@@ -221,6 +222,7 @@ type SandboxGlobals = {
 type HandoffCallOptions = {
   readonly timeoutMs?: number
   readonly page?: Page
+  readonly start?: () => unknown | Promise<unknown>
 }
 
 export type HandoffPageTarget = {
@@ -231,6 +233,8 @@ export type RequestHandoff = (options: {
   readonly message: string
   readonly timeoutMs: number
   readonly target: HandoffPageTarget
+  readonly start?: () => unknown | Promise<unknown>
+  readonly cancelStart?: () => Promise<void>
 }) => Promise<HandoffOutcome>
 
 const defaultHandoffTimeoutMs = 10 * 60 * 1_000
@@ -372,6 +376,7 @@ type ExecuteSandboxOptions = {
   readonly endpointUrl: string
   readonly sessionId?: string
   readonly requestHandoff?: RequestHandoff
+  readonly onDefaultTargetChange?: (target: SessionTarget | undefined) => void
 }
 
 export type ExecuteResult = {
@@ -417,6 +422,7 @@ export class ExecuteSandbox {
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private readonly networkCapture = new NetworkCapture.Recorder()
   private pendingWarnings: string[] = []
+  private boundPageClose: { readonly page: Page; readonly listener: () => void } | undefined
 
   constructor(readonly options: ExecuteSandboxOptions) {}
 
@@ -532,10 +538,12 @@ export class ExecuteSandbox {
       const ownsOpenPage = page !== undefined && sandbox.ownsPage && !page.isClosed()
       sandbox.browser = undefined
       sandbox.page = undefined
+      sandbox.clearPageListeners()
       sandbox.defaultPageTargetId = undefined
       sandbox.ownsPage = false
       sandbox.pageHealthCheckRequired = false
       sandbox.pendingPageTarget = undefined
+      sandbox.notifyDefaultTargetChange()
       yield* sandbox.networkCapture.cancel()
 
       if (ownsOpenPage) {
@@ -555,6 +563,49 @@ export class ExecuteSandbox {
     })
   }
 
+  disconnect(): Effect.Effect<void, Error> {
+    const sandbox = this
+    return Effect.gen(function* () {
+      const browser = sandbox.browser
+      sandbox.browser = undefined
+      sandbox.page = undefined
+      sandbox.clearPageListeners()
+      sandbox.pageHealthCheckRequired = false
+      if (sandbox.defaultPageTargetId) {
+        sandbox.pendingPageTarget = { targetId: sandbox.defaultPageTargetId, warnReplaced: false }
+      }
+      yield* sandbox.networkCapture.cancel()
+      if (browser) {
+        yield* runPlaywrightOperation({
+          label: "Disconnect sandbox browser during relay shutdown",
+          timeoutMs: playwrightCloseTimeoutMs,
+          run: () => browser.close(),
+        }).pipe(Effect.ignore)
+      }
+    })
+  }
+
+  disconnectSettled(): Effect.Effect<void, Error> {
+    const sandbox = this
+    return Effect.gen(function* () {
+      const browser = sandbox.browser
+      sandbox.browser = undefined
+      sandbox.page = undefined
+      sandbox.clearPageListeners()
+      sandbox.pageHealthCheckRequired = false
+      if (sandbox.defaultPageTargetId) {
+        sandbox.pendingPageTarget = { targetId: sandbox.defaultPageTargetId, warnReplaced: false }
+      }
+      yield* sandbox.networkCapture.cancel()
+      if (browser) {
+        yield* runSettledPlaywrightOperation({
+          label: "Disconnect sandbox browser after handoff cancellation",
+          run: () => browser.close(),
+        }).pipe(Effect.ignore)
+      }
+    })
+  }
+
   closeSettled(): Effect.Effect<void, Error> {
     const sandbox = this
     return Effect.gen(function* () {
@@ -563,10 +614,12 @@ export class ExecuteSandbox {
       const ownsOpenPage = page !== undefined && sandbox.ownsPage && !page.isClosed()
       sandbox.browser = undefined
       sandbox.page = undefined
+      sandbox.clearPageListeners()
       sandbox.defaultPageTargetId = undefined
       sandbox.ownsPage = false
       sandbox.pageHealthCheckRequired = false
       sandbox.pendingPageTarget = undefined
+      sandbox.notifyDefaultTargetChange()
       yield* sandbox.networkCapture.cancel()
 
       if (ownsOpenPage) {
@@ -633,14 +686,13 @@ export class ExecuteSandbox {
         currentPageIsSelected: currentPage === selected,
         currentPageIsClosed: currentPage?.isClosed() ?? true,
       }) && currentPage) {
+        sandbox.page = undefined
         yield* runSettledPlaywrightOperation({
           label: "Close the previous session page during adoption",
           run: () => currentPage.close(),
         }).pipe(Effect.ignore)
       }
-      sandbox.page = selected
-      sandbox.defaultPageTargetId = target.targetId
-      sandbox.ownsPage = false
+      sandbox.bindDefaultPage(selected, target.targetId, false, false)
       sandbox.pageHealthCheckRequired = false
       sandbox.pendingPageTarget = undefined
       sandbox.networkCapture.bindPage(selected)
@@ -704,6 +756,8 @@ export class ExecuteSandbox {
         message: handoffMessage,
         timeoutMs,
         target: { targetId },
+        ...(options?.start ? { start: options.start } : {}),
+        ...(options?.start ? { cancelStart: () => Effect.runPromise(this.disconnectSettled()) } : {}),
       })
       if (outcome === "timeout") {
         throw new Error(`Handoff timed out after ${timeoutMs}ms waiting for the user: ${handoffMessage}`)
@@ -758,6 +812,7 @@ export class ExecuteSandbox {
     if (this.defaultPageTargetId !== targetId) {
       return false
     }
+    this.clearPageListeners()
     this.page = undefined
     this.defaultPageTargetId = undefined
     this.ownsPage = false
@@ -772,12 +827,70 @@ export class ExecuteSandbox {
 
   markTargetReplaced(previousTargetId: string, targetId: string): boolean {
     if (this.defaultPageTargetId !== previousTargetId) return false
+    this.clearPageListeners()
     this.page = undefined
     this.defaultPageTargetId = targetId
     this.pageHealthCheckRequired = false
     this.pendingPageTarget = { targetId, warnReplaced: true }
     this.networkCapture.bindPage(undefined)
     return true
+  }
+
+  restore(target: SessionTarget | undefined): void {
+    if (target) {
+      this.defaultPageTargetId = target.id
+      this.ownsPage = target.owner === "relay"
+      this.pendingPageTarget = { targetId: target.id, warnReplaced: false }
+    }
+    this.pendingWarnings.push("The relay restarted; session JavaScript state and snapshot refs were reset.")
+  }
+
+  private notifyDefaultTargetChange(): void {
+    this.options.onDefaultTargetChange?.(this.defaultPageTargetId
+      ? { id: this.defaultPageTargetId, owner: this.ownsPage ? "relay" : "user" }
+      : undefined)
+  }
+
+  private bindDefaultPage(page: Page, targetId: string | undefined, ownsPage: boolean, notify: boolean): void {
+    this.clearPageListeners()
+    this.page = page
+    this.defaultPageTargetId = targetId
+    this.ownsPage = ownsPage
+    const listener = () => {
+      if (this.boundPageClose?.page === page) this.boundPageClose = undefined
+      if (this.page !== page) return
+      this.page = undefined
+      this.defaultPageTargetId = undefined
+      this.ownsPage = false
+      this.pendingPageTarget = undefined
+      this.networkCapture.bindPage(undefined)
+      this.clearSnapshotRefs()
+      this.notifyDefaultTargetChange()
+    }
+    this.boundPageClose = { page, listener }
+    page.once("close", listener)
+    if (notify) this.notifyDefaultTargetChange()
+  }
+
+  private clearBoundPageClose(): void {
+    const bound = this.boundPageClose
+    if (!bound) return
+    bound.page.off("close", bound.listener)
+    this.boundPageClose = undefined
+  }
+
+  private clearSnapshotRefs(): void {
+    this.snapshotRefs.removeNavigationListener?.()
+    delete this.snapshotRefs.removeNavigationListener
+    this.snapshotRefs.selectors.clear()
+    delete this.snapshotRefs.page
+    delete this.snapshotRefs.url
+    delete this.snapshotRefs.previousSnapshot
+  }
+
+  private clearPageListeners(): void {
+    this.clearBoundPageClose()
+    this.clearSnapshotRefs()
   }
 
   getStatus(): { readonly sessionId?: string; readonly connected: boolean; readonly pageUrl: string | null; readonly stateKeys: string[] } {
@@ -861,7 +974,7 @@ export class ExecuteSandbox {
           cause: new Error(`Session page target unavailable: ${targetId}`),
         })
       }
-      this.page = replacement
+      this.bindDefaultPage(replacement, targetId, this.ownsPage, false)
       this.pendingPageTarget = undefined
       if (pendingTarget.warnReplaced) this.pendingWarnings.push(defaultPageReplacedWarning)
       return replacement
@@ -889,6 +1002,7 @@ export class ExecuteSandbox {
         this.defaultPageTargetId = undefined
         this.ownsPage = false
         this.pageHealthCheckRequired = false
+        this.notifyDefaultTargetChange()
         this.pendingWarnings.push(defaultPageRecoveredWarning)
       } else {
         return this.page
@@ -896,12 +1010,14 @@ export class ExecuteSandbox {
     }
     if (this.page?.isClosed()) {
       this.defaultPageTargetId = undefined
+      this.ownsPage = false
+      this.notifyDefaultTargetChange()
       this.pendingWarnings.push(defaultPageClosedWarning)
     }
-    this.page = await context.newPage()
-    this.defaultPageTargetId = await resolvePageTargetId(this.page)
-    this.ownsPage = true
-    return this.page
+    const page = await context.newPage()
+    const targetId = await resolvePageTargetId(page)
+    this.bindDefaultPage(page, targetId, true, true)
+    return page
   }
 }
 

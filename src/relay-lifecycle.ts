@@ -52,18 +52,19 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
     const buildProblem = relayBuildProblem(initial.success, buildId)
     return { version: initial.success, started: false, ...(buildProblem ? { buildProblem } : {}) } satisfies RelayReadiness
   }
-  if (!isRelayUnreachable(initial.failure)) {
+  const relayWasAbsent = isRelayUnreachable(initial.failure)
+  if (!relayWasAbsent && !isRelayStarting(initial.failure)) {
     return yield* Effect.fail(initial.failure)
   }
 
-  yield* options.start ?? spawnManagedRelay()
+  if (relayWasAbsent) yield* options.start ?? spawnManagedRelay()
   const version = yield* probe.pipe(
     Effect.retry({
       times: options.retryTimes ?? 40,
       schedule: Schedule.spaced(options.retryDelayMs ?? 50),
-      while: isRelayUnreachable,
+      while: isRelayStartingOrUnreachable,
     }),
-    Effect.mapError((error) => isRelayUnreachable(error)
+    Effect.mapError((error) => isRelayStartingOrUnreachable(error)
       ? new RelayStartFailed({
         message: `Browser Control relay did not start at ${options.relay.endpoint}`,
         endpoint: options.relay.endpoint,
@@ -72,7 +73,7 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
       : error),
   )
   const buildProblem = relayBuildProblem(version, buildId)
-  return { version, started: true, ...(buildProblem ? { buildProblem } : {}) } satisfies RelayReadiness
+  return { version, started: relayWasAbsent, ...(buildProblem ? { buildProblem } : {}) } satisfies RelayReadiness
 })
 
 export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensionConnected")(function* (options: {
@@ -95,7 +96,7 @@ export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensio
     Effect.retry({
       times: options.retryTimes ?? 40,
       schedule: Schedule.spaced(options.retryDelayMs ?? 50),
-      while: (error) => error instanceof ExtensionDisconnected || isRelayUnreachable(error),
+      while: (error) => error instanceof ExtensionDisconnected || isRelayStartingOrUnreachable(error),
     }),
   )
 })
@@ -148,4 +149,12 @@ export function managedRelayEntrypoint(entrypoint: string): string {
 
 function isRelayUnreachable(error: unknown): error is RelayClient.RelayUnreachable {
   return error instanceof RelayClient.RelayUnreachable
+}
+
+function isRelayStarting(error: unknown): error is RelayClient.RelayRejected {
+  return error instanceof RelayClient.RelayRejected && error.code === "relay-starting"
+}
+
+function isRelayStartingOrUnreachable(error: unknown): error is RelayClient.RelayRejected | RelayClient.RelayUnreachable {
+  return isRelayStarting(error) || isRelayUnreachable(error)
 }

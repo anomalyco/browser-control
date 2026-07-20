@@ -278,7 +278,7 @@ export function optionalSessionId(value: JsonObject[string] | undefined): string
     return undefined
   }
   const id = value.trim()
-  if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(id)) {
+  if (!isValidSessionId(id)) {
     throw new HttpRouteError({
       message: "Session ids must use lowercase letters, numbers, and dashes, and be at most 63 characters",
       status: 400,
@@ -286,6 +286,10 @@ export function optionalSessionId(value: JsonObject[string] | undefined): string
     })
   }
   return id
+}
+
+export function isValidSessionId(id: string): boolean {
+  return /^[a-z0-9][a-z0-9-]{0,62}$/.test(id)
 }
 
 export function requiredSessionId(value: JsonObject[string] | undefined): string {

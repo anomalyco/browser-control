@@ -216,9 +216,24 @@ await page.getByRole("heading", { name: "Dashboard" }).waitFor()
 return page.url()
 ```
 
+If the click itself can block on native WebAuthn or payment UI, register the
+handoff before triggering it:
+
+```js
+await handoff("Complete the security-key prompt, then continue", {
+  timeoutMs: 600_000,
+  start: () => page.getByRole("button", { name: "Use security key" }).click({ timeout: 600_000 }),
+})
+```
+
 The page displays an accessible completion control and the script waits. Always
 verify the expected URL or element after the handoff; human acknowledgment does
-not prove that the requested step succeeded.
+not prove that the requested step succeeded. Browser Control waits for the
+extension to acknowledge WAIT before calling `start`. If the handoff times out
+or its target disappears first, it disconnects that sandbox's Playwright
+connection before releasing the execute permit, preventing a still-pending
+prompt action from mutating the page later. Keep `start` limited to the bounded
+browser action that opens the native prompt.
 
 ## Use Read-Only Sessions
 

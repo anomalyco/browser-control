@@ -42,6 +42,7 @@ import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
 import { ghostCursorClientSource, ghostCursorMouseActionExpression, ghostCursorRestoreExpression, inputDispatchMouseEventToGhostCursorAction } from "./ghost-cursor.ts"
 import { guardCdpMethod } from "./cdp-guardrails.ts"
 import {
+  awaitHandoffAction,
   HandoffRegistry,
   resolveExactHandoffTarget,
   toolbarClickAction,
@@ -51,6 +52,7 @@ import {
 import { ExecuteSandbox, type HandoffPageTarget } from "./execute.ts"
 import { makePageStatus } from "./page-status.ts"
 import { appendJournalEntry, defaultJournalBaseDir, makeJournalEntry } from "./session-journal.ts"
+import { defaultSessionCatalogPath, SessionCatalog } from "./session-catalog.ts"
 import { BrowserControlSessions } from "./session-manager.ts"
 import { RecordingRelay } from "./recording-relay.ts"
 import { appendManagedRelayProcessLog } from "./relay-log.ts"
@@ -59,7 +61,11 @@ import { resolveTargetInfoTarget, shouldExposeChildTarget, TargetRegistry, type 
 
 export type { RelayServer } from "./relay-types.ts"
 
-export const startRelay = Effect.fn("Relay.start")(function* (options: { readonly host?: string; readonly port?: number } = {}) {
+export const startRelay = Effect.fn("Relay.start")(function* (options: {
+  readonly host?: string
+  readonly port?: number
+  readonly sessionCatalogPath?: string | null
+} = {}) {
   yield* installRelayProcessGuard
   return yield* Effect.acquireRelease(makeRelay(options), (server) => {
     return server.close()
@@ -129,11 +135,19 @@ function debugEnvironmentEnabled(value: string | undefined): boolean {
   return value !== undefined && ["1", "true", "yes", "on"].includes(value.toLowerCase())
 }
 
-const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string; readonly port?: number } = {}) {
+const makeRelay = Effect.fnUntraced(function* (options: {
+  readonly host?: string
+  readonly port?: number
+  readonly sessionCatalogPath?: string | null
+} = {}) {
   const host = options.host ?? defaultHost
   const port = options.port ?? defaultPort
   const browserId = crypto.randomUUID()
   const endpointUrl = `http://${formatHostForUrl(host)}:${port}`
+  const sessionCatalog = options.sessionCatalogPath === null
+    ? undefined
+    : new SessionCatalog(options.sessionCatalogPath ?? defaultSessionCatalogPath(port))
+  let catalogWritesEnabled = false
   const registry = new TargetRegistry()
   const rootLifecycleSemaphores = new Map<number, Semaphore.Semaphore>()
   type RootReconciliationWorker = {
@@ -205,6 +219,15 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     Effect.runPromise(Effect.ignore(sendToExtension({ method: "action.setBadge", params: { tabId: target.tabId, ...badge } }))).catch(() => {})
     sendPageStatus(target, state, options)
   }
+  const setActivityForTargetAcknowledged = async (
+    target: ConnectedTarget,
+    state: PageStatus["state"],
+    badge: { readonly text: string; readonly color: string; readonly title: string },
+    options: { readonly sessionId?: string; readonly message?: string; readonly handoffId?: string } = {},
+  ): Promise<void> => {
+    Effect.runPromise(Effect.ignore(sendToExtension({ method: "action.setBadge", params: { tabId: target.tabId, ...badge } }))).catch(() => {})
+    await Effect.runPromise(sendPageStatusEffect(target, state, options))
+  }
   const removeActiveHandoffTab = (sessionId: string, tabId: number): void => {
     const tabIds = activeHandoffTabs.get(sessionId)
     if (!tabIds) {
@@ -230,6 +253,8 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     readonly message: string
     readonly timeoutMs: number
     readonly target: HandoffPageTarget
+    readonly start?: () => unknown | Promise<unknown>
+    readonly cancelStart?: () => Promise<void>
   }): Promise<HandoffOutcome> => {
     const target = resolveHandoffTarget(options.sessionId, options.target)
     const sessionTabs = activeHandoffTabs.get(options.sessionId) ?? new Set<number>()
@@ -243,15 +268,26 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       message: options.message,
       timeoutMs: options.timeoutMs,
     })
-    setActivityForTarget(target, "waiting", waitingBadge(options.message), {
-      sessionId: options.sessionId,
-      message: options.message,
-      handoffId: wait.id,
-    })
     let outcome: HandoffOutcome | undefined
     try {
-      outcome = await wait.outcome
+      outcome = await awaitHandoffAction({
+        outcome: wait.outcome,
+        present: () => setActivityForTargetAcknowledged(target, "waiting", waitingBadge(options.message), {
+          sessionId: options.sessionId,
+          message: options.message,
+          handoffId: wait.id,
+        }),
+        ...(options.start ? { start: options.start } : {}),
+        ...(options.cancelStart ? { cancelStart: options.cancelStart } : {}),
+        cancel: () => {
+          handoffs.cancel(wait.id)
+        },
+      })
       return outcome
+    } catch (error) {
+      handoffs.cancel(wait.id)
+      removeActiveHandoffTab(options.sessionId, target.tabId)
+      throw error
     } finally {
       if (outcome !== undefined && outcome !== "resolved" && outcome !== "timeout") {
         removeActiveHandoffTab(options.sessionId, target.tabId)
@@ -273,7 +309,17 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       new ExecuteSandbox({
         endpointUrl,
         sessionId: id,
-        requestHandoff: ({ message, timeoutMs, target }) => requestHandoff({ sessionId: id, message, timeoutMs, target }),
+        onDefaultTargetChange: (target) => {
+          sessions.updateTarget(id, target)
+        },
+        requestHandoff: ({ message, timeoutMs, target, start, cancelStart }) => requestHandoff({
+          sessionId: id,
+          message,
+          timeoutMs,
+          target,
+          ...(start ? { start } : {}),
+          ...(cancelStart ? { cancelStart } : {}),
+        }),
       }),
     {
       onExecuteStateChange: (sessionId, executing) => {
@@ -303,17 +349,23 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
           diagnostic: record.result.diagnostic,
           handoffs: record.result.aftermath?.handoffs,
         })
-        void appendJournalEntry({ baseDir: journalBaseDir, entry }).catch((error: unknown) => {
-          console.error("Failed to append session journal entry", error)
-        })
+        return appendJournalEntry({ baseDir: journalBaseDir, entry })
       },
       onTargetOwnershipChange: (change) => {
         reconcileTargetOwnership(change)
       },
+      onReleaseRelayTarget: (targetId) => {
+        const target = registry.targetsByTargetId.get(targetId)
+        return target
+          ? sendToExtension({ method: "tabs.remove", params: { tabId: target.tabId } }).pipe(Effect.asVoid)
+          : Effect.fail(new Error(`Relay-owned target ${targetId} has not re-announced yet; retry after the extension reconnects`))
+      },
+      onSessionsChanged: async (entries) => {
+        if (catalogWritesEnabled) await sessionCatalog?.save(entries)
+      },
     },
     registry,
   )
-
   function pageStatusSessionId(target: ConnectedTarget): string | undefined {
     return target.browserControlSessionId
   }
@@ -336,11 +388,11 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     })
   }
 
-  function sendPageStatus(
+  function sendPageStatusEffect(
     target: ConnectedTarget,
     state: PageStatus["state"],
     options: { readonly sessionId?: string; readonly message?: string; readonly handoffId?: string } = {},
-  ): void {
+  ): Effect.Effect<void, Error> {
     const sessionId = options.sessionId ?? pageStatusSessionId(target)
     const status = makePageStatus({
       state,
@@ -349,7 +401,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       ...(options.message ? { message: options.message } : {}),
       ...(options.handoffId ? { handoffId: options.handoffId } : {}),
     })
-    Effect.runPromise(Effect.ignore(sendToExtension({
+    return sendToExtension({
       method: "pageStatus.set",
       params: {
         tabId: target.tabId,
@@ -362,7 +414,15 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
           ...(status.handoffId ? { handoffId: status.handoffId } : {}),
         },
       },
-    }))).catch(() => {})
+    }).pipe(Effect.asVoid)
+  }
+
+  function sendPageStatus(
+    target: ConnectedTarget,
+    state: PageStatus["state"],
+    options: { readonly sessionId?: string; readonly message?: string; readonly handoffId?: string } = {},
+  ): void {
+    Effect.runPromise(Effect.ignore(sendPageStatusEffect(target, state, options))).catch(() => {})
   }
 
   function refreshPageStatus(tabId: number): void {
@@ -385,7 +445,7 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     const method = target && pageStatusSessionId(target) ? "tabs.group" : "tabs.ungroup"
     Effect.runPromise(Effect.ignore(sendToExtension({ method, params: { tabId } }))).catch(() => {})
   }
-  const httpServer = http.createServer(createHttpRequestHandler({
+  const relayRequestHandler = createHttpRequestHandler({
     host,
     port,
     browserId,
@@ -396,7 +456,16 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     extensionStatus: () => {
       return { connected: extensionRpc.connected, version: extensionRpc.version ?? null, cdpClients: cdpClients.size }
     },
-  }))
+  })
+  let relayReady = false
+  const httpServer = http.createServer((request, response) => {
+    if (!relayReady) {
+      response.writeHead(503, { "content-type": "application/json; charset=utf-8", "retry-after": "1" })
+      response.end(JSON.stringify({ error: "Browser Control relay is starting", code: "relay-starting" }))
+      return
+    }
+    relayRequestHandler(request, response)
+  })
 
   const debugEnabled = yield* Config.boolean("BROWSER_CONTROL_DEBUG").pipe(Config.withDefault(false))
   const debugLog = debugEnabled ? (line: string) => console.error(`[bc ${new Date().toISOString().slice(11, 23)}] ${line}`) : undefined
@@ -490,6 +559,10 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
   })
 
   httpServer.on("upgrade", (request, socket, head) => {
+    if (!relayReady) {
+      sendUpgradeError({ socket, status: 404, message: "Browser Control relay is starting" })
+      return
+    }
     const hostError = validateHostHeader({ hostHeader: request.headers.host, host, port })
     if (hostError) {
       sendUpgradeError({ socket, status: 403, message: hostError })
@@ -542,7 +615,6 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
           void recordingRelay.cleanupAll("Extension disconnected").catch(() => {})
           for (const target of registry.listRootTargets()) {
             cancelTargetHandoffs(target, "target-detached")
-            sessions.releaseAdoptedTarget(target.targetInfo.targetId)
           }
           registry.clear()
           suppressedChildSessions.clear()
@@ -1222,13 +1294,17 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     if (!targetInfo) {
       return yield* Effect.fail(new Error("Target.getTargetInfo did not return targetInfo"))
     }
+    const restoredTarget = options.browserControlSessionId
+      ? undefined
+      : sessions.persistedTargetOwner(targetInfo.targetId)
+    const browserControlSessionId = options.browserControlSessionId ?? restoredTarget?.sessionId
     const sessionId = `bc-tab-${nextTargetSessionId++}`
     const candidate: ConnectedTarget = {
       tabId,
       sessionId,
       targetInfo,
-      owner: options.owner,
-      ...(options.browserControlSessionId ? { browserControlSessionId: options.browserControlSessionId } : {}),
+      owner: restoredTarget?.owner ?? options.owner,
+      ...(browserControlSessionId ? { browserControlSessionId } : {}),
     }
     return yield* finishAttachedTarget(registry.stageRootTarget(candidate))
   })
@@ -1448,7 +1524,6 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
     }
     cancelTargetHandoffs(detached.target, "target-detached")
     sessions.markTargetDetached(detached.target.targetInfo.targetId)
-    sessions.releaseAdoptedTarget(detached.target.targetInfo.targetId)
     removeClientTargetAliases(cdpClientSessionAliases.values(), (alias) => alias.tabId === tabId)
     mainFrameIdsByTab.delete(tabId)
     ghostCursorPositionsByTab.delete(tabId)
@@ -1682,6 +1757,25 @@ const makeRelay = Effect.fnUntraced(function* (options: { readonly host?: string
       return yield* Effect.fail(error)
     })
   })
+
+  yield* Effect.catch(
+    Effect.gen(function* () {
+      const restoredSessions = yield* Effect.tryPromise({
+        try: () => sessionCatalog?.load() ?? Promise.resolve([]),
+        catch: (cause) => cause instanceof Error ? cause : new Error("Load Browser Control session catalog", { cause }),
+      })
+      yield* Effect.try({
+        try: () => sessions.restore(restoredSessions),
+        catch: (cause) => cause instanceof Error ? cause : new Error("Restore Browser Control sessions", { cause }),
+      })
+      catalogWritesEnabled = true
+      relayReady = true
+    }),
+    (error) => Effect.gen(function* () {
+      yield* cleanup()
+      return yield* Effect.fail(error)
+    }),
+  )
 
   return {
     url: endpointUrl,

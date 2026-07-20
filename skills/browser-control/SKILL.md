@@ -210,7 +210,7 @@ the page via JavaScript; read-only guards trusted mistakes, not malicious code.
 ## Human Handoff
 
 When a flow hits 2FA, CAPTCHAs, payment confirmation, or anything the user must
-do personally, call `handoff(message, { timeoutMs })` inside execute code. It
+do personally, call `handoff(message, { timeoutMs, start? })` inside execute code. It
 shows the message and an accessible **I'm done, continue** control in the page,
 blocks the script, and resumes only when the user activates that control. The
 WAIT UI survives top-level navigation and ambiguous extension child-target
@@ -228,6 +228,24 @@ if (!page.url().startsWith("https://app.example.com/")) {
 await page.getByRole("heading", { name: "Dashboard" }).waitFor()
 return await page.title()
 ```
+
+When the action itself may block on native WebAuthn, pass it as `start` so WAIT
+state is registered and acknowledged by the extension before the click. Keep
+the action timeout aligned with the handoff timeout and keep `start` limited to
+the browser action that opens the prompt:
+
+```js
+await handoff("Complete the security-key prompt, then continue", {
+  timeoutMs: 600_000,
+  start: () => page.getByRole("button", { name: "Use security key" }).click({ timeout: 600_000 }),
+})
+```
+
+After human completion, Browser Control waits for the action to settle before
+resuming. If the handoff times out or its target disappears while the action is
+still pending, Browser Control disconnects that session's Playwright connection
+before releasing the execute permit; the exact target remains the session
+default and is reacquired on the next execute.
 
 Tell the user what you need before or while the handoff is pending. Handoffs are
 counted in the result aftermath and recorded in the session journal. Human
@@ -341,6 +359,12 @@ same browser state. Use `browser-control session reset` or
 `browser-control session delete` to close a session-owned page and clear its
 state. Close manually attached tabs normally, call `await page.close()`, or detach
 with the toolbar when you want to release them.
+
+Named sessions survive relay process restarts. Browser Control restores the
+session id, read-only mode, and exact default tab when it reappears, but
+JavaScript `state` and snapshot refs are process-local and reset with a warning.
+Successful create, reset, delete, adopt, and execute responses wait for their
+session catalog update to commit.
 
 For multi-step UI tasks, prefer one `execute` block when the steps depend on
 transient page state such as selected rows, open menus, dialogs, hover state, or
@@ -609,11 +633,12 @@ language changes, update `CONTEXT.md` too.
 - Extension changes not taking effect: rebuild `extension/dist` and reload the
   unpacked extension once.
 - Repeated `hello` messages or in-flight RPC timeouts: check for duplicate shim
-  websocket reconnects. The current shim version is `0.0.17`.
+  websocket reconnects. The current shim version is `0.0.18`.
 - Relay restarted while tabs were attached: shim `0.0.7`+ re-announces attached
   tabs after reconnecting, so the relay rebuilds its target registry without
-  re-clicking the toolbar. If `activeTargets` stays 0 with an older shim,
-  reload the unpacked extension and re-attach.
+  re-clicking the toolbar. Named sessions reclaim the exact persisted target;
+  JavaScript state and snapshot refs reset. If `activeTargets` stays 0 with an
+  older shim, reload the unpacked extension and re-attach.
 - Stale relay build: operational CLI and MCP calls reject the relay before
   invoking a route. `status` and `doctor` remain observational. Source runs use
   a content fingerprint, so rebuilds and worktrees cannot silently share

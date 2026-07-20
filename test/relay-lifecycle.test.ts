@@ -14,7 +14,7 @@ import { sourceBuildIdForFiles } from "../src/version.ts"
 const version = { version: "0.1.0", buildId: "build-current" }
 
 function relay(options: {
-  readonly version: Effect.Effect<typeof version, RelayClient.RelayUnreachable>
+  readonly version: Effect.Effect<typeof version, RelayClient.RelayClientError>
   readonly extensionStatus?: RelayClient.Interface["extensionStatus"]
 }): RelayClient.Interface {
   return {
@@ -22,6 +22,15 @@ function relay(options: {
     version: options.version,
     extensionStatus: options.extensionStatus ?? Effect.succeed({ connected: true, version: "0.0.11", activeTargets: 0 }),
   } as RelayClient.Interface
+}
+
+function starting(): RelayClient.RelayRejected {
+  return new RelayClient.RelayRejected({
+    message: "Browser Control relay is starting",
+    status: 503,
+    path: "/version",
+    code: "relay-starting",
+  })
 }
 
 function unreachable(): RelayClient.RelayUnreachable {
@@ -66,6 +75,23 @@ describe("relay lifecycle", () => {
 
     expect(result.started).toBe(true)
     expect(starts).toBe(1)
+  })
+
+  it("waits for a bound relay to finish restoring without starting another process", async () => {
+    let attempts = 0
+    let starts = 0
+    const result = await Effect.runPromise(ensureRelay({
+      relay: relay({
+        version: Effect.suspend(() => ++attempts >= 3 ? Effect.succeed(version) : Effect.fail(starting())),
+      }),
+      buildId: "build-current",
+      start: Effect.sync(() => { starts++ }),
+      retryTimes: 3,
+      retryDelayMs: 0,
+    }))
+
+    expect(result).toEqual({ version, started: false })
+    expect(starts).toBe(0)
   })
 
   it("reports a stale relay instead of silently using it", async () => {

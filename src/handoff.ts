@@ -29,6 +29,46 @@ export type HandoffWait = {
   readonly outcome: Promise<HandoffOutcome>
 }
 
+export async function awaitHandoffAction(options: {
+  readonly outcome: Promise<HandoffOutcome>
+  readonly present?: () => Promise<void>
+  readonly start?: () => unknown | Promise<unknown>
+  readonly cancel: () => void
+  readonly cancelStart?: () => Promise<void>
+}): Promise<HandoffOutcome> {
+  const outcome = options.outcome.then((value) => ({ type: "handoff-completed" as const, value }))
+  if (options.present) {
+    const presentation = options.present().then(
+      () => ({ type: "presented" as const }),
+      (error: unknown) => ({ type: "presentation-failed" as const, error }),
+    )
+    const first = await Promise.race([presentation, outcome])
+    if (first.type === "handoff-completed") return first.value
+    if (first.type === "presentation-failed") {
+      options.cancel()
+      throw first.error
+    }
+  }
+  if (!options.start) return await options.outcome
+  const action = Promise.resolve().then(options.start).then(
+    () => ({ type: "action-completed" as const }),
+    (error: unknown) => ({ type: "action-failed" as const, error }),
+  )
+  const first = await Promise.race([action, outcome])
+  if (first.type === "action-failed") {
+    options.cancel()
+    throw first.error
+  }
+  if (first.type === "action-completed") return await options.outcome
+  if (first.value === "resolved" || !options.cancelStart) {
+    const actionResult = await action
+    if (actionResult.type === "action-failed") throw actionResult.error
+  } else {
+    await options.cancelStart()
+  }
+  return first.value
+}
+
 export type PendingHandoffView = {
   readonly id: string
   readonly sessionId: string
@@ -115,6 +155,13 @@ export class HandoffRegistry {
       return false
     }
     pending.resolve("resolved")
+    return true
+  }
+
+  cancel(id: string): boolean {
+    const pending = Array.from(this.pending.values()).find((candidate) => candidate.id === id)
+    if (!pending) return false
+    pending.resolve("timeout")
     return true
   }
 

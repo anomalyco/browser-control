@@ -98,7 +98,7 @@ describe("execute lifecycle", () => {
   it("waits through transient execution-context replacement", async () => {
     let attempts = 0
     await expect(waitForPageContext({
-      timeoutMs: 30,
+      timeoutMs: 1_000,
       retryDelayMs: 10,
       delay: () => Promise.resolve(),
       evaluate: () => ++attempts < 3

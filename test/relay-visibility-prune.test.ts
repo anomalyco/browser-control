@@ -10,7 +10,7 @@ describe("relay target visibility pruning", () => {
   it("detaches raw relay targets from a session client once that session gains an owned target", async () => {
     const port = 24_000 + Math.floor(Math.random() * 10_000)
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
-      const relay = yield* startRelay({ port })
+      const relay = yield* startRelay({ port, sessionCatalogPath: null })
       const extension = yield* Effect.promise(() => connectFakeExtension(relay.url))
       const rawClient = yield* Effect.promise(() => connectCdpClient(relay.url))
       const sessionClient = yield* Effect.promise(() => connectCdpClient(relay.url, "session-a"))
