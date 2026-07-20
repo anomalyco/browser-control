@@ -167,7 +167,7 @@ require a new extension capture protocol and permission model.
   link`.
 - Until the first Store review completes, the browser extension is loaded
   unpacked from the npm package's `extension/dist` directory or a source build.
-  Its current shim version is `0.0.22`.
+  Its current shim version is `0.0.23`.
 - Extension and npm releases are independently versioned. The extension hello
   reports an explicit protocol version, and compatibility rather than exact
   package-version equality determines whether the local driver may use it.

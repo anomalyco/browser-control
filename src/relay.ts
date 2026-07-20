@@ -58,6 +58,7 @@ import { RecordingRelay } from "./recording-relay.ts"
 import { appendManagedRelayProcessLog } from "./relay-log.ts"
 import { boundedToken, runtimeFailureKind, summarizeDiagnosticUrl, summarizeRuntimeEvaluate } from "./runtime-diagnostics.ts"
 import { resolveTargetInfoTarget, shouldExposeChildTarget, TargetRegistry, type RootTargetChange, type TargetOwnershipChange } from "./target-registry.ts"
+import { browserControlVersion } from "./version.ts"
 
 export type { RelayServer } from "./relay-types.ts"
 
@@ -147,6 +148,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const releaseTargetGraceMs = Math.max(0, options.releaseTargetGraceMs ?? 10_000)
   const browserId = crypto.randomUUID()
   const endpointUrl = `http://${formatHostForUrl(host)}:${port}`
+  const allowAnyChromeExtension = browserControlVersion === "0.0.0-dev"
   const sessionCatalog = options.sessionCatalogPath === null
     ? undefined
     : new SessionCatalog(options.sessionCatalogPath ?? defaultSessionCatalogPath(port))
@@ -602,7 +604,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const requestUrl = new URL(request.url ?? "/", endpointUrl)
     const origin = Array.isArray(request.headers.origin) ? request.headers.origin[0] : request.headers.origin
     if (requestUrl.pathname === "/extension") {
-      const originError = validateWebSocketOrigin({ origin, requireChromeExtension: true })
+      const originError = validateWebSocketOrigin({ origin, requireChromeExtension: true, allowAnyChromeExtension })
       if (originError) {
         sendUpgradeError({ socket, status: 403, message: originError })
         return
@@ -613,7 +615,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return
     }
     if (requestUrl.pathname.startsWith("/devtools/browser/")) {
-      const originError = validateWebSocketOrigin({ origin })
+      const originError = validateWebSocketOrigin({ origin, allowAnyChromeExtension })
       if (originError) {
         sendUpgradeError({ socket, status: 403, message: originError })
         return

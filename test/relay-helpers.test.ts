@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import {
+  chromeWebStoreExtensionOrigin,
   generateSessionId,
   getTargetInfo,
   isRestrictedTarget,
@@ -48,15 +49,21 @@ describe("validateBrowserFetchSite", () => {
 })
 
 describe("validateWebSocketOrigin", () => {
-  it("accepts extension origins and missing origins for non-extension clients", () => {
-    expect(validateWebSocketOrigin({ origin: "chrome-extension://abc" })).toBeUndefined()
+  it("accepts the Store extension and missing origins for non-extension clients", () => {
+    expect(validateWebSocketOrigin({ origin: chromeWebStoreExtensionOrigin })).toBeUndefined()
     expect(validateWebSocketOrigin({ origin: undefined })).toBeUndefined()
+  })
+
+  it("accepts unpacked extension origins only in source development", () => {
+    expect(validateWebSocketOrigin({ origin: "chrome-extension://unpacked", allowAnyChromeExtension: true })).toBeUndefined()
+    expect(validateWebSocketOrigin({ origin: "chrome-extension://unpacked", requireChromeExtension: true })).toBeDefined()
   })
 
   it("rejects web origins for the extension endpoint", () => {
     expect(validateWebSocketOrigin({ origin: undefined, requireChromeExtension: true })).toBeDefined()
     expect(validateWebSocketOrigin({ origin: "https://example.com", requireChromeExtension: true })).toBeDefined()
     expect(validateWebSocketOrigin({ origin: "https://example.com" })).toBeDefined()
+    expect(validateWebSocketOrigin({ origin: "chrome-extension://different-extension" })).toBeDefined()
   })
 })
 
