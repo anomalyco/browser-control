@@ -344,6 +344,18 @@ reconciles existing client announcements, browser grouping, and page status.
   JSON checks.
 - CLI and MCP relay access goes through `src/relay-client.ts`; neither maintains
   an ad hoc HTTP client.
+- The public Effect client uses the same typed relay client. It atomically
+  ensures named sessions and exposes an origin-bound capability for structured
+  JSON requests in the live default page.
+- Authenticated-origin requests use page-context `window.fetch`, never exported
+  cookies or Secret Profiles. They pin an exact origin, accept relative paths,
+  block redirects, bound response bytes, and never retry mutations.
+- Sensitive authenticated responses bypass execute journals, return as Effect
+  `Redacted` values, set `Cache-Control: no-store`, and fail closed while a
+  session Network Capture is active.
+- The public client reveals sensitive responses through its own `reveal`
+  operation so package-manager layouts with multiple Effect instances do not
+  cross incompatible module-local Redacted registries.
 - Boundary failures use tagged schema errors and a shared coded error envelope.
   The relay retains its message as the top-level human-readable message while
   clients can branch on stable codes for invalid requests, missing resources,

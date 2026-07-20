@@ -128,6 +128,51 @@ browser-control status
 `doctor` and `status` are read-only. They report a stopped relay but never start
 one. Use `browser-control serve` only for foreground debugging.
 
+## TypeScript Client
+
+The package also exports an Effect client for applications that need structured
+browser-authenticated requests without executing generated JavaScript:
+
+```ts
+import { BrowserControlClient } from "@opencode-ai/browser-control"
+import { Effect, Schema } from "effect"
+
+const program = Effect.gen(function* () {
+  const client = yield* BrowserControlClient.make()
+  const browserSession = yield* client.ensureSession({ id: "my-app" })
+  const account = yield* browserSession.authenticatedOrigin({
+    origin: "https://app.example.com",
+    startUrl: "/account",
+  })
+
+  const sensitive = yield* account.json({
+    path: "/api/session",
+    method: "POST",
+    body: {},
+    response: Schema.Struct({ accessToken: Schema.String }),
+    sensitive: true,
+  })
+  const credentials = BrowserControlClient.reveal(sensitive)
+
+  const profile = yield* account.json({
+    path: "/api/profile",
+    response: Schema.Struct({ name: Schema.String }),
+  })
+  return { credentials, profile }
+})
+```
+
+Requests use `window.fetch` in the session's current page, so ambient browser
+cookies stay in the browser. Paths must be same-origin, redirects are blocked,
+responses are bounded, and mutations are never retried automatically. Set
+`sensitive: true` to receive `Redacted<A>`; sensitive requests bypass execute
+journals and are rejected while session network capture is active. Reveal a
+sensitive result with `BrowserControlClient.reveal`; this keeps unwrapping in
+the same Effect runtime that created the redacted value, including when an
+application and Browser Control resolve separate Effect package instances.
+Use `resetSession(id)` to replace a persisted session generation that is no
+longer connected before creating a new authenticated-origin capability.
+
 ## Work in Sessions
 
 A bare `execute` creates a fresh session. Pass its ID to continue with the same
@@ -203,7 +248,8 @@ Other inspection helpers include:
 - `fillInput()` and `fillInputs()` when browser extensions interfere with
   Playwright's normal `locator.fill()`
 
-The agent skill documents these helpers and their options in detail.
+The agent skill gives the operating workflow and canonical examples; command
+`--help` output remains the source of truth for detailed options.
 
 ## Pause for Human-Only Steps
 

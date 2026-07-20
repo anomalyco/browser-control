@@ -81,6 +81,19 @@ export const SessionNewRequest = Schema.Struct({
 
 export interface SessionNewRequest extends Schema.Schema.Type<typeof SessionNewRequest> {}
 
+export const SessionEnsureRequest = Schema.Struct({
+  id: Schema.NonEmptyString,
+  readOnly: Schema.optionalKey(Schema.Boolean),
+})
+
+export interface SessionEnsureRequest extends Schema.Schema.Type<typeof SessionEnsureRequest> {}
+
+export const SessionEnsureResponse = Schema.Struct({
+  session: SessionSummary,
+})
+
+export interface SessionEnsureResponse extends Schema.Schema.Type<typeof SessionEnsureResponse> {}
+
 export const SessionIdRequest = Schema.Struct({
   id: Schema.String,
 })
@@ -161,6 +174,51 @@ export const ExecuteResponse = Schema.Struct({
 })
 
 export interface ExecuteResponse extends Schema.Schema.Type<typeof ExecuteResponse> {}
+
+export const AuthenticatedJsonMethod = Schema.Literals(["GET", "POST", "PUT", "PATCH", "DELETE"])
+
+export type AuthenticatedJsonMethod = Schema.Schema.Type<typeof AuthenticatedJsonMethod>
+
+export const AuthenticatedJsonRequest = Schema.Struct({
+  sessionId: Schema.NonEmptyString,
+  origin: Schema.NonEmptyString,
+  startUrl: Schema.optionalKey(Schema.NonEmptyString),
+  method: AuthenticatedJsonMethod,
+  path: Schema.NonEmptyString,
+  body: Schema.optionalKey(Schema.Json),
+  sensitive: Schema.optionalKey(Schema.Boolean),
+  timeoutMs: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 120_000 }))),
+  maxResponseBytes: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 10_000_000 }))),
+})
+
+export interface AuthenticatedJsonRequest extends Schema.Schema.Type<typeof AuthenticatedJsonRequest> {}
+
+export const AuthenticatedJsonOutcome = Schema.TaggedUnion({
+  Success: {
+    status: Schema.Int,
+    value: Schema.Json,
+  },
+  OriginMismatch: {
+    expectedOrigin: Schema.String,
+    actualOrigin: Schema.String,
+  },
+  RequestFailed: {
+    outcome: Schema.Literals(["not-sent", "unknown"]),
+  },
+  HttpError: {
+    status: Schema.Int,
+  },
+  ResponseTooLarge: {
+    status: Schema.Int,
+    maxResponseBytes: Schema.Int,
+  },
+  InvalidJson: {
+    status: Schema.Int,
+  },
+  SensitiveCaptureActive: {},
+})
+
+export type AuthenticatedJsonOutcome = typeof AuthenticatedJsonOutcome.Type
 
 export const TargetSummary = Schema.Struct({
   id: Schema.String,

@@ -12,6 +12,12 @@
     "url": "git+https://github.com/anomalyco/browser-control.git"
   },
   "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "files": [
     "dist",
     "extension/dist",
@@ -27,6 +33,7 @@
     "browser-control": "./dist/cli.js",
     "browser-control-mcp": "./dist/mcp.js"
   },
+  "types": "./dist/types/index.d.ts",
   "scripts": {
     "bench:recording": "tsx scripts/bench-recording.ts",
     "build:cli": "tsx scripts/build-cli.ts",

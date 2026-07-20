@@ -16,6 +16,7 @@ type FakeSandbox = ExecuteSandboxLike & {
 
 const makeFakeSandbox = (options?: {
   readonly onExecute?: Effect.Effect<void>
+  readonly onAuthenticatedJson?: ExecuteSandboxLike["authenticatedJson"]
   readonly setupFailure?: Error
   readonly adoptFailure?: Error
   readonly onAdopt?: ExecuteSandboxLike["adoptPage"]
@@ -58,6 +59,13 @@ const makeFakeSandbox = (options?: {
               warnings: [],
             }),
       ),
+    authenticatedJson: (request) => options?.onAuthenticatedJson
+      ? options.onAuthenticatedJson(request)
+      : Effect.succeed({
+          _tag: "Success",
+          status: 200,
+          value: { ok: true },
+        }),
     close,
     disconnect,
     disconnectSettled: disconnect,
@@ -108,6 +116,53 @@ const makeFakeSandbox = (options?: {
 }
 
 describe("BrowserControlSessions", () => {
+  it("atomically ensures one named session", async () => {
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox())
+    const summaries = await Effect.runPromise(Effect.all([
+      sessions.ensure("x-live-chat-auth"),
+      sessions.ensure("x-live-chat-auth"),
+    ], { concurrency: "unbounded" }))
+    expect(summaries.map((summary) => summary.id)).toEqual(["x-live-chat-auth", "x-live-chat-auth"])
+    expect(sessions.listSummaries()).toHaveLength(1)
+  })
+
+  it("runs authenticated requests under the session permit without journaling", async () => {
+    const records: string[] = []
+    const sessions = new BrowserControlSessions(
+      "http://127.0.0.1:0",
+      () => makeFakeSandbox(),
+      { onExecuteRecord: (record) => records.push(record.code) },
+    )
+    await Effect.runPromise(sessions.ensure("x-live-chat-auth"))
+    const result = await Effect.runPromise(sessions.authenticatedJson({
+      sessionId: "x-live-chat-auth",
+      origin: "https://studio.x.com",
+      method: "GET",
+      path: "/api/live/get-broadcasts",
+    }))
+    expect(result).toEqual({ _tag: "Success", status: 200, value: { ok: true } })
+    expect(records).toEqual([])
+  })
+
+  it("blocks mutations in read-only sessions before reaching the sandbox", async () => {
+    let requests = 0
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox({
+      onAuthenticatedJson: () => Effect.sync(() => {
+        requests += 1
+        return { _tag: "Success", status: 200, value: null } as const
+      }),
+    }))
+    await Effect.runPromise(sessions.ensure("inspect", { readOnly: true }))
+    const error = await Effect.runPromise(sessions.authenticatedJson({
+      sessionId: "inspect",
+      origin: "https://example.com",
+      method: "POST",
+      path: "/api",
+    }).pipe(Effect.flip))
+    expect(error).toMatchObject({ reason: "invalid-request" })
+    expect(requests).toBe(0)
+  })
+
   it("restores persisted identity and target ownership with reset JavaScript state", async () => {
     const persisted: PersistedSession[][] = []
     const sessions = new BrowserControlSessions(

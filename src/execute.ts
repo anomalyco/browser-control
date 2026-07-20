@@ -16,8 +16,9 @@ import zlib from "node:zlib"
 import { hideGhostCursor as hideGhostCursorOnPage, showGhostCursor as showGhostCursorOnPage, type GhostCursorClientOptions } from "./ghost-cursor.ts"
 import type { HandoffOutcome } from "./handoff.ts"
 import * as AuthProfile from "./auth-profile.ts"
+import * as AuthenticatedOrigin from "./authenticated-origin.ts"
 import * as NetworkCapture from "./network-capture.ts"
-import type { ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary, ExecuteMedia } from "./relay-schema.ts"
+import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest, ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary, ExecuteMedia } from "./relay-schema.ts"
 import type { SessionTarget } from "./relay-types.ts"
 import { executionContextFailureDiagnostic, runtimeFailureKind } from "./runtime-diagnostics.ts"
 
@@ -499,6 +500,22 @@ export class ExecuteSandbox {
         },
       }),
     )
+  }
+
+  authenticatedJson(
+    request: Omit<AuthenticatedJsonRequest, "sessionId">,
+  ): Effect.Effect<AuthenticatedJsonOutcome, Error> {
+    const sandbox = this
+    return Effect.gen(function* () {
+      if (request.sensitive === true && sandbox.networkCapture.status().active) {
+        return { _tag: "SensitiveCaptureActive" } as const
+      }
+      const globals = yield* Effect.tryPromise({
+        try: () => sandbox.getGlobals({}),
+        catch: (cause) => cause instanceof Error ? cause : new Error("Set up authenticated origin page", { cause }),
+      })
+      return yield* AuthenticatedOrigin.requestJson(globals.page, request)
+    }).pipe(Effect.uninterruptible)
   }
 
   private drainWarnings(): string[] {

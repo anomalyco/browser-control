@@ -2,7 +2,7 @@ import type { Effect, Semaphore } from "effect"
 import type { AdoptTarget, ExecuteOptions, ExecuteResult } from "./execute.ts"
 import type { NetworkCaptureOptions, NetworkCaptureResult, NetworkCaptureStatus, NetworkCaptureStopOptions } from "./network-capture.ts"
 import type { JsonObject, TargetInfo } from "./protocol.ts"
-import type { SessionSummary } from "./relay-schema.ts"
+import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest, SessionSummary } from "./relay-schema.ts"
 export type SessionTarget = {
   readonly id: string
   readonly owner: "relay" | "user"
@@ -49,6 +49,7 @@ export type PendingExtensionRequest = {
  */
 export interface ExecuteSandboxLike {
   execute(code: string, options?: ExecuteOptions): Effect.Effect<ExecuteResult>
+  authenticatedJson(request: Omit<AuthenticatedJsonRequest, "sessionId">): Effect.Effect<AuthenticatedJsonOutcome, Error>
   adoptPage(target: AdoptTarget): Effect.Effect<string, Error>
   close(): Effect.Effect<void, Error>
   /** Relay shutdown disconnects Playwright without closing or forgetting the default tab. */
