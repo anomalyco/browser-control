@@ -4,6 +4,7 @@ import { once } from "node:events"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { performance } from "node:perf_hooks"
+import { terminateChildProcess } from "./child-process.ts"
 import { mjpegMatroskaFrame, mjpegMatroskaHeader } from "./mjpeg-matroska.ts"
 import type { ExtensionCommand, JsonObject } from "./protocol.ts"
 import { getObject } from "./relay-helpers.ts"
@@ -1049,7 +1050,7 @@ async function startFfmpegVideoEncoder(options: {
     "-f",
     options.artifactType,
     temporaryOutputPath,
-  ], { stdio: "pipe" })
+  ], { detached: process.platform !== "win32", stdio: "pipe" })
   let stderr = ""
   child.stderr.setEncoding("utf8")
   child.stderr.on("data", (chunk: string) => {
@@ -1075,12 +1076,7 @@ async function startFfmpegVideoEncoder(options: {
   let cancelPromise: Promise<void> | undefined
   const terminate = async () => {
     child.stdin.destroy()
-    if (child.exitCode === null) child.kill("SIGTERM")
-    const exited = await waitForProcessExit(exit, 2_000)
-    if (!exited && child.exitCode === null) {
-      child.kill("SIGKILL")
-      await exit
-    }
+    await terminateChildProcess({ child, exit, graceMs: 2_000 })
   }
   return {
     write: async (frame, timestampMs, durationMs) => {
