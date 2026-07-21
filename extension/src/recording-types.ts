@@ -39,11 +39,16 @@ export type OffscreenCancelRecordingMessage = {
   readonly tabId: number
 }
 
+export type OffscreenCancelAllRecordingsMessage = {
+  readonly action: "recording.cancelAll"
+}
+
 export type OffscreenMessage =
   | OffscreenStartRecordingMessage
   | OffscreenStopRecordingMessage
   | OffscreenStatusRecordingMessage
   | OffscreenCancelRecordingMessage
+  | OffscreenCancelAllRecordingsMessage
 
 export type OffscreenStartRecordingResult =
   | {
@@ -84,19 +89,31 @@ export type OffscreenCancelRecordingResult =
     readonly error: string
   }
 
+export type OffscreenCancelAllRecordingsResult =
+  | { readonly success: true }
+  | { readonly success: false; readonly error: string }
+
 export type OffscreenResult =
   | OffscreenStartRecordingResult
   | OffscreenStopRecordingResult
   | OffscreenStatusRecordingResult
   | OffscreenCancelRecordingResult
+  | OffscreenCancelAllRecordingsResult
 
-export type OffscreenRecordingChunkMessage = {
-  readonly action: "recording.chunk"
-  readonly tabId: number
-  readonly sequence: number
-  readonly data?: readonly number[]
-  readonly final: boolean
-}
+export type OffscreenRecordingChunkMessage =
+  | {
+    readonly action: "recording.chunk"
+    readonly tabId: number
+    readonly sequence: number
+    readonly final: false
+    readonly dataBase64: string
+  }
+  | {
+    readonly action: "recording.chunk"
+    readonly tabId: number
+    readonly sequence: number
+    readonly final: true
+  }
 
 export type OffscreenRecordingCancelledMessage = {
   readonly action: "recording.cancelled"

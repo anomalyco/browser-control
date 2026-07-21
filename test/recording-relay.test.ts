@@ -179,10 +179,84 @@ describe("RecordingRelay tab capture", () => {
     relay.handleBinaryData(Buffer.from(encodeRecordingFrame({ tabId: 7, sequence: 0, final: false, payload: Uint8Array.of(1, 2, 3) })))
     relay.handleBinaryData(Buffer.from(encodeRecordingFrame({ tabId: 7, sequence: 1, final: true, payload: new Uint8Array() })))
 
+    await expect(relay.startRecording({ tabId: 7, owner: "user", outputPath })).resolves.toEqual({
+      success: false,
+      error: "Recording already in progress for this tab",
+    })
     await expect(relay.cancelRecording({ tabId: 7 })).resolves.toEqual({ success: true })
     await relay.cleanupAll("test shutdown")
     expect(Array.from(await fs.readFile(outputPath))).toEqual([1, 2, 3])
     expect((await fs.readdir(directory)).some((entry) => entry.includes(".partial-"))).toBe(false)
+  })
+
+  it("accepts frames that arrive before the extension start response", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "browser-control-tab-recording-"))
+    temporaryPaths.push(directory)
+    const outputPath = path.join(directory, "early.webm")
+    let resolveStart: ((result: { success: true; tabId: number; startedAt: number; mimeType: string }) => void) | undefined
+    let relay: RecordingRelay
+    relay = new RecordingRelay({
+      isExtensionConnected: () => true,
+      sendDebuggerCommand: async () => ({}),
+      sendToExtension: async (command) => {
+        if (command.method === "recording.start") {
+          return new Promise((resolve) => {
+            resolveStart = resolve
+          })
+        }
+        if (command.method === "recording.stop") {
+          queueMicrotask(() => relay.handleBinaryData(Buffer.from(encodeRecordingFrame({
+            tabId: 7,
+            sequence: 1,
+            final: true,
+            payload: new Uint8Array(),
+          }))))
+          return { success: true, tabId: 7, duration: 100 }
+        }
+        return { success: true }
+      },
+    })
+
+    const started = relay.startRecording({ tabId: 7, owner: "user", outputPath })
+    await vi.waitFor(() => expect(resolveStart).toBeTypeOf("function"))
+    relay.handleBinaryData(Buffer.from(encodeRecordingFrame({ tabId: 7, sequence: 0, final: false, payload: Uint8Array.of(1) })))
+    resolveStart?.({ success: true, tabId: 7, startedAt: 1_000, mimeType: "video/webm" })
+
+    await expect(started).resolves.toMatchObject({ success: true })
+    await expect(relay.stopRecording({ tabId: 7 })).resolves.toMatchObject({ success: true, size: 1 })
+    expect(Array.from(await fs.readFile(outputPath))).toEqual([1])
+  })
+
+  it("does not let stale cleanup capture a recording started by a new generation", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "browser-control-tab-recording-"))
+    temporaryPaths.push(directory)
+    let resolveOldStart: ((result: { success: true; tabId: number; startedAt: number; mimeType: string }) => void) | undefined
+    const relay = new RecordingRelay({
+      isExtensionConnected: () => true,
+      sendDebuggerCommand: async () => ({}),
+      sendToExtension: async (command) => {
+        const tabId = typeof command.params?.tabId === "number" ? command.params.tabId : 0
+        if (command.method === "recording.start" && tabId === 1) {
+          return new Promise((resolve) => {
+            resolveOldStart = resolve
+          })
+        }
+        if (command.method === "recording.start") return { success: true, tabId, startedAt: 2_000, mimeType: "video/webm" }
+        if (command.method === "recording.status") return { isRecording: true, tabId, startedAt: 2_000 }
+        return { success: true }
+      },
+    })
+    const oldStart = relay.startRecording({ tabId: 1, owner: "user", outputPath: path.join(directory, "old.webm") })
+    await vi.waitFor(() => expect(resolveOldStart).toBeTypeOf("function"))
+
+    const staleCleanup = relay.cleanupAll("Extension replaced")
+    await expect(relay.startRecording({ tabId: 2, owner: "user", outputPath: path.join(directory, "new.webm") })).resolves.toMatchObject({ success: true })
+    resolveOldStart?.({ success: true, tabId: 1, startedAt: 1_000, mimeType: "video/webm" })
+    await expect(oldStart).resolves.toEqual({ success: false, error: "Recording was cancelled while starting" })
+    await staleCleanup
+
+    await expect(relay.statusRecording({ tabId: 2 })).resolves.toMatchObject({ isRecording: true, tabId: 2 })
+    await relay.cancelRecording({ tabId: 2 })
   })
 
   it("aborts and removes partial output on a sequence violation", async () => {

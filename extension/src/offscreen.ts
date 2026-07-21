@@ -2,6 +2,7 @@ import type {
   ChromeTabCaptureAudioConstraints,
   ChromeTabCaptureVideoConstraints,
   OffscreenCancelRecordingMessage,
+  OffscreenCancelAllRecordingsResult,
   OffscreenCancelRecordingResult,
   OffscreenMessage,
   OffscreenResult,
@@ -22,11 +23,13 @@ type RecordingState = {
   nextSequence: number
   sendTail: Promise<void>
   sendError?: Error
+  cancelled: boolean
 }
 
 const recordings = new Map<number, RecordingState>()
 
-chrome.runtime.onMessage.addListener((message: OffscreenMessage, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+  if (!isOffscreenMessage(message)) return false
   void handleMessage(message).then(sendResponse)
   return true
 })
@@ -41,7 +44,19 @@ async function handleMessage(message: OffscreenMessage): Promise<OffscreenResult
   if (message.action === "recording.status") {
     return handleStatusRecording(message)
   }
-  return handleCancelRecording(message)
+  if (message.action === "recording.cancel") {
+    return handleCancelRecording(message)
+  }
+  return handleCancelAllRecordings()
+}
+
+function isOffscreenMessage(message: unknown): message is OffscreenMessage {
+  if (!message || typeof message !== "object" || Array.isArray(message) || !("action" in message)) return false
+  return message.action === "recording.start" ||
+    message.action === "recording.stop" ||
+    message.action === "recording.status" ||
+    message.action === "recording.cancel" ||
+    message.action === "recording.cancelAll"
 }
 
 async function handleStartRecording(message: OffscreenStartRecordingMessage): Promise<OffscreenStartRecordingResult> {
@@ -85,23 +100,24 @@ async function handleStartRecording(message: OffscreenStartRecordingMessage): Pr
       tabId: message.tabId,
       nextSequence: 0,
       sendTail: Promise.resolve(),
+      cancelled: false,
     }
 
     recorder.ondataavailable = (event) => {
-      if (event.data.size === 0 || recording.sendError) {
+      if (event.data.size === 0 || recording.sendError || recording.cancelled) {
         return
       }
       if (recorder.state === "recording") recorder.pause()
       recording.sendTail = recording.sendTail.then(async () => {
         try {
           for (let offset = 0; offset < event.data.size; offset += maxRecordingFramePayloadBytes) {
-            const arrayBuffer = await event.data.slice(offset, offset + maxRecordingFramePayloadBytes).arrayBuffer()
+            const dataBase64 = await blobToBase64(event.data.slice(offset, offset + maxRecordingFramePayloadBytes))
             const result = await chrome.runtime.sendMessage({
               action: "recording.chunk",
               tabId: message.tabId,
               sequence: recording.nextSequence++,
               final: false,
-              data: Array.from(new Uint8Array(arrayBuffer)),
+              dataBase64,
             }) as { readonly success: boolean; readonly error?: string }
             if (!result.success) throw new Error(result.error ?? "Could not send recording chunk")
           }
@@ -187,7 +203,7 @@ function handleStatusRecording(message: OffscreenStatusRecordingMessage): Offscr
     return { isRecording: false, tabId: message.tabId }
   }
   return {
-    isRecording: recording.recorder.state === "recording",
+    isRecording: recording.recorder.state !== "inactive",
     tabId: message.tabId,
     startedAt: recording.startedAt,
   }
@@ -197,12 +213,22 @@ function handleCancelRecording(message: OffscreenCancelRecordingMessage): Offscr
   return handleCancelRecordingForTab(message.tabId)
 }
 
+function handleCancelAllRecordings(): OffscreenCancelAllRecordingsResult {
+  let failure: OffscreenCancelAllRecordingsResult | undefined
+  for (const tabId of Array.from(recordings.keys())) {
+    const result = handleCancelRecordingForTab(tabId)
+    if (!result.success) failure ??= result
+  }
+  return failure ?? { success: true }
+}
+
 function handleCancelRecordingForTab(tabId: number): OffscreenCancelRecordingResult {
   const recording = recordings.get(tabId)
   if (!recording) {
     return { success: true, tabId }
   }
   try {
+    recording.cancelled = true
     if (recording.recorder.state !== "inactive") {
       recording.recorder.stop()
     }
@@ -222,4 +248,20 @@ function selectWebmMimeType(): string {
   return ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"].find((mimeType) => {
     return MediaRecorder.isTypeSupported(mimeType)
   }) ?? ""
+}
+
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = reader.result
+      if (typeof result !== "string") {
+        reject(new Error("Could not encode recording chunk"))
+        return
+      }
+      resolve(result.slice(result.indexOf(",") + 1))
+    }
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read recording chunk"))
+    reader.readAsDataURL(blob)
+  })
 }

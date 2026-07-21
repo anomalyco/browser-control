@@ -120,6 +120,7 @@ type TabCaptureRecording = ActiveRecordingBase & {
   stopping: boolean
   finalized: boolean
   stopPromise?: Promise<RecordingStopResult>
+  finalizePromise?: Promise<void>
   cleanupPromise?: Promise<void>
 }
 
@@ -207,7 +208,6 @@ type ExtensionStatusResult = {
 export class RecordingRelay {
   private readonly activeRecordings = new Map<number, ActiveRecording>()
   private readonly startingRecordings = new Map<number, StartingRecording>()
-  private readonly finalizingRecordings = new Set<Promise<void>>()
 
   constructor(readonly options: {
     readonly sendToExtension: (command: Omit<ExtensionCommand, "id">) => Promise<JsonObject>
@@ -362,6 +362,10 @@ export class RecordingRelay {
       await this.cancelCdpRecording(recording)
       return { success: true }
     }
+    if (recording.finalizePromise) {
+      await recording.finalizePromise
+      return { success: true }
+    }
     if (!this.options.isExtensionConnected()) {
       recording.resolveStop?.({ success: false, error: "Recording was cancelled" })
       await this.cleanupRecording(recording.tabId)
@@ -381,11 +385,19 @@ export class RecordingRelay {
 
   async cleanupAll(reason: string): Promise<void> {
     const starting = Array.from(this.startingRecordings.values())
+    const startingTabIds = new Set(starting.map((recording) => recording.tabId))
+    const active = Array.from(this.activeRecordings.values()).filter((recording) => {
+      return !startingTabIds.has(recording.tabId)
+    })
     for (const recording of starting) recording.cancelled = true
     await Promise.all(starting.map(async (recording) => {
       await recording.promise?.catch(() => {})
     }))
-    await Promise.all(Array.from(this.activeRecordings.values()).map(async (recording) => {
+    await Promise.all(active.map(async (recording) => {
+      if (recording.mode === "tab-capture" && recording.finalizePromise) {
+        await recording.finalizePromise
+        return
+      }
       if (recording.resolveStop) {
         recording.resolveStop({ success: false, error: reason })
       }
@@ -399,7 +411,6 @@ export class RecordingRelay {
       }
       await this.cleanupRecording(recording.tabId)
     }))
-    await Promise.all(this.finalizingRecordings)
   }
 
   async abortRecordingForTab(options: { readonly tabId: number; readonly reason: string }): Promise<void> {
@@ -411,6 +422,10 @@ export class RecordingRelay {
     }
     const recording = this.activeRecordings.get(options.tabId)
     if (!recording) {
+      return
+    }
+    if (recording.mode === "tab-capture" && recording.finalizePromise) {
+      await recording.finalizePromise
       return
     }
     recording.resolveStop?.({ success: false, error: options.reason })
@@ -432,6 +447,7 @@ export class RecordingRelay {
       return
     }
     const recording = this.activeRecordings.get(tabId)
+    if (recording?.mode === "tab-capture" && recording.finalizePromise) return
     if (recording?.resolveStop) {
       recording.resolveStop({ success: false, error: "Recording was cancelled" })
     }
@@ -495,6 +511,10 @@ export class RecordingRelay {
       return
     }
     if (recording.stopping || recording.finalized) return
+    if (recording.writeError) {
+      void this.failTabCaptureRecording(recording, recording.writeError.message)
+      return
+    }
     if (frame.sequence !== recording.expectedSequence) {
       void this.failTabCaptureRecording(recording, `Recording frame sequence ${frame.sequence} did not match expected ${recording.expectedSequence}`)
       return
@@ -503,23 +523,19 @@ export class RecordingRelay {
     if (frame.final) {
       recording.stopping = true
       if (recording.maxDurationTimer) clearTimeout(recording.maxDurationTimer)
-      this.activeRecordings.delete(frame.tabId)
-      const finalizing = this.finishTabCaptureRecording(recording).finally(() => {
-        this.finalizingRecordings.delete(finalizing)
-      })
-      this.finalizingRecordings.add(finalizing)
-      void finalizing
+      recording.finalizePromise = this.finishTabCaptureRecording(recording)
+      void recording.finalizePromise
       return
     }
-    const payload = Buffer.from(frame.payload)
-    if (recording.receivedBytes + payload.byteLength > maxTabCaptureOutputBytes) {
+    if (recording.receivedBytes + frame.payload.byteLength > maxTabCaptureOutputBytes) {
       void this.failTabCaptureRecording(recording, `Tab capture exceeds ${maxTabCaptureOutputBytes} bytes`)
       return
     }
-    if (recording.pendingWriteBytes + payload.byteLength > maxPendingTabCaptureBytes) {
+    if (recording.pendingWriteBytes + frame.payload.byteLength > maxPendingTabCaptureBytes) {
       void this.failTabCaptureRecording(recording, `Tab capture pending writes exceed ${maxPendingTabCaptureBytes} bytes`)
       return
     }
+    const payload = frame.payload
     recording.receivedBytes += payload.byteLength
     recording.pendingWriteBytes += payload.byteLength
     recording.writePromise = recording.writePromise.then(async () => {
@@ -527,6 +543,7 @@ export class RecordingRelay {
       if (result.bytesWritten !== payload.byteLength) throw new Error(`Short recording write: ${result.bytesWritten}/${payload.byteLength}`)
     }).catch((error: unknown) => {
       recording.writeError ??= error instanceof Error ? error : new Error(String(error))
+      void this.failTabCaptureRecording(recording, recording.writeError.message)
     }).finally(() => {
       recording.pendingWriteBytes -= payload.byteLength
     })
@@ -541,13 +558,12 @@ export class RecordingRelay {
       await recording.file.close()
       await fs.rename(recording.temporaryPath, recording.outputPath)
       recording.finalized = true
-      const stat = await fs.stat(recording.outputPath)
       recording.resolveStop?.({
         success: true,
         tabId: recording.tabId,
         duration: Date.now() - recording.startedAt,
         path: recording.outputPath,
-        size: stat.size,
+        size: recording.receivedBytes,
         mode: "tab-capture",
         artifactType: "webm",
       })
@@ -555,6 +571,9 @@ export class RecordingRelay {
       recording.resolveStop?.({ success: false, error: error instanceof Error ? error.message : String(error) })
     } finally {
       await this.cleanupTabCaptureRecording(recording)
+      if (this.activeRecordings.get(recording.tabId) === recording) {
+        this.activeRecordings.delete(recording.tabId)
+      }
     }
   }
 
@@ -594,6 +613,7 @@ export class RecordingRelay {
       await this.cleanupCdpRecording(recording)
       return
     }
+    if (recording.finalizePromise) return recording.finalizePromise
     if (recording.cleanupPromise) return recording.cleanupPromise
     this.activeRecordings.delete(tabId)
     return this.cleanupTabCaptureRecording(recording)
@@ -633,26 +653,8 @@ export class RecordingRelay {
     if (starting.cancelled) return { success: false, error: "Recording was cancelled while starting" }
     const temporaryPath = `${options.outputPath}.partial-${process.pid}-${crypto.randomUUID()}`
     const file = await fs.open(temporaryPath, "wx", 0o600)
-    let result: ExtensionStartResult
-    try {
-      result = parseExtensionStartResult(await this.options.sendToExtension({
-        method: "recording.start",
-        params: recordingStartParams(options),
-      }))
-    } catch (error) {
-      await file.close().catch(() => {})
-      await fs.rm(temporaryPath, { force: true }).catch(() => {})
-      throw error
-    }
-    if (!result.success || starting.cancelled) {
-      if (result.success) await this.options.sendToExtension({ method: "recording.cancel", params: { tabId: result.tabId } }).catch(() => {})
-      await file.close().catch(() => {})
-      await fs.rm(temporaryPath, { force: true }).catch(() => {})
-      return result.success ? { success: false, error: "Recording was cancelled while starting" } : result
-    }
-
     const recording: TabCaptureRecording = {
-      tabId: result.tabId,
+      tabId: options.tabId,
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
       outputPath: options.outputPath,
       temporaryPath,
@@ -665,10 +667,34 @@ export class RecordingRelay {
       writePromise: Promise.resolve(),
       stopping: false,
       finalized: false,
-      startedAt: result.startedAt,
+      startedAt: this.now(),
     }
+    this.activeRecordings.set(options.tabId, recording)
+    let result: ExtensionStartResult
+    try {
+      result = parseExtensionStartResult(await this.options.sendToExtension({
+        method: "recording.start",
+        params: recordingStartParams(options),
+      }))
+    } catch (error) {
+      await this.cleanupRecording(options.tabId)
+      throw error
+    }
+    if (!result.success || starting.cancelled || result.tabId !== options.tabId || this.activeRecordings.get(options.tabId) !== recording) {
+      if (result.success) await this.options.sendToExtension({ method: "recording.cancel", params: { tabId: result.tabId } }).catch(() => {})
+      await this.cleanupRecording(options.tabId)
+      if (!result.success) return result
+      return {
+        success: false,
+        error: starting.cancelled
+          ? "Recording was cancelled while starting"
+          : result.tabId !== options.tabId
+            ? `Extension started recording tab ${result.tabId} instead of ${options.tabId}`
+            : recording.writeError?.message ?? "Recording ended while starting",
+      }
+    }
+    recording.startedAt = result.startedAt
     this.armMaxDuration(recording, options.maxDurationMs)
-    this.activeRecordings.set(result.tabId, recording)
     return {
       success: true,
       tabId: result.tabId,
@@ -993,7 +1019,7 @@ async function startFfmpegVideoEncoder(options: {
   readonly width: number
   readonly height: number
 }): Promise<VideoEncoder> {
-  const temporaryOutputPath = `${options.outputPath}.partial-${process.pid}-${Date.now()}`
+  const temporaryOutputPath = `${options.outputPath}.partial-${process.pid}-${crypto.randomUUID()}`
   const outputArgs = options.artifactType === "webm"
     ? ["-c:v", "libvpx", "-crf", "8", "-deadline", "realtime", "-cpu-used", "8", "-b:v", "2M", "-threads", "1"]
     : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]

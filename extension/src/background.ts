@@ -20,7 +20,6 @@ let socket: WebSocket | undefined
 let connectionPromise: Promise<void> | undefined
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined
 let offscreenDocumentCreating: Promise<void> | undefined
-const activeRecordings = new Map<number, { readonly startedAt: number }>()
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create("browser-control-reconnect", { periodInMinutes: 0.5 })
@@ -351,9 +350,6 @@ async function handleCommand(command: ShimCommand): Promise<JsonObject> {
 
 async function startRecording(params: JsonObject | undefined): Promise<JsonObject> {
   const tabId = numberParam(params, "tabId")
-  if (activeRecordings.has(tabId)) {
-    return { success: false, error: "Recording already in progress for this tab" }
-  }
   await ensureOffscreenDocument()
   const streamId = await getTabCaptureStreamId(tabId)
   const result = await chrome.runtime.sendMessage({
@@ -368,17 +364,12 @@ async function startRecording(params: JsonObject | undefined): Promise<JsonObjec
   if (!result.success) {
     return { success: false, error: result.error }
   }
-  activeRecordings.set(tabId, { startedAt: result.startedAt })
   return { success: true, tabId: result.tabId, startedAt: result.startedAt, mimeType: result.mimeType }
 }
 
 async function stopRecording(params: JsonObject | undefined): Promise<JsonObject> {
   const tabId = numberParam(params, "tabId")
-  if (!activeRecordings.has(tabId)) {
-    return { success: false, error: "No active recording for this tab" }
-  }
   const result = await chrome.runtime.sendMessage({ action: "recording.stop", tabId }) as OffscreenStopRecordingResult
-  activeRecordings.delete(tabId)
   if (!result.success) {
     return { success: false, error: result.error }
   }
@@ -387,20 +378,11 @@ async function stopRecording(params: JsonObject | undefined): Promise<JsonObject
 
 async function statusRecording(params: JsonObject | undefined): Promise<JsonObject> {
   const tabId = numberParam(params, "tabId")
-  const recording = activeRecordings.get(tabId)
-  if (!recording) {
-    return { isRecording: false, tabId }
-  }
-  try {
-    const result = await chrome.runtime.sendMessage({ action: "recording.status", tabId }) as OffscreenStatusRecordingResult
-    return {
-      isRecording: result.isRecording,
-      tabId,
-      ...(result.startedAt === undefined ? { startedAt: recording.startedAt } : { startedAt: result.startedAt }),
-    }
-  } catch {
-    activeRecordings.delete(tabId)
-    return { isRecording: false, tabId }
+  const result = await chrome.runtime.sendMessage({ action: "recording.status", tabId }) as OffscreenStatusRecordingResult
+  return {
+    isRecording: result.isRecording,
+    tabId,
+    ...(result.startedAt === undefined ? {} : { startedAt: result.startedAt }),
   }
 }
 
@@ -410,11 +392,7 @@ async function cancelRecording(params: JsonObject | undefined): Promise<JsonObje
 }
 
 async function cancelRecordingForTab(tabId: number): Promise<JsonObject> {
-  if (!activeRecordings.has(tabId)) {
-    return { success: true }
-  }
   const result = await chrome.runtime.sendMessage({ action: "recording.cancel", tabId }) as OffscreenCancelRecordingResult
-  activeRecordings.delete(tabId)
   if (!result.success) {
     return { success: false, error: result.error }
   }
@@ -424,15 +402,11 @@ async function cancelRecordingForTab(tabId: number): Promise<JsonObject> {
 async function cleanupRecordingForTab(tabId: number): Promise<void> {
   try {
     await cancelRecordingForTab(tabId)
-  } catch {
-    activeRecordings.delete(tabId)
-  }
+  } catch {}
 }
 
 async function cancelAllRecordings(): Promise<void> {
-  await Promise.all(Array.from(activeRecordings.keys()).map(async (tabId) => {
-    await cleanupRecordingForTab(tabId)
-  }))
+  await chrome.runtime.sendMessage({ action: "recording.cancelAll" }).catch(() => {})
 }
 
 async function ensureOffscreenDocument(): Promise<void> {
@@ -550,12 +524,11 @@ async function handleRuntimeMessage(message: unknown, sender: chrome.runtime.Mes
       tabId: offscreenMessage.tabId,
       sequence: offscreenMessage.sequence,
       final: offscreenMessage.final,
-      payload: Uint8Array.from(offscreenMessage.data ?? []),
+      payload: offscreenMessage.final ? new Uint8Array() : decodeBase64(offscreenMessage.dataBase64),
     }))
     return
   }
   if (offscreenMessage.action === "recording.cancelled") {
-    activeRecordings.delete(offscreenMessage.tabId)
     sendMessage({ method: "recording.cancelled", params: { tabId: offscreenMessage.tabId } })
   }
 }
@@ -596,6 +569,13 @@ async function sendBinaryAfterConnection(data: Uint8Array): Promise<void> {
     if (Date.now() >= deadline) throw new Error("Timed out sending recording data to the Browser Control relay")
   }
   currentSocket.send(data.buffer)
+}
+
+function decodeBase64(value: string): Uint8Array {
+  const binary = atob(value)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+  return bytes
 }
 
 function isAlreadyAttachedError(error: unknown): boolean {
