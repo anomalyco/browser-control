@@ -358,7 +358,8 @@ Common diagnoses:
   can health-check the page. It may recreate a relay-owned page, but it never
   replaces an unhealthy adopted user tab; reset or re-adopt that tab.
 - Fill timeout on login fields: inspect first, then try `fillInput` after
-  confirming the selector or locator resolves.
+  confirming the selector or locator resolves. String selectors search open
+  shadow roots recursively; closed shadow roots remain unavailable.
 - Download wait fails: use fetch plus `fs`; extension-backed Playwright cannot
   retain a native download artifact.
 

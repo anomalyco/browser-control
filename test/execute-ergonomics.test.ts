@@ -152,7 +152,30 @@ describe("fillInputs", () => {
 
     expect(locator.elementHandles).toHaveBeenCalledOnce()
     expect(evaluate).toHaveBeenCalledOnce()
+    expect(evaluate.mock.calls[0]?.[0].toString()).toContain("candidate.shadowRoot")
     expect(dispose).toHaveBeenCalledOnce()
+  })
+
+  it("explains the open and closed shadow-root boundary without exposing the value", async () => {
+    const evaluate = vi.fn(async (run: (fields: Array<{ readonly target: string; readonly label: string; readonly value: string }>) => unknown, fields) => {
+      const previousDocument = globalThis.document
+      const root = {
+        querySelectorAll: vi.fn((selector: string) => selector === "*" ? [] : []),
+      }
+      Object.assign(globalThis, { document: root })
+      try {
+        return run(fields as Array<{ readonly target: string; readonly label: string; readonly value: string }>)
+      } finally {
+        Object.assign(globalThis, { document: previousDocument })
+      }
+    })
+    const page = { evaluate } as unknown as Page
+
+    const outcome = fillInputs(page, [{ selector: "secure-field", value: "private-value" }])
+    await expect(outcome).rejects.toThrow(
+      "fillInputs found no match for selector: secure-field in the document or open shadow roots; closed shadow roots are unavailable. Try locator.fill() if Playwright can resolve the field.",
+    )
+    await expect(outcome).rejects.not.toThrow("private-value")
   })
 
   it("rejects an ambiguous locator without serializing it or exposing values", async () => {

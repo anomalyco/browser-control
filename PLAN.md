@@ -67,16 +67,6 @@ Verification:
 
 ### 3. Resolve smaller agent-experience gaps
 
-- Make `fillInput` and `fillInputs` search open shadow roots recursively. Closed
-  shadow roots remain unsupported. When no DOM match exists, the error should
-  explain the helper's boundary and suggest `locator.fill()` if Playwright can
-  resolve the field. The current zero-match error was observed on
-  api.data.gov's signup component.
-- Accept `--session` and `-s` on `session reset` and `session delete`, matching
-  `execute` and `journal`.
-- Add smoke coverage proving explicit missing session ids fail for both
-  `--session x` and `BROWSER_CONTROL_SESSION=x`.
-
 Verification:
 
 - Add a local open-shadow-root form fixture for both fill helpers and assert the
@@ -86,6 +76,19 @@ Verification:
   human-shell current session unexpectedly.
 
 ## Recently Shipped
+
+### Fill helpers traverse open shadow roots
+
+String selectors passed to `fillInput` and `fillInputs` now search recursively
+through open shadow roots. A zero-match error explains that closed roots remain
+unavailable and suggests `locator.fill()` when Playwright can resolve the field.
+
+### Session lifecycle selectors are consistent
+
+`session reset` and `session delete` accept positional ids, `--session`/`-s`,
+and `BROWSER_CONTROL_SESSION` before falling back to the saved current session.
+Smoke coverage verifies explicit missing flag and environment ids fail instead
+of falling back to the saved current session.
 
 ### CDP routing fails closed
 
@@ -451,8 +454,7 @@ restarts can be distinguished from session eviction.
 - Native `locator.fill()` can hang on login-style fields when installed browser
   extensions inject focus handlers or overlays. `fillInput` is the explicit
   fallback for ordinary `input` and `textarea` elements.
-- `fillInput` currently uses `querySelector` semantics and cannot reach fields
-  in shadow roots.
+- `fillInput` cannot reach fields inside closed shadow roots.
 - OOPIF behavior is guaranteed only by the current reconnect smoke scenarios.
 - Clipboard automation on insecure origins is not guaranteed.
 - Playwright download events and `download.saveAs()` are unavailable in

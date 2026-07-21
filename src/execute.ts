@@ -1899,8 +1899,20 @@ export async function fillInputs(page: Page, fields: ReadonlyArray<InputField>):
       return inputFields.map((field) => {
         let element: Node | undefined
         if (typeof field.target === "string") {
-          const matches = document.querySelectorAll(field.target)
+          const matches: Element[] = []
+          const roots: Array<Document | ShadowRoot> = [document]
+          for (let index = 0; index < roots.length; index += 1) {
+            const root = roots[index]
+            if (!root) continue
+            matches.push(...root.querySelectorAll(field.target))
+            for (const candidate of root.querySelectorAll("*")) {
+              if (candidate.shadowRoot) roots.push(candidate.shadowRoot)
+            }
+          }
           if (matches.length !== 1) {
+            if (matches.length === 0) {
+              throw new Error(`fillInputs found no match for ${field.label} in the document or open shadow roots; closed shadow roots are unavailable. Try locator.fill() if Playwright can resolve the field.`)
+            }
             throw new Error(`fillInputs expects exactly one match for ${field.label}; got ${matches.length}`)
           }
           element = matches[0]

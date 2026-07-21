@@ -454,6 +454,29 @@ const cases: SmokeCase[] = [
     }),
   },
   {
+    name: "session-missing-selector",
+    run: Effect.fnUntraced(function* () {
+      const missing = `missing-${Date.now()}`
+      const flagOutcome = yield* Effect.result(runBrowserControl(["session", "reset", "--session", missing]))
+      if (flagOutcome._tag === "Success") {
+        return yield* Effect.fail(new Error(`explicit missing --session unexpectedly succeeded: ${flagOutcome.success}`))
+      }
+      const flagError = flagOutcome.failure
+      if (!flagError.message.includes(`Session not found: ${missing}`)) {
+        return yield* Effect.fail(new Error(`explicit missing --session returned the wrong error: ${flagError.message}`))
+      }
+      const environmentOutcome = yield* Effect.result(runBrowserControl(["session", "delete"], { sessionId: missing }))
+      if (environmentOutcome._tag === "Success") {
+        return yield* Effect.fail(new Error(`explicit missing BROWSER_CONTROL_SESSION unexpectedly succeeded: ${environmentOutcome.success}`))
+      }
+      const environmentError = environmentOutcome.failure
+      if (!environmentError.message.includes(`Session not found: ${missing}`)) {
+        return yield* Effect.fail(new Error(`explicit missing BROWSER_CONTROL_SESSION returned the wrong error: ${environmentError.message}`))
+      }
+      return "explicit missing session selectors fail closed"
+    }),
+  },
+  {
     name: "execute-target-url",
     run: Effect.fnUntraced(function* (page) {
       const firstMarker = `bc-target-a-${Date.now()}`
@@ -571,22 +594,44 @@ const cases: SmokeCase[] = [
             smokeSession,
             `
 await page.setContent('<input id="one" placeholder="One"><input id="two"><textarea id="three"></textarea>')
+await page.evaluate(() => {
+  const outer = document.createElement('div')
+  const outerRoot = outer.attachShadow({ mode: 'open' })
+  const inner = document.createElement('div')
+  const innerRoot = inner.attachShadow({ mode: 'open' })
+  const shadowInput = document.createElement('input')
+  shadowInput.id = 'shadow-input'
+  innerRoot.append(shadowInput)
+  outerRoot.append(inner)
+  document.body.append(outer)
+  const closed = document.createElement('div')
+  closed.attachShadow({ mode: 'closed' }).append(document.createElement('input'))
+  document.body.append(closed)
+})
 await fillInput('#one', 'alpha')
+await fillInput('#shadow-input', 'delta')
 await fillInputs(page, [
   { selector: page.getByRole('textbox').nth(1), value: 'beta' },
   { selector: '#three', value: 'gamma' },
 ])
+let closedBoundary
+try {
+  await fillInput('#closed-input', 'should-not-appear')
+} catch (error) {
+  closedBoundary = error instanceof Error ? error.message : String(error)
+}
 const values = await page.evaluate(() => ({
   one: document.querySelector('#one')?.value,
   two: document.querySelector('#two')?.value,
   three: document.querySelector('#three')?.value,
+  shadow: document.querySelector('div')?.shadowRoot?.querySelector('div')?.shadowRoot?.querySelector('input')?.value,
 }))
-return values
+return { ...values, closedBoundary }
           `,
           ],
           { retryOnTimeout: true },
         )
-        if (!output.includes("alpha") || !output.includes("beta") || !output.includes("gamma")) {
+        if (!output.includes("alpha") || !output.includes("beta") || !output.includes("gamma") || !output.includes("delta") || !output.includes("closed shadow roots")) {
           return yield* Effect.fail(new Error(`execute fill helpers did not fill fields: ${output}`))
         }
         return output.trim()
@@ -1958,18 +2003,19 @@ function boundedCleanup(label: string, run: () => PromiseLike<unknown>, timeoutM
 
 type RunBrowserControlOptions = {
   readonly retryOnTimeout?: boolean
+  readonly sessionId?: string
 }
 
 function runBrowserControl(args: readonly string[], options: RunBrowserControlOptions = {}): Effect.Effect<string, Error> {
-  return runBrowserControlOnce(args).pipe(
+  return runBrowserControlOnce(args, options).pipe(
     Effect.catchIf(
       (error) => options.retryOnTimeout === true && isBrowserControlTimeout(error),
-      () => runBrowserControlOnce(args),
+      () => runBrowserControlOnce(args, options),
     ),
   )
 }
 
-function runBrowserControlOnce(args: readonly string[]): Effect.Effect<string, Error> {
+function runBrowserControlOnce(args: readonly string[], options: RunBrowserControlOptions): Effect.Effect<string, Error> {
   return Effect.callback<string, Error>((resume) => {
     let completed = false
     const endpointPort = new URL(endpointUrl).port
@@ -1980,6 +2026,7 @@ function runBrowserControlOnce(args: readonly string[]): Effect.Effect<string, E
     delete childEnv.BROWSER_CONTROL_TARGET_URL
     delete childEnv.BROWSER_CONTROL_TARGET_INDEX
     delete childEnv.BROWSER_CONTROL_SESSION
+    if (options.sessionId) childEnv.BROWSER_CONTROL_SESSION = options.sessionId
     const child = cp.execFile(
       process.execPath,
       ["--import", "tsx", localCliPath, ...args],
