@@ -17,8 +17,8 @@ Agent / MCP client / CLI
   -> user's Chromium-family browser tabs
 ```
 
-The end-to-end path is working. Current work should finish CDP routing
-correctness, simplify the relay, and make recording robust. New features
+The end-to-end path is working. Current work should simplify the relay and make
+recording robust. New features
 should not weaken the code-first interface or move behavior into the extension
 without a concrete browser-API reason.
 
@@ -27,34 +27,29 @@ without a concrete browser-API reason.
 Work these in order unless field evidence changes the priority. Every item
 should land with unit or smoke evidence appropriate to the behavior.
 
-### 1. Finish CDP routing correctness
+### 1. Split the relay into testable responsibilities
 
-- Emit child `Target.detachedFromTarget` events when a root target detaches so
-  clients cannot retain orphaned child sessions.
-- Remove arbitrary-first-target fallbacks from `Target.getTargetInfo` and other
-  sessionless CDP routing.
-- Store `autoAttachParams` per client instead of using global
-  last-writer-wins state.
+Extract cohesive modules from `makeRelay` without changing the protocol:
+
+- Deepen `CdpRouter` with command classification, guardrails, and compatibility
+  shims.
+- `ExtensionEventHandler`: extension event decoding and registry mutation.
+
+`CdpClientPool` now owns client sockets, per-client attachment sets, aliases,
+auto-attach settings, and connection generations. `CdpRouter` now owns
+client-relative visibility, target inventory, target and alias resolution, and
+exact root-versus-child Chrome session routing.
+
+The goal is browser-free testing of routing and lifecycle behavior, not smaller
+files for their own sake. Keep orchestration in `makeRelay` and avoid exposing
+internal protocol details to the CLI or MCP server.
 
 Verification:
 
 - Extend reconnect, OOPIF, and multi-client smoke cases to cover root detach and
   conflicting client auto-attach settings.
 
-### 2. Split the relay into testable responsibilities
-
-Extract cohesive modules from `makeRelay` without changing the protocol:
-
-- `CdpRouter`: command routing, guardrails, and compatibility shims.
-- `ExtensionEventHandler`: extension event decoding and registry mutation.
-- `CdpClientPool`: client sockets, per-client attachment sets, and connection
-  generations.
-
-The goal is browser-free testing of routing and lifecycle behavior, not smaller
-files for their own sake. Keep orchestration in `makeRelay` and avoid exposing
-internal protocol details to the CLI or MCP server.
-
-### 3. Stream recordings with unambiguous framing
+### 2. Stream recordings with unambiguous framing
 
 - Include the tab id and sequence number in each binary websocket frame instead
   of pairing a JSON metadata frame with the next binary frame.
@@ -70,7 +65,7 @@ Verification:
   in-memory bound.
 - Confirm CLI and MCP recording behavior match.
 
-### 4. Resolve smaller agent-experience gaps
+### 3. Resolve smaller agent-experience gaps
 
 - Make `fillInput` and `fillInputs` search open shadow roots recursively. Closed
   shadow roots remain unsupported. When no DOM match exists, the error should
@@ -91,6 +86,25 @@ Verification:
   human-shell current session unexpectedly.
 
 ## Recently Shipped
+
+### CDP routing fails closed
+
+Identity-free `Target.getTargetInfo` no longer returns an arbitrary tab, and
+otherwise-unhandled sessionless CDP commands require an explicit session. All
+explicit target and session routing now rechecks client visibility, including
+session-scoped auto-attach. Root teardown emits each announced child detach
+before detaching the root so clients cannot retain orphaned sessions. The
+browser-free `CdpRouter` module keeps these visibility, alias, and generation
+rules out of relay transport orchestration.
+
+### CDP client state is isolated per connection
+
+`CdpClientPool` now owns each CDP client's session identity, target
+announcements, aliases, auto-attach settings, and idle-reset generation. New
+targets use the originating client's auto-attach settings instead of global
+last-writer-wins state. Ownership visibility changes also invalidate target
+aliases, so a client cannot continue routing commands to a tab after it becomes
+hidden.
 
 ### Wedged session pages recover or fail fast
 

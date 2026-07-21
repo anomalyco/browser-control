@@ -24,18 +24,73 @@ describe("relay target visibility pruning", () => {
         yield* Effect.promise(() => sendCdp(sessionClient, { id: 4, method: "Target.setAutoAttach", params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true } }))
 
         expect(sessionClient.events.some((event) => event.method === "Target.attachedToTarget" && event.params?.sessionId === "bc-tab-1")).toBe(true)
+        const alias = yield* Effect.promise(() => sendCdp(sessionClient, {
+          id: 5,
+          method: "Target.attachToTarget",
+          params: { targetId: "target-1", flatten: true },
+        }))
+        const staleAliasId = typeof alias.result?.sessionId === "string" ? alias.result.sessionId : undefined
+        expect(staleAliasId).toBeDefined()
+        if (!staleAliasId) throw new Error("Expected target alias")
 
-      const ownedCreate = yield* Effect.promise(() => sendCdp(sessionClient, { id: 5, method: "Target.createTarget", params: { url: "about:blank" } }))
-      expect(ownedCreate.result?.targetId).toBe("target-2")
+        const ownedCreate = yield* Effect.promise(() => sendCdp(sessionClient, { id: 6, method: "Target.createTarget", params: { url: "about:blank" } }))
+        expect(ownedCreate.result?.targetId).toBe("target-2")
 
         expect(sessionClient.events).toContainEqual({
           method: "Target.detachedFromTarget",
           params: { sessionId: "bc-tab-1", targetId: "target-1" },
         })
-      expect(sessionClient.events.some((event) => event.method === "Target.attachedToTarget" && event.params?.sessionId === "bc-tab-2")).toBe(true)
+        expect(sessionClient.events.some((event) => event.method === "Target.attachedToTarget" && event.params?.sessionId === "bc-tab-2")).toBe(true)
 
         extension.commands.length = 0
-        yield* Effect.promise(() => sendCdp(sessionClient, { id: 6, method: "Target.setAutoAttach", params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true } }))
+        yield* Effect.promise(async () => {
+          await expect(sendCdp(sessionClient, {
+            id: 7,
+            sessionId: staleAliasId,
+            method: "Runtime.evaluate",
+            params: { expression: "1" },
+          })).rejects.toThrow(`Unknown CDP session ${staleAliasId} for Runtime.evaluate`)
+        })
+        expect(extension.commands).toEqual([])
+
+        yield* Effect.promise(async () => {
+          await expect(sendCdp(rawClient, {
+            id: 9,
+            method: "Target.getTargetInfo",
+            params: { targetId: "target-2" },
+          })).rejects.toThrow("Target not found: target-2")
+          await expect(sendCdp(rawClient, {
+            id: 10,
+            sessionId: "bc-tab-2",
+            method: "Target.getTargetInfo",
+            params: {},
+          })).rejects.toThrow("Target not found: bc-tab-2")
+          await expect(sendCdp(rawClient, {
+            id: 11,
+            sessionId: "bc-tab-2",
+            method: "Runtime.evaluate",
+            params: { expression: "1" },
+          })).rejects.toThrow("Unknown CDP session bc-tab-2 for Runtime.evaluate")
+        })
+        const hiddenClose = yield* Effect.promise(() => sendCdp(rawClient, {
+          id: 12,
+          method: "Target.closeTarget",
+          params: { targetId: "target-2" },
+        }))
+        expect(hiddenClose.result).toEqual({ success: false })
+        expect(extension.commands).toEqual([])
+
+        yield* Effect.promise(async () => {
+          await expect(sendCdp(sessionClient, {
+            id: 13,
+            sessionId: "bc-tab-1",
+            method: "Target.setAutoAttach",
+            params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+          })).rejects.toThrow("Target not found: bc-tab-1")
+        })
+        expect(extension.commands).toEqual([])
+
+        yield* Effect.promise(() => sendCdp(sessionClient, { id: 14, method: "Target.setAutoAttach", params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true } }))
         expect(extension.commands.filter((command) => {
           return command.method === "debugger.sendCommand" && command.params?.method === "Target.setAutoAttach"
         }).map((command) => command.params?.tabId)).toEqual([2])
@@ -59,12 +114,66 @@ describe("relay target visibility pruning", () => {
       }
     })))
   })
+
+  it("uses the originating client's auto-attach settings for new targets", async () => {
+    const port = 24_000 + Math.floor(Math.random() * 10_000)
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port, sessionCatalogPath: null })
+      const extension = yield* Effect.promise(() => connectFakeExtension(relay.url))
+      const first = yield* Effect.promise(() => connectCdpClient(relay.url))
+      const second = yield* Effect.promise(() => connectCdpClient(relay.url))
+
+      try {
+        yield* Effect.promise(() => sendCdp(first, {
+          id: 1,
+          method: "Target.setAutoAttach",
+          params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+        }))
+        yield* Effect.promise(() => sendCdp(second, {
+          id: 2,
+          method: "Target.setAutoAttach",
+          params: { autoAttach: true, waitForDebuggerOnStart: true, flatten: false },
+        }))
+
+        yield* Effect.promise(() => sendCdp(first, { id: 3, method: "Target.createTarget", params: { url: "about:blank" } }))
+        yield* Effect.promise(() => sendCdp(second, { id: 4, method: "Target.createTarget", params: { url: "about:blank" } }))
+
+        const setupCommands = extension.commands.filter((command) => {
+          return command.method === "debugger.sendCommand" && command.params?.method === "Target.setAutoAttach"
+        })
+        expect(setupCommands.find((command) => command.params?.tabId === 1)?.params?.params).toEqual({
+          autoAttach: true,
+          waitForDebuggerOnStart: false,
+          flatten: true,
+        })
+        expect(setupCommands.find((command) => command.params?.tabId === 2)?.params?.params).toEqual({
+          autoAttach: true,
+          waitForDebuggerOnStart: true,
+          flatten: false,
+        })
+
+        yield* Effect.promise(async () => {
+          await expect(sendCdp(first, {
+            id: 5,
+            method: "Runtime.evaluate",
+            params: { expression: "1" },
+          })).rejects.toThrow("CDP sessionId is required for Runtime.evaluate")
+        })
+        const targetInfo = yield* Effect.promise(() => sendCdp(first, { id: 6, method: "Target.getTargetInfo", params: {} }))
+        expect(targetInfo.result).toEqual({})
+      } finally {
+        first.close()
+        second.close()
+        extension.close()
+      }
+    })))
+  })
 })
 
 type ExtensionCommand = {
   readonly id: number
   readonly method: string
-  readonly params?: { readonly tabId?: number; readonly method?: string }
+  readonly params?: { readonly tabId?: number; readonly method?: string; readonly params?: JsonObject }
 }
 
 function connectFakeExtension(relayUrl: string): Promise<WebSocket & { readonly commands: ExtensionCommand[] }> {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { resolveTargetInfoTarget, TargetRegistry } from "../src/target-registry.ts"
+import { TargetRegistry } from "../src/target-registry.ts"
 import type { ConnectedTarget } from "../src/relay-types.ts"
 
 function root(options: {
@@ -54,16 +54,6 @@ describe("TargetRegistry root generations", () => {
     expect(registry.targets.has("bc-tab-1")).toBe(false)
     expect(registry.targetsByTargetId.has("target-1")).toBe(false)
     expect(registry.childTargets.size).toBe(0)
-  })
-
-  it("never falls back to an unrelated root for an explicit stale identity", () => {
-    const registry = new TargetRegistry()
-    const visible = root({ sessionId: "bc-tab-1", targetId: "target-1" })
-    registry.addRootTarget(visible)
-
-    expect(resolveTargetInfoTarget({ registry, targetId: "missing", fallback: () => visible })).toBeUndefined()
-    expect(resolveTargetInfoTarget({ registry, sessionId: "missing", fallback: () => visible })).toBeUndefined()
-    expect(resolveTargetInfoTarget({ registry, fallback: () => visible })).toBe(visible)
   })
 
   it("does not preserve provisional adoption ownership across replacement", () => {

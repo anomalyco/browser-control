@@ -4,19 +4,16 @@ import crypto from "node:crypto"
 import { Clock, Config, Effect, Fiber, Semaphore } from "effect"
 import { WebSocket, WebSocketServer, type RawData } from "ws"
 import {
-  chromeSessionIdForClientRequest,
-  createClientTargetAnnouncements,
   hasAnnouncedSession,
   removeAnnouncedSession,
-  removeClientTargetAliases,
   replayChildFrameNavigation,
   replayChildTargetsForParent,
   replayTargetCreated,
   sendAttachedToChildTarget,
   sendAttachedToTarget,
-  type ClientCdpSessionAlias,
 } from "./cdp-shims.ts"
-import { canClientSeeTarget } from "./cdp-visibility.ts"
+import { CdpClientPool } from "./cdp-client-pool.ts"
+import { CdpRouter } from "./cdp-router.ts"
 import { ExtensionRpc } from "./extension-rpc.ts"
 import { createHttpRequestHandler } from "./http-api.ts"
 import type { CdpEvent, CdpRequest, JsonObject, PageStatus } from "./protocol.ts"
@@ -57,7 +54,7 @@ import { BrowserControlSessions } from "./session-manager.ts"
 import { RecordingRelay } from "./recording-relay.ts"
 import { appendManagedRelayProcessLog } from "./relay-log.ts"
 import { boundedToken, runtimeFailureKind, summarizeDiagnosticUrl, summarizeRuntimeEvaluate } from "./runtime-diagnostics.ts"
-import { resolveTargetInfoTarget, shouldExposeChildTarget, TargetRegistry, type RootTargetChange, type TargetOwnershipChange } from "./target-registry.ts"
+import { shouldExposeChildTarget, TargetRegistry, type RootTargetChange, type TargetOwnershipChange } from "./target-registry.ts"
 
 export type { RelayServer } from "./relay-types.ts"
 
@@ -399,16 +396,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   }
 
   function resolveHandoffTarget(sessionId: string, selectedPage: HandoffPageTarget): ConnectedTarget {
-    const clientHasOwnedTarget = registry.listRootTargets().some((target) => target.browserControlSessionId === sessionId)
     return resolveExactHandoffTarget({
       targetId: selectedPage.targetId,
       targets: registry.listRootTargets(),
-      isVisible: (target) => canClientSeeTarget({
-        clientSessionId: sessionId,
-        targetOwnerSessionId: target.browserControlSessionId,
-        targetOwner: target.owner,
-        clientHasOwnedTarget,
-      }),
+      isVisible: (target) => cdpRouter.canSessionSeeTarget(sessionId, target),
     })
   }
 
@@ -502,15 +493,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const debugLog = debugEnabled ? (line: string) => console.error(`[bc ${new Date().toISOString().slice(11, 23)}] ${line}`) : undefined
   const contextDebugLog = debugLog ? (line: string) => debugLog(`[bc:ctx] ${line}`) : undefined
   const websocketServer = new WebSocketServer({ noServer: true })
-  const cdpClients = new Set<WebSocket>()
-  const cdpClientAnnouncements = new Map<WebSocket, ReturnType<typeof createClientTargetAnnouncements>>()
-  const cdpClientBrowserControlSessionIds = new Map<WebSocket, string>()
-  const cdpClientSessionAliases = new Map<WebSocket, Map<string, ClientCdpSessionAlias>>()
+  const cdpClients = new CdpClientPool<WebSocket>()
+  const cdpRouter = new CdpRouter(cdpClients, registry)
   const runtimeContextWaiters = new Set<(event: CdpEvent) => void>()
   let nextTargetSessionId = 1
-  let nextClientSessionAliasId = 1
-  let autoAttachParams: JsonObject | undefined
-  let idleRuntimeResetGeneration = 0
   const mainFrameIdsByTab = new Map<number, string>()
   const ghostCursorPositionsByTab = new Map<number, { readonly x: number; readonly y: number }>()
   const suppressedChildSessions = new Map<string, number>()
@@ -536,6 +522,12 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return registry.targets.get(sessionId) ?? registry.childTargets.get(sessionId) ?? registry.tabTargets.get(tabId)
     }
     return registry.tabTargets.get(tabId)
+  }
+
+  function diagnosticTargetForClient(socket: WebSocket, sessionId: string | undefined): ConnectedTarget | ChildTarget | undefined {
+    return sessionId
+      ? cdpRouter.targetInfo(socket, { sessionId })
+      : cdpRouter.singleVisibleRoot(socket)
   }
 
   function isRuntimeEvaluationMethod(method: string): boolean {
@@ -664,14 +656,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return
     }
 
-    cdpClients.add(socket)
-    idleRuntimeResetGeneration++
-    cdpClientAnnouncements.set(socket, createClientTargetAnnouncements())
-    cdpClientSessionAliases.set(socket, new Map())
     const browserControlSessionId = requestUrl.searchParams.get("browserControlSessionId") ?? headerValue(request.headers["browser-control-session-id"])
-    if (browserControlSessionId) {
-      cdpClientBrowserControlSessionIds.set(socket, browserControlSessionId)
-    }
+    cdpClients.register(socket, browserControlSessionId)
     debugLog?.(`client+ ${browserControlSessionId ?? "raw"} total=${cdpClients.size}`)
     socket.on("message", (data) => {
       Effect.runPromise(handleCdpMessage(socket, data.toString())).catch((error: unknown) => {
@@ -682,14 +668,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       })
     })
     socket.on("close", () => {
-      debugLog?.(`client- ${cdpClientBrowserControlSessionIds.get(socket) ?? "raw"} total=${cdpClients.size - 1}`)
-      cdpClients.delete(socket)
-      cdpClientAnnouncements.delete(socket)
-      cdpClientBrowserControlSessionIds.delete(socket)
-      cdpClientSessionAliases.delete(socket)
-      if (cdpClients.size === 0) {
-        const generation = ++idleRuntimeResetGeneration
-        Effect.runPromise(disableRuntimeForIdleTargets(generation).pipe(Effect.ignore)).catch((error: unknown) => {
+      debugLog?.(`client- ${cdpClients.sessionId(socket) ?? "raw"} total=${cdpClients.size - 1}`)
+      const idleGeneration = cdpClients.unregister(socket)
+      if (idleGeneration !== undefined) {
+        Effect.runPromise(disableRuntimeForIdleTargets(idleGeneration).pipe(Effect.ignore)).catch((error: unknown) => {
           console.error("Failed to reset idle runtime domains", error)
         })
       }
@@ -1071,16 +1053,15 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return yield* Effect.fail(new Error("Invalid CDP request"))
     }
 
-    debugLog?.(`cdp<- ${cdpClientBrowserControlSessionIds.get(socket) ?? "raw"} #${message.id} ${message.method} ${message.sessionId ?? ""}`)
+    debugLog?.(`cdp<- ${cdpClients.sessionId(socket) ?? "raw"} #${message.id} ${message.method} ${message.sessionId ?? ""}`)
     yield* Effect.matchEffect(routeCdpCommand(socket, message), {
       onFailure: (error) => {
         return Effect.sync(() => {
           const runtimeEvaluation = isRuntimeEvaluationMethod(message.method)
           const errorDetail = runtimeEvaluation ? runtimeFailureKind(error) : error.message
-          debugLog?.(`cdp-> ${cdpClientBrowserControlSessionIds.get(socket) ?? "raw"} #${message.id} ${message.method} ERROR ${errorDetail}`)
+          debugLog?.(`cdp-> ${cdpClients.sessionId(socket) ?? "raw"} #${message.id} ${message.method} ERROR ${errorDetail}`)
           if (runtimeEvaluation) {
-            const tabId = message.sessionId ? registry.tabIdForSession(message.sessionId) : firstVisibleRootTarget(socket)?.tabId
-            contextDebugLog?.(`evaluation-failed method=${message.method} failure=${runtimeFailureKind(error)} client=${boundedToken(cdpClientBrowserControlSessionIds.get(socket) ?? "raw")} ${targetDiagnosticIdentity(tabId ? targetForCdpSession(tabId, message.sessionId) : undefined)} ${summarizeRuntimeEvaluate(message.params)}`)
+            contextDebugLog?.(`evaluation-failed method=${message.method} failure=${runtimeFailureKind(error)} client=${boundedToken(cdpClients.sessionId(socket) ?? "raw")} ${targetDiagnosticIdentity(diagnosticTargetForClient(socket, message.sessionId))} ${summarizeRuntimeEvaluate(message.params)}`)
           }
           sendCdpResponse(socket, {
             id: message.id,
@@ -1091,12 +1072,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       },
       onSuccess: (result) => {
         return Effect.sync(() => {
-          debugLog?.(`cdp-> ${cdpClientBrowserControlSessionIds.get(socket) ?? "raw"} #${message.id} ${message.method} ok`)
+          debugLog?.(`cdp-> ${cdpClients.sessionId(socket) ?? "raw"} #${message.id} ${message.method} ok`)
           const resultObject = getObject(result)
           const exceptionDetails = isRuntimeEvaluationMethod(message.method) ? getObject(resultObject?.exceptionDetails) : undefined
           if (exceptionDetails) {
-            const tabId = message.sessionId ? registry.tabIdForSession(message.sessionId) : firstVisibleRootTarget(socket)?.tabId
-            contextDebugLog?.(`evaluation-exception method=${message.method} exceptionId=${boundedToken(typeof exceptionDetails.exceptionId === "number" || typeof exceptionDetails.exceptionId === "string" ? String(exceptionDetails.exceptionId) : undefined)} line=${typeof exceptionDetails.lineNumber === "number" ? exceptionDetails.lineNumber : "none"} column=${typeof exceptionDetails.columnNumber === "number" ? exceptionDetails.columnNumber : "none"} client=${boundedToken(cdpClientBrowserControlSessionIds.get(socket) ?? "raw")} ${targetDiagnosticIdentity(tabId ? targetForCdpSession(tabId, message.sessionId) : undefined)} ${summarizeRuntimeEvaluate(message.params)}`)
+            contextDebugLog?.(`evaluation-exception method=${message.method} exceptionId=${boundedToken(typeof exceptionDetails.exceptionId === "number" || typeof exceptionDetails.exceptionId === "string" ? String(exceptionDetails.exceptionId) : undefined)} line=${typeof exceptionDetails.lineNumber === "number" ? exceptionDetails.lineNumber : "none"} column=${typeof exceptionDetails.columnNumber === "number" ? exceptionDetails.columnNumber : "none"} client=${boundedToken(cdpClients.sessionId(socket) ?? "raw")} ${targetDiagnosticIdentity(diagnosticTargetForClient(socket, message.sessionId))} ${summarizeRuntimeEvaluate(message.params)}`)
           }
           sendCdpResponse(socket, {
             id: message.id,
@@ -1109,7 +1089,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   })
 
   const routeCdpCommand = Effect.fn("Relay.routeCdpCommand")(function* (socket: WebSocket, message: CdpRequest) {
-    const clientBrowserControlSessionId = cdpClientBrowserControlSessionIds.get(socket)
+    const clientBrowserControlSessionId = cdpClients.sessionId(socket)
     const guardMessage = guardCdpMethod({
       method: message.method,
       readOnly: clientBrowserControlSessionId ? sessions.isReadOnly(clientBrowserControlSessionId) : false,
@@ -1132,69 +1112,60 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     if (message.method === "Target.setDiscoverTargets") {
       if (message.params?.discover === true) {
-        replayTargetCreated({ socket, targetInfos: visibleTargetInfos(socket) })
+        replayTargetCreated({ socket, targetInfos: cdpRouter.visibleTargetInfos(socket) })
       }
       return {}
     }
     if (message.method === "Target.setAutoAttach" && !message.sessionId) {
-      autoAttachParams = message.params
-      for (const target of registry.targets.values()) {
-        if (!canSeeTarget(socket, target)) continue
+      cdpClients.setAutoAttachParams(socket, message.params)
+      for (const target of cdpRouter.visibleRoots(socket)) {
         yield* Effect.ignore(sendDebuggerCommand({ tabId: target.tabId, method: "Target.setAutoAttach", params: message.params ?? {} }))
-        sendAttachedToTarget({ socket, clientAnnouncements: cdpClientAnnouncements, target, onDuplicateTarget: logDuplicateTargetAnnouncement })
+        sendAttachedToTarget({ socket, announcements: cdpClients.announcements(socket), target, onDuplicateTarget: logDuplicateTargetAnnouncement })
       }
       return {}
     }
     if (message.method === "Target.setAutoAttach" && message.sessionId && registry.targets.has(message.sessionId)) {
-      const target = registry.targets.get(message.sessionId)
+      const target = cdpRouter.rootForSession(socket, message.sessionId)
       if (!target) {
         return yield* Effect.fail(new Error(`Target not found: ${message.sessionId}`))
       }
       const result = yield* sendDebuggerCommand({ tabId: target.tabId, method: "Target.setAutoAttach", params: message.params ?? {} })
-      replayChildTargetsForParent({ socket, parentSessionId: target.sessionId, registry, clientAnnouncements: cdpClientAnnouncements, onDuplicateTarget: logDuplicateTargetAnnouncement })
+      replayChildTargetsForParent({ socket, parentSessionId: target.sessionId, registry, announcements: cdpClients.announcements(socket), onDuplicateTarget: logDuplicateTargetAnnouncement })
       return result
     }
     if (message.method === "Target.getTargets") {
       return {
-        targetInfos: visibleTargetInfos(socket),
+        targetInfos: cdpRouter.visibleTargetInfos(socket),
       }
     }
     if (message.method === "Target.attachToBrowserTarget") {
-      const aliasId = `bc-client-browser-${nextClientSessionAliasId++}`
-      cdpClientSessionAliases.get(socket)?.set(aliasId, { kind: "browser" })
-      return { sessionId: aliasId }
+      return { sessionId: cdpClients.createBrowserAlias(socket) }
     }
     if (message.method === "Target.attachToTarget") {
       const targetId = typeof message.params?.targetId === "string" ? message.params.targetId : ""
-      const target = registry.targetsByTargetId.get(targetId)
-      if (target && canSeeTarget(socket, target)) {
-        if (hasAnnouncedSession(cdpClientAnnouncements.get(socket), target.sessionId)) {
-          return { sessionId: createClientSessionAlias(socket, target) }
+      const target = cdpRouter.targetForAttach(socket, targetId)
+      if (target && "owner" in target) {
+        if (hasAnnouncedSession(cdpClients.announcements(socket), target.sessionId)) {
+          return { sessionId: cdpClients.createTargetAlias(socket, target, target.sessionId) }
         }
-        sendAttachedToTarget({ socket, clientAnnouncements: cdpClientAnnouncements, target, onDuplicateTarget: logDuplicateTargetAnnouncement })
+        sendAttachedToTarget({ socket, announcements: cdpClients.announcements(socket), target, onDuplicateTarget: logDuplicateTargetAnnouncement })
         return { sessionId: target.sessionId }
       }
-      const childTarget = registry.childTargetsByTargetId.get(targetId)
-      if (childTarget && canSeeTabId(socket, childTarget.tabId)) {
-        if (hasAnnouncedSession(cdpClientAnnouncements.get(socket), childTarget.sessionId)) {
-          return { sessionId: createClientSessionAlias(socket, childTarget) }
+      if (target) {
+        if (hasAnnouncedSession(cdpClients.announcements(socket), target.sessionId)) {
+          return { sessionId: cdpClients.createTargetAlias(socket, target, target.parentSessionId) }
         }
-        sendAttachedToChildTarget({ socket, clientAnnouncements: cdpClientAnnouncements, target: childTarget, onDuplicateTarget: logDuplicateTargetAnnouncement })
-        replayChildFrameNavigation({ socket, registry, target: childTarget })
-        return { sessionId: childTarget.sessionId }
+        sendAttachedToChildTarget({ socket, announcements: cdpClients.announcements(socket), target, onDuplicateTarget: logDuplicateTargetAnnouncement })
+        replayChildFrameNavigation({ socket, registry, target })
+        return { sessionId: target.sessionId }
       }
       return yield* Effect.fail(new Error(`Target not found: ${targetId}`))
     }
     if (message.method === "Target.getTargetInfo") {
       const targetId = typeof message.params?.targetId === "string" ? message.params.targetId : ""
-      const sessionAlias = message.sessionId ? cdpClientSessionAliases.get(socket)?.get(message.sessionId) : undefined
-      const aliasedTargetId = sessionAlias?.kind === "target" ? sessionAlias.targetId : undefined
-      const target = resolveTargetInfoTarget({
-        registry,
+      const target = cdpRouter.targetInfo(socket, {
         ...(targetId ? { targetId } : {}),
         ...(message.sessionId ? { sessionId: message.sessionId } : {}),
-        ...(aliasedTargetId ? { aliasedTargetId } : {}),
-        fallback: () => firstVisibleRootTarget(socket),
       })
       if (!target) {
         if (!targetId && !message.sessionId) {
@@ -1207,13 +1178,19 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (message.method === "Target.createTarget" || message.method === "Target.closeTarget") {
       if (message.method === "Target.createTarget") {
         const url = typeof message.params?.url === "string" ? message.params.url : "about:blank"
-        const browserControlSessionId = cdpClientBrowserControlSessionIds.get(socket)
-        const target = yield* createAndAttachTab({ url, active: false, ...(browserControlSessionId ? { browserControlSessionId } : {}) })
+        const browserControlSessionId = cdpClients.sessionId(socket)
+        const autoAttachParams = cdpClients.autoAttachParams(socket)
+        const target = yield* createAndAttachTab({
+          url,
+          active: false,
+          ...(browserControlSessionId ? { browserControlSessionId } : {}),
+          ...(autoAttachParams ? { autoAttachParams } : {}),
+        })
         return { targetId: target.targetInfo.targetId }
       }
       const targetId = typeof message.params?.targetId === "string" ? message.params.targetId : ""
-      const target = registry.targetsByTargetId.get(targetId)
-      if (!target) {
+      const target = cdpRouter.targetForAttach(socket, targetId)
+      if (!target || !("owner" in target)) {
         return { success: false }
       }
       yield* closeTargetByTargetId(targetId)
@@ -1222,30 +1199,23 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (message.method === "Target.detachFromTarget") {
       const childSessionId = typeof message.params?.sessionId === "string" ? message.params.sessionId : undefined
       if (childSessionId) {
-        if (cdpClientSessionAliases.get(socket)?.delete(childSessionId)) {
+        if (cdpClients.deleteAlias(socket, childSessionId)) {
           return {}
         }
-        removeAnnouncedSession(cdpClientAnnouncements.get(socket), childSessionId)
+        removeAnnouncedSession(cdpClients.announcements(socket), childSessionId)
       }
       return {}
     }
     const normalizedMessage = removeDefaultLightColorSchemeEmulation(message)
     if (message.method === "Runtime.enable" && message.sessionId) {
       const sessionId = message.sessionId
-      const sessionAlias = cdpClientSessionAliases.get(socket)?.get(sessionId)
-      const alias = sessionAlias?.kind === "target" ? sessionAlias : undefined
-      const tabId = alias?.tabId ?? registry.tabIdForSession(sessionId)
-      if (!tabId) {
+      const route = cdpRouter.session(socket, sessionId)
+      if (!route) {
         return yield* Effect.fail(new Error(`Unknown CDP session ${sessionId} for ${message.method}`))
       }
-      const rootSessionId = registry.tabTargets.get(tabId)?.sessionId
-      const routedSessionId = chromeSessionIdForClientRequest({
-        alias,
-        requestedSessionId: sessionId,
-        rootSessionId,
-      })
-      const chromeSessionId = routedSessionId ? { sessionId: routedSessionId } : {}
-      const contextSessionId = routedSessionId ?? rootSessionId ?? sessionId
+      const { tabId } = route
+      const chromeSessionId = route.chromeSessionId ? { sessionId: route.chromeSessionId } : {}
+      const contextSessionId = route.chromeSessionId ?? route.rootSessionId ?? sessionId
       contextDebugLog?.(`runtime-enable phase=client-request ${targetDiagnosticIdentity(targetForCdpSession(tabId, sessionId))}`)
       // Register the waiter before sending the enable so context events that
       // arrive during the command round trip are not missed.
@@ -1273,23 +1243,18 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }
       return result
     }
-    const sessionAlias = message.sessionId ? cdpClientSessionAliases.get(socket)?.get(message.sessionId) : undefined
-    const alias = sessionAlias?.kind === "target" ? sessionAlias : undefined
-    const tabId = alias?.tabId ?? (message.sessionId ? registry.tabIdForSession(message.sessionId) : firstVisibleRootTarget(socket)?.tabId)
-    if (!tabId) {
-      return yield* Effect.fail(new Error(message.sessionId ? `Unknown CDP session ${message.sessionId} for ${message.method}` : `No attached tab for ${message.method}`))
+    const route = message.sessionId ? cdpRouter.session(socket, message.sessionId) : undefined
+    if (!route) {
+      return yield* Effect.fail(new Error(message.sessionId
+        ? `Unknown CDP session ${message.sessionId} for ${message.method}`
+        : `CDP sessionId is required for ${message.method}`))
     }
-    const rootSessionId = registry.tabTargets.get(tabId)?.sessionId
-    const chromeSessionId = chromeSessionIdForClientRequest({
-      alias,
-      requestedSessionId: message.sessionId,
-      rootSessionId,
-    })
+    const { tabId } = route
     const result = yield* sendDebuggerCommand({
       tabId,
       method: normalizedMessage.method,
       params: normalizedMessage.params ?? {},
-      ...(chromeSessionId === undefined ? {} : { sessionId: chromeSessionId }),
+      ...(route.chromeSessionId === undefined ? {} : { sessionId: route.chromeSessionId }),
     })
     yield* applyGhostCursorMouseEvent({ tabId, message }).pipe(Effect.ignore)
     return result
@@ -1319,18 +1284,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
   }
 
-  function createClientSessionAlias(socket: WebSocket, target: ConnectedTarget | ChildTarget): string {
-    const aliasId = `bc-client-session-${nextClientSessionAliasId++}`
-    const rootSessionId = registry.tabTargets.get(target.tabId)?.sessionId
-    cdpClientSessionAliases.get(socket)?.set(aliasId, {
-      kind: "target",
-      tabId: target.tabId,
-      targetId: target.targetInfo.targetId,
-      ...(target.sessionId === rootSessionId ? {} : { chromeSessionId: target.sessionId }),
-    })
-    return aliasId
-  }
-
   const toggleTab = Effect.fnUntraced(function* (tabId: number) {
     if (registry.tabTargets.has(tabId)) {
       yield* sendToExtension({ method: "debugger.detach", params: { tabId } })
@@ -1345,6 +1298,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     readonly url: string
     readonly active: boolean
     readonly browserControlSessionId?: string
+    readonly autoAttachParams?: JsonObject
   }) {
     const result = yield* sendToExtension({ method: "tabs.create", params: { url: options.url, active: options.active } })
     const tabId = typeof result.tabId === "number" ? result.tabId : undefined
@@ -1355,6 +1309,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       tabId,
       owner: "relay",
       ...(options.browserControlSessionId ? { browserControlSessionId: options.browserControlSessionId } : {}),
+      ...(options.autoAttachParams ? { autoAttachParams: options.autoAttachParams } : {}),
     })
   })
 
@@ -1363,6 +1318,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     readonly owner: "relay" | "user"
     readonly browserControlSessionId?: string
     readonly alreadyAttached?: boolean
+    readonly autoAttachParams?: JsonObject
   }) {
     const { tabId } = options
     if (!options.alreadyAttached) {
@@ -1387,10 +1343,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       owner: restoredTarget?.owner ?? options.owner,
       ...(browserControlSessionId ? { browserControlSessionId } : {}),
     }
-    return yield* finishAttachedTarget(registry.stageRootTarget(candidate))
+    return yield* finishAttachedTarget(registry.stageRootTarget(candidate), options.autoAttachParams)
   })
 
-  const finishAttachedTarget = Effect.fnUntraced(function* (target: ConnectedTarget) {
+  const finishAttachedTarget = Effect.fnUntraced(function* (target: ConnectedTarget, autoAttachParams?: JsonObject) {
     const tabId = target.tabId
     yield* sendDebuggerCommand({
       tabId,
@@ -1445,6 +1401,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     readonly browserControlSessionId?: string
     readonly alreadyAttached?: boolean
     readonly expectedExtensionGeneration?: number
+    readonly autoAttachParams?: JsonObject
   }) {
     const semaphore = rootLifecycleSemaphores.get(options.tabId) ?? Semaphore.makeUnsafe(1)
     rootLifecycleSemaphores.set(options.tabId, semaphore)
@@ -1612,13 +1569,13 @@ const makeRelay = Effect.fnUntraced(function* (options: {
 
   const disableRuntimeForIdleTargets = Effect.fnUntraced(function* (generation: number) {
     yield* Effect.forEach(Array.from(registry.targets.values()), (target) => {
-      if (generation !== idleRuntimeResetGeneration || cdpClients.size !== 0) {
+      if (!cdpClients.isCurrentIdleGeneration(generation)) {
         return Effect.void
       }
       return runRuntimeResetCommand({ phase: "idle-client-disconnect", tabId: target.tabId, method: "Runtime.disable", params: {} }).pipe(Effect.asVoid)
     })
     yield* Effect.forEach(Array.from(registry.childTargets.values()), (target) => {
-      if (generation !== idleRuntimeResetGeneration || cdpClients.size !== 0) {
+      if (!cdpClients.isCurrentIdleGeneration(generation)) {
         return Effect.void
       }
       return runRuntimeResetCommand({ phase: "idle-client-disconnect", tabId: target.tabId, sessionId: target.sessionId, method: "Runtime.disable", params: {} }).pipe(Effect.asVoid)
@@ -1643,7 +1600,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     cancelTargetHandoffs(detached.target, "target-detached")
     if (!options.preserveSessionTarget) sessions.markTargetDetached(detached.target.targetInfo.targetId)
-    removeClientTargetAliases(cdpClientSessionAliases.values(), (alias) => alias.tabId === tabId)
+    cdpClients.removeTargetAliases((alias) => alias.tabId === tabId)
     mainFrameIdsByTab.delete(tabId)
     ghostCursorPositionsByTab.delete(tabId)
     for (const [sessionId, childTabId] of suppressedChildSessions) {
@@ -1652,6 +1609,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }
     }
     contextDebugLog?.(`target-detached kind=root ${targetDiagnosticIdentity(detached.target)}`)
+    for (const client of cdpClients) {
+      for (const childSessionId of detached.childSessionIds) {
+        detachAnnouncedSession(client, childSessionId)
+      }
+    }
     sendEventToTargetViewers(detached.target.sessionId, {
       method: "Target.targetDestroyed",
       params: { targetId: detached.target.targetInfo.targetId },
@@ -1660,11 +1622,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       method: "Target.detachedFromTarget",
       params: { sessionId: detached.target.sessionId, targetId: detached.target.targetInfo.targetId },
     })
-    for (const announcements of cdpClientAnnouncements.values()) {
+    for (const client of cdpClients) {
+      const announcements = cdpClients.announcements(client)
       removeAnnouncedSession(announcements, detached.target.sessionId)
-      for (const childSessionId of detached.childSessionIds) {
-        removeAnnouncedSession(announcements, childSessionId)
-      }
     }
   }
 
@@ -1677,7 +1637,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       targetSessionId: change.target.sessionId,
     })
     sessions.markTargetReplaced(change.previous.targetInfo.targetId, change.target.targetInfo.targetId)
-    removeClientTargetAliases(cdpClientSessionAliases.values(), (alias) => alias.tabId === change.target.tabId)
+    cdpClients.removeTargetAliases((alias) => alias.tabId === change.target.tabId)
     mainFrameIdsByTab.delete(change.target.tabId)
     ghostCursorPositionsByTab.delete(change.target.tabId)
     for (const [sessionId, childTabId] of suppressedChildSessions) {
@@ -1698,38 +1658,13 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     const detached = registry.detachChildTargetState(sessionId)
     if (detached) {
-      removeClientTargetAliases(cdpClientSessionAliases.values(), (alias) => alias.targetId === detached.targetInfo.targetId)
+      cdpClients.removeTargetAliases((alias) => alias.targetId === detached.targetInfo.targetId)
     }
     if (!notifyClients) {
-      for (const announcements of cdpClientAnnouncements.values()) {
-        removeAnnouncedSession(announcements, sessionId)
+      for (const client of cdpClients) {
+        removeAnnouncedSession(cdpClients.announcements(client), sessionId)
       }
     }
-  }
-
-  function canSeeTarget(socket: WebSocket, target: ConnectedTarget): boolean {
-    const clientSessionId = cdpClientBrowserControlSessionIds.get(socket)
-    return canClientSeeTarget({
-      clientSessionId,
-      targetOwnerSessionId: target.browserControlSessionId,
-      targetOwner: target.owner,
-      clientHasOwnedTarget: clientHasOwnedTarget(clientSessionId),
-    })
-  }
-
-  function clientHasOwnedTarget(clientSessionId: string | undefined): boolean {
-    return clientSessionId ? registry.listRootTargets().some((candidate) => candidate.browserControlSessionId === clientSessionId) : false
-  }
-
-  function canSeeTabId(socket: WebSocket, tabId: number): boolean {
-    const rootTarget = registry.tabTargets.get(tabId)
-    return rootTarget ? canSeeTarget(socket, rootTarget) : true
-  }
-
-  function firstVisibleRootTarget(socket: WebSocket): ConnectedTarget | undefined {
-    return Array.from(registry.targets.values()).find((target) => {
-      return canSeeTarget(socket, target)
-    })
   }
 
   // Deliver a session-scoped event only to clients that have been told about
@@ -1738,10 +1673,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   function sendEventToTargetViewers(rootSessionId: string, event: CdpEvent): void {
     const target = registry.targets.get(rootSessionId)
     for (const client of cdpClients) {
-      if (!hasAnnouncedSession(cdpClientAnnouncements.get(client), rootSessionId)) {
+      if (!hasAnnouncedSession(cdpClients.announcements(client), rootSessionId)) {
         continue
       }
-      if (target && !canSeeTarget(client, target)) {
+      if (target && !cdpRouter.canSeeTarget(client, target)) {
         detachAnnouncedSession(client, rootSessionId)
         continue
       }
@@ -1751,27 +1686,26 @@ const makeRelay = Effect.fnUntraced(function* (options: {
 
   function pruneInvisibleAnnouncementsForSession(browserControlSessionId: string): void {
     for (const client of cdpClients) {
-      if (cdpClientBrowserControlSessionIds.get(client) === browserControlSessionId) {
+      if (cdpClients.sessionId(client) === browserControlSessionId) {
         pruneInvisibleAnnouncementsForClient(client)
       }
     }
   }
 
   function pruneInvisibleAnnouncementsForClient(client: WebSocket): void {
-    const announcements = cdpClientAnnouncements.get(client)
-    if (!announcements) {
-      return
-    }
+    const announcements = cdpClients.announcements(client)
     for (const announced of Array.from(announcements.targets.values())) {
       const rootTarget = registry.targets.get(announced.sessionId)
       if (rootTarget) {
-        if (!canSeeTarget(client, rootTarget)) {
+        if (!cdpRouter.canSeeTarget(client, rootTarget)) {
+          cdpClients.removeClientTargetAliases(client, (alias) => alias.tabId === rootTarget.tabId)
           detachAnnouncedSession(client, announced.sessionId)
         }
         continue
       }
       const childTarget = registry.childTargets.get(announced.sessionId)
-      if (childTarget && !canSeeTabId(client, childTarget.tabId)) {
+      if (childTarget && !cdpRouter.canSeeTab(client, childTarget.tabId)) {
+        cdpClients.removeClientTargetAliases(client, (alias) => alias.tabId === childTarget.tabId)
         detachAnnouncedSession(client, announced.sessionId)
       }
     }
@@ -1779,6 +1713,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
 
   function reconcileTargetOwnership(change: TargetOwnershipChange): void {
     for (const client of cdpClients) {
+      cdpRouter.pruneInvisibleAliases(client, change.tabIds)
       pruneInvisibleAnnouncementsForClient(client)
     }
     for (const targetId of change.targetIds) {
@@ -1793,7 +1728,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   }
 
   function detachAnnouncedSession(client: WebSocket, sessionId: string): void {
-    const announcements = cdpClientAnnouncements.get(client)
+    const announcements = cdpClients.announcements(client)
     const targetId = announcements?.sessionTargets.get(sessionId)
     const announced = targetId ? announcements?.targets.get(targetId) : undefined
     removeAnnouncedSession(announcements, sessionId)
@@ -1812,27 +1747,18 @@ const makeRelay = Effect.fnUntraced(function* (options: {
 
   function announceAttachedTarget(target: ConnectedTarget): void {
     for (const client of cdpClients) {
-      if (canSeeTarget(client, target)) {
-        sendAttachedToTarget({ socket: client, clientAnnouncements: cdpClientAnnouncements, target, onDuplicateTarget: logDuplicateTargetAnnouncement })
+      if (cdpRouter.canSeeTarget(client, target)) {
+        sendAttachedToTarget({ socket: client, announcements: cdpClients.announcements(client), target, onDuplicateTarget: logDuplicateTargetAnnouncement })
       }
     }
   }
 
   function announceAttachedChildTarget(rootSessionId: string, target: ChildTarget): void {
     for (const client of cdpClients) {
-      if (hasAnnouncedSession(cdpClientAnnouncements.get(client), rootSessionId)) {
-        sendAttachedToChildTarget({ socket: client, clientAnnouncements: cdpClientAnnouncements, target, onDuplicateTarget: logDuplicateTargetAnnouncement })
+      if (hasAnnouncedSession(cdpClients.announcements(client), rootSessionId)) {
+        sendAttachedToChildTarget({ socket: client, announcements: cdpClients.announcements(client), target, onDuplicateTarget: logDuplicateTargetAnnouncement })
       }
     }
-  }
-
-  function visibleTargetInfos(socket: WebSocket) {
-    return registry.allTargetInfos({
-      isRestrictedTarget,
-      isVisibleTarget: (target) => {
-        return canSeeTabId(socket, target.tabId) && ("owner" in target || shouldExposeChildTarget(target))
-      },
-    })
   }
 
   // Resolves true once a default Runtime.executionContextCreated event arrives
