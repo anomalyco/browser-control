@@ -49,20 +49,14 @@ Verification:
 - Extend reconnect, OOPIF, and multi-client smoke cases to cover root detach and
   conflicting client auto-attach settings.
 
-### 2. Stream recordings with unambiguous framing
+### 2. Extend recording surfaces
 
-- Include the tab id and sequence number in each binary websocket frame instead
-  of pairing a JSON metadata frame with the next binary frame.
-- Stream chunks to disk instead of buffering complete recordings in relay
-  memory.
 - Add MCP recording start, stop, status, and cancel tools after the relay path is
   robust.
 - Build the flight-recorder ring buffer only after chunk streaming lands.
 
 Verification:
 
-- Exercise interleaved recordings and a recording larger than the intended
-  in-memory bound.
 - Confirm CLI and MCP recording behavior match.
 
 ### 3. Resolve smaller agent-experience gaps
@@ -76,6 +70,14 @@ Verification:
   human-shell current session unexpectedly.
 
 ## Recently Shipped
+
+### Tab-capture recordings stream with intrinsic framing
+
+Extension protocol `2` sends each recording chunk as a sequenced `BCRD` binary
+frame containing its tab id. The relay validates framing and sequence, bounds
+pending writes, streams each tab to an adjacent temporary file, and atomically
+renames complete recordings. Interleaving, oversized queues, malformed frames,
+and output larger than a single frame have direct coverage.
 
 ### Fill helpers traverse open shadow roots
 
@@ -184,7 +186,7 @@ require a new extension capture protocol and permission model.
   link`.
 - Until the first Store review completes, the browser extension is loaded
   unpacked from the npm package's `extension/dist` directory or a source build.
-  Its current shim version is `0.0.22`.
+  Its current shim version is `0.0.23`.
 - Extension and npm releases are independently versioned. The extension hello
   reports an explicit protocol version, and compatibility rather than exact
   package-version equality determines whether the local driver may use it.

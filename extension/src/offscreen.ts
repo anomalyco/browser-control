@@ -12,13 +12,16 @@ import type {
   OffscreenStopRecordingMessage,
   OffscreenStopRecordingResult,
 } from "./recording-types.ts"
+import { maxRecordingFramePayloadBytes } from "../../src/recording-protocol.ts"
 
 type RecordingState = {
   readonly recorder: MediaRecorder
   readonly stream: MediaStream
-  readonly pendingChunks: Set<Promise<void>>
   readonly startedAt: number
   readonly tabId: number
+  nextSequence: number
+  sendTail: Promise<void>
+  sendError?: Error
 }
 
 const recordings = new Map<number, RecordingState>()
@@ -75,22 +78,40 @@ async function handleStartRecording(message: OffscreenStartRecordingMessage): Pr
       audioBitsPerSecond: message.audioBitsPerSecond,
     })
     const startedAt = Date.now()
-    const pendingChunks = new Set<Promise<void>>()
+    const recording: RecordingState = {
+      recorder,
+      stream,
+      startedAt,
+      tabId: message.tabId,
+      nextSequence: 0,
+      sendTail: Promise.resolve(),
+    }
 
     recorder.ondataavailable = (event) => {
-      if (event.data.size === 0) {
+      if (event.data.size === 0 || recording.sendError) {
         return
       }
-      const pendingChunk = event.data.arrayBuffer().then((arrayBuffer) => {
-        chrome.runtime.sendMessage({
-          action: "recording.chunk",
-          tabId: message.tabId,
-          data: Array.from(new Uint8Array(arrayBuffer)),
-        })
-      }).finally(() => {
-        pendingChunks.delete(pendingChunk)
+      if (recorder.state === "recording") recorder.pause()
+      recording.sendTail = recording.sendTail.then(async () => {
+        try {
+          for (let offset = 0; offset < event.data.size; offset += maxRecordingFramePayloadBytes) {
+            const arrayBuffer = await event.data.slice(offset, offset + maxRecordingFramePayloadBytes).arrayBuffer()
+            const result = await chrome.runtime.sendMessage({
+              action: "recording.chunk",
+              tabId: message.tabId,
+              sequence: recording.nextSequence++,
+              final: false,
+              data: Array.from(new Uint8Array(arrayBuffer)),
+            }) as { readonly success: boolean; readonly error?: string }
+            if (!result.success) throw new Error(result.error ?? "Could not send recording chunk")
+          }
+        } catch (error) {
+          recording.sendError = error instanceof Error ? error : new Error(String(error))
+          handleCancelRecordingForTab(message.tabId)
+        } finally {
+          if (!recording.sendError && recorder.state === "paused") recorder.resume()
+        }
       })
-      pendingChunks.add(pendingChunk)
     }
     recorder.onerror = () => {
       handleCancelRecordingForTab(message.tabId)
@@ -107,7 +128,7 @@ async function handleStartRecording(message: OffscreenStartRecordingMessage): Pr
       recorder.start(1_000)
     })
 
-    recordings.set(message.tabId, { recorder, stream, pendingChunks, startedAt, tabId: message.tabId })
+    recordings.set(message.tabId, recording)
     return { success: true, tabId: message.tabId, startedAt, mimeType: recorder.mimeType || mimeType || "video/webm" }
   } catch (error) {
     stream?.getTracks().map((track) => {
@@ -139,15 +160,23 @@ async function handleStopRecording(message: OffscreenStopRecordingMessage): Prom
       }
       recording.recorder.stop()
     })
-    await Promise.allSettled(recording.pendingChunks)
+    await recording.sendTail
+    if (recording.sendError) throw recording.sendError
     recording.stream.getTracks().map((track) => {
       track.stop()
       return undefined
     })
     recordings.delete(message.tabId)
-    chrome.runtime.sendMessage({ action: "recording.chunk", tabId: message.tabId, final: true })
+    const finalResult = await chrome.runtime.sendMessage({
+      action: "recording.chunk",
+      tabId: message.tabId,
+      sequence: recording.nextSequence,
+      final: true,
+    }) as { readonly success: boolean; readonly error?: string }
+    if (!finalResult.success) throw new Error(finalResult.error ?? "Could not finish recording stream")
     return { success: true, tabId: message.tabId, duration: Date.now() - recording.startedAt }
   } catch (error) {
+    handleCancelRecordingForTab(message.tabId)
     return { success: false, error: error instanceof Error ? error.message : String(error) }
   }
 }

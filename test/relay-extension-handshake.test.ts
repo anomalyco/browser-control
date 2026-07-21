@@ -24,7 +24,7 @@ describe("relay extension handshake", () => {
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const relay = yield* startRelay({ port, sessionCatalogPath: null })
       const extension = yield* Effect.promise(() => connectExtension(relay.url))
-      extension.send(JSON.stringify({ method: "hello", params: { version: "2.0.0", protocolVersion: 2 } }))
+      extension.send(JSON.stringify({ method: "hello", params: { version: "2.0.0", protocolVersion: 3 } }))
       extension.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 7 } }))
       yield* Effect.sleep("20 millis")
 
@@ -32,7 +32,7 @@ describe("relay extension handshake", () => {
       expect(status).toMatchObject({
         connected: false,
         version: "2.0.0",
-        protocolVersion: 2,
+        protocolVersion: 3,
         protocolCompatible: false,
         protocolLegacy: false,
         activeTargets: 0,
@@ -46,16 +46,35 @@ describe("relay extension handshake", () => {
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const relay = yield* startRelay({ port, sessionCatalogPath: null })
       const extension = yield* Effect.promise(() => connectExtension(relay.url))
-      extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.19", protocolVersion: 1 } }))
+      extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2 } }))
 
       const beforeReady = yield* Effect.promise(() => fetch(`${relay.url}/extension/status`).then((response) => response.json()))
-      expect(beforeReady).toMatchObject({ connected: false, protocolVersion: 1, protocolCompatible: true })
+      expect(beforeReady).toMatchObject({ connected: false, protocolVersion: 2, protocolCompatible: true })
 
       extension.send(JSON.stringify({ method: "ready" }))
       yield* Effect.sleep("10 millis")
       const ready = yield* Effect.promise(() => fetch(`${relay.url}/extension/status`).then((response) => response.json()))
-      expect(ready).toMatchObject({ connected: true, protocolVersion: 1, protocolCompatible: true, protocolLegacy: false })
+      expect(ready).toMatchObject({ connected: true, protocolVersion: 2, protocolCompatible: true, protocolLegacy: false })
       extension.close()
+    })))
+  })
+
+  it("does not let an incompatible extension replace a compatible socket before ready", async () => {
+    const port = 24_000 + Math.floor(Math.random() * 10_000)
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port, sessionCatalogPath: null })
+      const compatible = yield* Effect.promise(() => connectExtension(relay.url))
+      compatible.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2 } }))
+
+      const incompatible = yield* Effect.promise(() => connectExtension(relay.url))
+      const closed = waitForClose(incompatible)
+      incompatible.send(JSON.stringify({ method: "hello", params: { version: "0.0.22", protocolVersion: 1 } }))
+      expect(yield* Effect.promise(() => closed)).toBe(4003)
+
+      compatible.send(JSON.stringify({ method: "ready" }))
+      const status = yield* Effect.promise(() => waitForStatus(relay.url, (candidate) => candidate.connected === true))
+      expect(status).toMatchObject({ connected: true, protocolVersion: 2, activeTargets: 0 })
+      compatible.close()
     })))
   })
 
@@ -64,7 +83,7 @@ describe("relay extension handshake", () => {
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const relay = yield* startRelay({ port, sessionCatalogPath: null })
       const first = yield* Effect.promise(() => connectRespondingExtension(relay.url, "stale-target"))
-      first.send(JSON.stringify({ method: "hello", params: { version: "0.0.20", protocolVersion: 1 } }))
+      first.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2 } }))
       first.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 7 } }))
       first.send(JSON.stringify({ method: "ready" }))
       yield* Effect.promise(() => waitForStatus(relay.url, (status) => status.connected === true && status.activeTargets === 1))
@@ -73,7 +92,7 @@ describe("relay extension handshake", () => {
       expect(client.events.some((event) => event.method === "Target.attachedToTarget")).toBe(true)
 
       const second = yield* Effect.promise(() => connectExtension(relay.url))
-      second.send(JSON.stringify({ method: "hello", params: { version: "0.0.22", protocolVersion: 1 } }))
+      second.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2 } }))
       second.send(JSON.stringify({ method: "ready" }))
       const status = yield* Effect.promise(() => waitForStatus(relay.url, (candidate) => candidate.connected === true))
 
@@ -90,7 +109,7 @@ describe("relay extension handshake", () => {
       const relay = yield* startRelay({ port, sessionCatalogPath: null })
       const extension = yield* Effect.promise(() => connectRespondingExtension(relay.url, undefined, "synthetic reconciliation failure"))
       const closed = waitForClose(extension)
-      extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.22", protocolVersion: 1 } }))
+      extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2 } }))
       extension.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 7 } }))
       extension.send(JSON.stringify({ method: "ready" }))
 

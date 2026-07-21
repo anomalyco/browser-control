@@ -93,8 +93,9 @@ export type OffscreenResult =
 export type OffscreenRecordingChunkMessage = {
   readonly action: "recording.chunk"
   readonly tabId: number
+  readonly sequence: number
   readonly data?: readonly number[]
-  readonly final?: boolean
+  readonly final: boolean
 }
 
 export type OffscreenRecordingCancelledMessage = {

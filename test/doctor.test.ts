@@ -75,12 +75,12 @@ describe("extensionProtocolCheck", () => {
       value: {
         connected: true,
         version: "9.4.2",
-        protocolVersion: 1,
+        protocolVersion: 2,
         protocolCompatible: true,
         protocolLegacy: false,
         activeTargets: 0,
       },
-    })).toMatchObject({ status: "ok", message: "runtime 1 is compatible with relay 1" })
+    })).toMatchObject({ status: "ok", message: "runtime 2 is compatible with relay 2" })
   })
 
   it("fails an incompatible extension protocol", () => {
@@ -89,11 +89,11 @@ describe("extensionProtocolCheck", () => {
       value: {
         connected: false,
         version: "10.0.0",
-        protocolVersion: 2,
+        protocolVersion: 3,
         protocolCompatible: false,
         protocolLegacy: false,
         activeTargets: 0,
       },
-    })).toMatchObject({ status: "fail", message: "runtime 2 is incompatible with relay 1" })
+    })).toMatchObject({ status: "fail", message: "runtime 3 is incompatible with relay 2" })
   })
 })

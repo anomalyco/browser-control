@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process"
+import crypto from "node:crypto"
 import { once } from "node:events"
 import fs from "node:fs/promises"
 import path from "node:path"
@@ -7,6 +8,7 @@ import { mjpegMatroskaFrame, mjpegMatroskaHeader } from "./mjpeg-matroska.ts"
 import type { ExtensionCommand, JsonObject } from "./protocol.ts"
 import { getObject } from "./relay-helpers.ts"
 import type { ConnectedTarget } from "./relay-types.ts"
+import { decodeRecordingFrame } from "./recording-protocol.ts"
 
 const defaultMaxDurationMs = 15 * 60 * 1_000
 const defaultCdpFrameRate = 25
@@ -15,6 +17,8 @@ const maxPendingCdpFrames = 30
 const maxCdpWidth = 1_280
 const maxCdpHeight = 720
 const cdpJpegQuality = 80
+const maxPendingTabCaptureBytes = 16 * 1024 * 1024
+const maxTabCaptureOutputBytes = 1024 * 1024 * 1024
 
 export type RecordingMode = "auto" | "tab-capture" | "cdp"
 export type ActiveRecordingMode = "tab-capture" | "cdp"
@@ -106,7 +110,17 @@ type ActiveRecordingBase = {
 type TabCaptureRecording = ActiveRecordingBase & {
   mode: "tab-capture"
   artifactType: "webm"
-  chunks: Buffer[]
+  temporaryPath: string
+  file: Awaited<ReturnType<typeof fs.open>>
+  expectedSequence: number
+  receivedBytes: number
+  pendingWriteBytes: number
+  writePromise: Promise<void>
+  writeError?: Error
+  stopping: boolean
+  finalized: boolean
+  stopPromise?: Promise<RecordingStopResult>
+  cleanupPromise?: Promise<void>
 }
 
 type CdpRecording = ActiveRecordingBase & {
@@ -193,7 +207,7 @@ type ExtensionStatusResult = {
 export class RecordingRelay {
   private readonly activeRecordings = new Map<number, ActiveRecording>()
   private readonly startingRecordings = new Map<number, StartingRecording>()
-  private lastRecordingMetadataTabId: number | undefined
+  private readonly finalizingRecordings = new Set<Promise<void>>()
 
   constructor(readonly options: {
     readonly sendToExtension: (command: Omit<ExtensionCommand, "id">) => Promise<JsonObject>
@@ -239,13 +253,23 @@ export class RecordingRelay {
     if (recording.mode === "cdp") {
       return this.stopCdpRecording(recording)
     }
+    if (recording.stopPromise) return recording.stopPromise
+    const stopPromise = this.stopTabCaptureRecording(recording)
+    recording.stopPromise = stopPromise
+    return stopPromise
+  }
 
+  private async stopTabCaptureRecording(recording: TabCaptureRecording): Promise<RecordingStopResult> {
     let stopTimeout: ReturnType<typeof setTimeout> | undefined
     const finalResult = new Promise<RecordingStopResult>((resolve) => {
       stopTimeout = setTimeout(() => {
         delete recording.resolveStop
         if (this.activeRecordings.get(recording.tabId) === recording) {
-          this.cleanupRecording(recording.tabId)
+          recording.stopping = true
+          if (this.options.isExtensionConnected()) {
+            void this.options.sendToExtension({ method: "recording.cancel", params: { tabId: recording.tabId } }).catch(() => {})
+          }
+          void this.cleanupRecording(recording.tabId)
         }
         resolve({ success: false, error: "Timeout waiting for recording data" })
       }, 30_000)
@@ -263,15 +287,16 @@ export class RecordingRelay {
       if (!result.success) {
         if (stopTimeout) clearTimeout(stopTimeout)
         delete recording.resolveStop
-        this.cleanupRecording(recording.tabId)
+        await this.failTabCaptureRecording(recording, result.error)
         return result
       }
       return await finalResult
     } catch (error) {
       if (stopTimeout) clearTimeout(stopTimeout)
       delete recording.resolveStop
-      this.cleanupRecording(recording.tabId)
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
+      const message = error instanceof Error ? error.message : String(error)
+      await this.failTabCaptureRecording(recording, message)
+      return { success: false, error: message }
     }
   }
 
@@ -298,15 +323,12 @@ export class RecordingRelay {
         method: "recording.status",
         params: { tabId: recording.tabId },
       }))
-      const size = recording.chunks.reduce((total, chunk) => {
-        return total + chunk.byteLength
-      }, 0)
       return {
         isRecording: result.isRecording,
         tabId: recording.tabId,
         startedAt: result.startedAt ?? recording.startedAt,
         path: recording.outputPath,
-        size,
+        size: recording.receivedBytes,
         mode: "tab-capture",
         artifactType: "webm",
       }
@@ -318,9 +340,7 @@ export class RecordingRelay {
         tabId: recording.tabId,
         startedAt: recording.startedAt,
         path: recording.outputPath,
-        size: recording.chunks.reduce((total, chunk) => {
-          return total + chunk.byteLength
-        }, 0),
+        size: recording.receivedBytes,
         mode: "tab-capture",
         artifactType: "webm",
       }
@@ -343,15 +363,18 @@ export class RecordingRelay {
       return { success: true }
     }
     if (!this.options.isExtensionConnected()) {
-      this.cleanupRecording(recording.tabId)
+      recording.resolveStop?.({ success: false, error: "Recording was cancelled" })
+      await this.cleanupRecording(recording.tabId)
       return { success: false, error: "Browser Control extension is not connected" }
     }
     try {
       const result = await this.options.sendToExtension({ method: "recording.cancel", params: { tabId: recording.tabId } })
-      this.cleanupRecording(recording.tabId)
+      recording.resolveStop?.({ success: false, error: "Recording was cancelled" })
+      await this.cleanupRecording(recording.tabId)
       return parseCancelResult(result)
     } catch (error) {
-      this.cleanupRecording(recording.tabId)
+      recording.resolveStop?.({ success: false, error: "Recording was cancelled" })
+      await this.cleanupRecording(recording.tabId)
       return { success: false, error: error instanceof Error ? error.message : String(error) }
     }
   }
@@ -374,8 +397,9 @@ export class RecordingRelay {
         await this.cancelCdpRecording(recording)
         return
       }
-      this.cleanupRecording(recording.tabId)
+      await this.cleanupRecording(recording.tabId)
     }))
+    await Promise.all(this.finalizingRecordings)
   }
 
   async abortRecordingForTab(options: { readonly tabId: number; readonly reason: string }): Promise<void> {
@@ -398,24 +422,7 @@ export class RecordingRelay {
       await this.cancelCdpRecording(recording)
       return
     }
-    this.cleanupRecording(recording.tabId)
-  }
-
-  handleRecordingData(message: JsonObject): void {
-    const params = getObject(message.params)
-    const tabId = typeof params?.tabId === "number" ? params.tabId : undefined
-    if (tabId === undefined) {
-      return
-    }
-    if (params?.final !== true) {
-      this.lastRecordingMetadataTabId = tabId
-      return
-    }
-    const recording = this.activeRecordings.get(tabId)
-    if (!recording || recording.mode !== "tab-capture") {
-      return
-    }
-    void this.finishRecording(recording)
+    await this.cleanupRecording(recording.tabId)
   }
 
   handleRecordingCancelled(message: JsonObject): void {
@@ -428,7 +435,7 @@ export class RecordingRelay {
     if (recording?.resolveStop) {
       recording.resolveStop({ success: false, error: "Recording was cancelled" })
     }
-    this.cleanupRecording(tabId)
+    void this.cleanupRecording(tabId)
   }
 
   handleDebuggerEvent(options: { readonly tabId: number; readonly method: string; readonly params: JsonObject | undefined }): boolean {
@@ -482,37 +489,72 @@ export class RecordingRelay {
   }
 
   handleBinaryData(data: Buffer): void {
-    const tabId = this.lastRecordingMetadataTabId
-    this.lastRecordingMetadataTabId = undefined
-    if (tabId === undefined) {
-      return
-    }
-    const recording = this.activeRecordings.get(tabId)
+    const frame = decodeRecordingFrame(data)
+    const recording = this.activeRecordings.get(frame.tabId)
     if (!recording || recording.mode !== "tab-capture") {
       return
     }
-    recording.chunks.push(Buffer.from(data))
+    if (recording.stopping || recording.finalized) return
+    if (frame.sequence !== recording.expectedSequence) {
+      void this.failTabCaptureRecording(recording, `Recording frame sequence ${frame.sequence} did not match expected ${recording.expectedSequence}`)
+      return
+    }
+    recording.expectedSequence += 1
+    if (frame.final) {
+      recording.stopping = true
+      if (recording.maxDurationTimer) clearTimeout(recording.maxDurationTimer)
+      this.activeRecordings.delete(frame.tabId)
+      const finalizing = this.finishTabCaptureRecording(recording).finally(() => {
+        this.finalizingRecordings.delete(finalizing)
+      })
+      this.finalizingRecordings.add(finalizing)
+      void finalizing
+      return
+    }
+    const payload = Buffer.from(frame.payload)
+    if (recording.receivedBytes + payload.byteLength > maxTabCaptureOutputBytes) {
+      void this.failTabCaptureRecording(recording, `Tab capture exceeds ${maxTabCaptureOutputBytes} bytes`)
+      return
+    }
+    if (recording.pendingWriteBytes + payload.byteLength > maxPendingTabCaptureBytes) {
+      void this.failTabCaptureRecording(recording, `Tab capture pending writes exceed ${maxPendingTabCaptureBytes} bytes`)
+      return
+    }
+    recording.receivedBytes += payload.byteLength
+    recording.pendingWriteBytes += payload.byteLength
+    recording.writePromise = recording.writePromise.then(async () => {
+      const result = await recording.file.write(payload)
+      if (result.bytesWritten !== payload.byteLength) throw new Error(`Short recording write: ${result.bytesWritten}/${payload.byteLength}`)
+    }).catch((error: unknown) => {
+      recording.writeError ??= error instanceof Error ? error : new Error(String(error))
+    }).finally(() => {
+      recording.pendingWriteBytes -= payload.byteLength
+    })
   }
 
-  private async finishRecording(recording: TabCaptureRecording): Promise<void> {
+  private async finishTabCaptureRecording(recording: TabCaptureRecording): Promise<void> {
     try {
-      const size = recording.chunks.reduce((total, chunk) => {
-        return total + chunk.byteLength
-      }, 0)
-      await fs.writeFile(recording.outputPath, Buffer.concat(recording.chunks))
+      await recording.writePromise
+      if (recording.writeError) throw recording.writeError
+      if (recording.receivedBytes === 0) throw new Error("No tab capture data was received")
+      await recording.file.sync()
+      await recording.file.close()
+      await fs.rename(recording.temporaryPath, recording.outputPath)
+      recording.finalized = true
+      const stat = await fs.stat(recording.outputPath)
       recording.resolveStop?.({
         success: true,
         tabId: recording.tabId,
         duration: Date.now() - recording.startedAt,
         path: recording.outputPath,
-        size,
+        size: stat.size,
         mode: "tab-capture",
         artifactType: "webm",
       })
     } catch (error) {
       recording.resolveStop?.({ success: false, error: error instanceof Error ? error.message : String(error) })
     } finally {
-      this.cleanupRecording(recording.tabId)
+      await this.cleanupTabCaptureRecording(recording)
     }
   }
 
@@ -542,16 +584,40 @@ export class RecordingRelay {
     return recordings[0]
   }
 
-  private cleanupRecording(tabId: number): void {
+  private async cleanupRecording(tabId: number): Promise<void> {
     const recording = this.activeRecordings.get(tabId)
+    if (!recording) return
     if (recording?.maxDurationTimer) {
       clearTimeout(recording.maxDurationTimer)
     }
-    if (recording?.mode === "cdp") {
-      void this.cleanupCdpRecording(recording)
+    if (recording.mode === "cdp") {
+      await this.cleanupCdpRecording(recording)
       return
     }
+    if (recording.cleanupPromise) return recording.cleanupPromise
     this.activeRecordings.delete(tabId)
+    return this.cleanupTabCaptureRecording(recording)
+  }
+
+  private cleanupTabCaptureRecording(recording: TabCaptureRecording): Promise<void> {
+    if (recording.cleanupPromise) return recording.cleanupPromise
+    recording.cleanupPromise = (async () => {
+      await recording.writePromise.catch(() => {})
+      await recording.file.close().catch(() => {})
+      if (!recording.finalized) await fs.rm(recording.temporaryPath, { force: true }).catch(() => {})
+    })()
+    return recording.cleanupPromise
+  }
+
+  private async failTabCaptureRecording(recording: TabCaptureRecording, message: string): Promise<void> {
+    if (recording.stopping || recording.finalized) return
+    recording.stopping = true
+    recording.resolveStop?.({ success: false, error: message })
+    const cleanup = this.cleanupRecording(recording.tabId)
+    if (this.options.isExtensionConnected()) {
+      await this.options.sendToExtension({ method: "recording.cancel", params: { tabId: recording.tabId } }).catch(() => {})
+    }
+    await cleanup
   }
 
   private async startReservedRecording(options: RecordingStartOptions, starting: StartingRecording): Promise<RecordingStartResult> {
@@ -565,23 +631,40 @@ export class RecordingRelay {
 
     await fs.mkdir(path.dirname(options.outputPath), { recursive: true })
     if (starting.cancelled) return { success: false, error: "Recording was cancelled while starting" }
-    const result = parseExtensionStartResult(await this.options.sendToExtension({
-      method: "recording.start",
-      params: recordingStartParams(options),
-    }))
-    if (!result.success) return result
-    if (starting.cancelled) {
-      await this.options.sendToExtension({ method: "recording.cancel", params: { tabId: result.tabId } }).catch(() => {})
-      return { success: false, error: "Recording was cancelled while starting" }
+    const temporaryPath = `${options.outputPath}.partial-${process.pid}-${crypto.randomUUID()}`
+    const file = await fs.open(temporaryPath, "wx", 0o600)
+    let result: ExtensionStartResult
+    try {
+      result = parseExtensionStartResult(await this.options.sendToExtension({
+        method: "recording.start",
+        params: recordingStartParams(options),
+      }))
+    } catch (error) {
+      await file.close().catch(() => {})
+      await fs.rm(temporaryPath, { force: true }).catch(() => {})
+      throw error
+    }
+    if (!result.success || starting.cancelled) {
+      if (result.success) await this.options.sendToExtension({ method: "recording.cancel", params: { tabId: result.tabId } }).catch(() => {})
+      await file.close().catch(() => {})
+      await fs.rm(temporaryPath, { force: true }).catch(() => {})
+      return result.success ? { success: false, error: "Recording was cancelled while starting" } : result
     }
 
-    const recording: ActiveRecording = {
+    const recording: TabCaptureRecording = {
       tabId: result.tabId,
       ...(options.sessionId ? { sessionId: options.sessionId } : {}),
       outputPath: options.outputPath,
+      temporaryPath,
+      file,
       mode: "tab-capture",
       artifactType: "webm",
-      chunks: [],
+      expectedSequence: 0,
+      receivedBytes: 0,
+      pendingWriteBytes: 0,
+      writePromise: Promise.resolve(),
+      stopping: false,
+      finalized: false,
       startedAt: result.startedAt,
     }
     this.armMaxDuration(recording, options.maxDurationMs)

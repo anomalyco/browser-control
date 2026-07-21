@@ -1,4 +1,5 @@
 import { extensionProtocolVersion, parseExtensionCommand, type ExtensionCommand as ShimCommand, type JsonObject } from "../../src/protocol.ts"
+import { encodeRecordingFrame } from "../../src/recording-protocol.ts"
 import type {
   OffscreenCancelRecordingResult,
   OffscreenOutgoingMessage,
@@ -13,6 +14,7 @@ import { debuggerDetachedEvent } from "./debugger-detach.ts"
 const relayHost = "127.0.0.1"
 const relayPort = 19989
 const offscreenDocumentPath = "offscreen.html"
+const maxRecordingSocketBufferedBytes = 16 * 1024 * 1024
 
 let socket: WebSocket | undefined
 let connectionPromise: Promise<void> | undefined
@@ -72,9 +74,12 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   sendMessage({ method: "tabs.removed", params: { tabId } })
 })
 
-chrome.runtime.onMessage.addListener((message: unknown, sender) => {
-  handleRuntimeMessage(message, sender)
-  return false
+chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
+  void handleRuntimeMessage(message, sender).then(
+    () => sendResponse({ success: true }),
+    (error: unknown) => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }),
+  )
+  return true
 })
 
 connect()
@@ -373,10 +378,10 @@ async function stopRecording(params: JsonObject | undefined): Promise<JsonObject
     return { success: false, error: "No active recording for this tab" }
   }
   const result = await chrome.runtime.sendMessage({ action: "recording.stop", tabId }) as OffscreenStopRecordingResult
+  activeRecordings.delete(tabId)
   if (!result.success) {
     return { success: false, error: result.error }
   }
-  activeRecordings.delete(tabId)
   return { success: true, tabId: result.tabId, duration: result.duration }
 }
 
@@ -522,7 +527,7 @@ async function guardedUngroupBrowserControlTab(tabId: number): Promise<void> {
   }
 }
 
-function handleRuntimeMessage(message: unknown, sender: chrome.runtime.MessageSender): void {
+async function handleRuntimeMessage(message: unknown, sender: chrome.runtime.MessageSender): Promise<void> {
   if (!message || typeof message !== "object" || Array.isArray(message)) {
     return
   }
@@ -541,14 +546,12 @@ function handleRuntimeMessage(message: unknown, sender: chrome.runtime.MessageSe
   }
   const offscreenMessage = message as OffscreenOutgoingMessage
   if (offscreenMessage.action === "recording.chunk") {
-    if (offscreenMessage.data) {
-      sendMessage({ method: "recording.data", params: { tabId: offscreenMessage.tabId } })
-      sendBinary(Uint8Array.from(offscreenMessage.data))
-      return
-    }
-    if (offscreenMessage.final) {
-      sendMessage({ method: "recording.data", params: { tabId: offscreenMessage.tabId, final: true } })
-    }
+    await sendBinaryAfterConnection(encodeRecordingFrame({
+      tabId: offscreenMessage.tabId,
+      sequence: offscreenMessage.sequence,
+      final: offscreenMessage.final,
+      payload: Uint8Array.from(offscreenMessage.data ?? []),
+    }))
     return
   }
   if (offscreenMessage.action === "recording.cancelled") {
@@ -580,10 +583,19 @@ async function sendMessageAfterConnection(message: JsonObject): Promise<void> {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
 }
 
-function sendBinary(data: Uint8Array): void {
-  if (socket?.readyState === WebSocket.OPEN) {
-    socket.send(data.buffer)
+async function sendBinaryAfterConnection(data: Uint8Array): Promise<void> {
+  if (socket?.readyState !== WebSocket.OPEN) await ensureConnection()
+  const currentSocket = socket
+  if (currentSocket?.readyState !== WebSocket.OPEN) throw new Error("Browser Control relay is not connected")
+  const deadline = Date.now() + 30_000
+  while (currentSocket.bufferedAmount + data.byteLength > maxRecordingSocketBufferedBytes) {
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    if (socket !== currentSocket || currentSocket.readyState !== WebSocket.OPEN) {
+      throw new Error("Browser Control relay disconnected while sending recording data")
+    }
+    if (Date.now() >= deadline) throw new Error("Timed out sending recording data to the Browser Control relay")
   }
+  currentSocket.send(data.buffer)
 }
 
 function isAlreadyAttachedError(error: unknown): boolean {

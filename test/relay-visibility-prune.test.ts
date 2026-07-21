@@ -182,7 +182,7 @@ function connectFakeExtension(relayUrl: string): Promise<WebSocket & { readonly 
     const commands: ExtensionCommand[] = []
     const socket = new WebSocket(`${relayUrl.replace(/^http/, "ws")}/extension`, { origin: "chrome-extension://browser-control-test" })
     socket.on("open", () => {
-      socket.send(JSON.stringify({ method: "hello", params: { version: "test" } }))
+      socket.send(JSON.stringify({ method: "hello", params: { version: "test", protocolVersion: 2 } }))
       resolve(Object.assign(socket, { commands }))
     })
     socket.on("error", reject)

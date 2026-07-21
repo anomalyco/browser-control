@@ -33,10 +33,10 @@ describe("protocol validation", () => {
     expect(isExtensionEvent(parseJsonObject('{"method":"unknown"}'))).toBe(false)
   })
 
-  it("treats legacy hellos as protocol v1 and rejects unknown protocol versions", () => {
+  it("rejects legacy hellos and unknown protocol versions", () => {
     expect(extensionProtocolCompatibility(undefined)).toEqual({
-      version: extensionProtocolVersion,
-      compatible: true,
+      version: 1,
+      compatible: false,
       legacy: true,
     })
     expect(extensionProtocolCompatibility(extensionProtocolVersion)).toEqual({

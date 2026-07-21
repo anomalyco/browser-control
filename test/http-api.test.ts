@@ -44,7 +44,7 @@ describe("HTTP request schemas", () => {
       extensionStatus: () => ({
         connected: true,
         version: "9.4.2",
-        protocolVersion: 1,
+        protocolVersion: 2,
         protocolCompatible: true,
         protocolLegacy: false,
       }),
@@ -68,7 +68,7 @@ describe("HTTP request schemas", () => {
       expect(extension).toMatchObject({
         connected: true,
         version: "9.4.2",
-        protocolVersion: 1,
+        protocolVersion: 2,
         protocolCompatible: true,
         protocolLegacy: false,
       })

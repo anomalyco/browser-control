@@ -640,7 +640,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
             return
           }
           if (isBinary) {
-            recordingRelay.handleBinaryData(rawDataToBuffer(data))
+            try {
+              recordingRelay.handleBinaryData(rawDataToBuffer(data))
+            } catch {
+              socket.close(1002, "Invalid recording frame")
+            }
             return
           }
           handleExtensionMessage(socket, data.toString(), socketGeneration, announcedRootTabIds)
@@ -695,7 +699,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return undefined
     }
     const protocol = extensionProtocolCompatibility(message.params?.protocolVersion)
-    if (!protocol.compatible && extensionRpc.connected) {
+    if (!protocol.compatible && extensionRpc.protocolCompatible === true) {
       socket.close(4003, "Extension protocol incompatible")
       return extensionGeneration
     }
@@ -808,10 +812,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       if (tabId) {
         detachTargetState(tabId)
       }
-      return
-    }
-    if (extensionMethod === "recording.data") {
-      recordingRelay.handleRecordingData(message)
       return
     }
     if (extensionMethod === "recording.cancelled") {

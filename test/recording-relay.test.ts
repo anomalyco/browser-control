@@ -3,12 +3,242 @@ import os from "node:os"
 import path from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { RecordingRelay, type VideoEncoder } from "../src/recording-relay.ts"
+import { encodeRecordingFrame } from "../src/recording-protocol.ts"
 
 const temporaryPaths: string[] = []
 
 afterEach(async () => {
   vi.useRealTimers()
   await Promise.all(temporaryPaths.splice(0).map((temporaryPath) => fs.rm(temporaryPath, { force: true, recursive: true })))
+})
+
+describe("RecordingRelay tab capture", () => {
+  it("streams intrinsically framed chunks to an atomic output", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "browser-control-tab-recording-"))
+    temporaryPaths.push(directory)
+    const outputPath = path.join(directory, "demo.webm")
+    let relay: RecordingRelay
+    relay = new RecordingRelay({
+      isExtensionConnected: () => true,
+      sendDebuggerCommand: async () => ({}),
+      sendToExtension: async (command) => {
+        if (command.method === "recording.start") {
+          return { success: true, tabId: 7, startedAt: 1_000, mimeType: "video/webm" }
+        }
+        if (command.method === "recording.stop") {
+          queueMicrotask(() => relay.handleBinaryData(Buffer.from(encodeRecordingFrame({
+            tabId: 7,
+            sequence: 2,
+            final: true,
+            payload: new Uint8Array(),
+          }))))
+          return { success: true, tabId: 7, duration: 100 }
+        }
+        return { success: true }
+      },
+    })
+
+    await expect(relay.startRecording({ tabId: 7, owner: "user", outputPath })).resolves.toMatchObject({ success: true })
+    relay.handleBinaryData(Buffer.from(encodeRecordingFrame({
+      tabId: 7,
+      sequence: 0,
+      final: false,
+      payload: new TextEncoder().encode("first"),
+    })))
+    relay.handleBinaryData(Buffer.from(encodeRecordingFrame({
+      tabId: 7,
+      sequence: 1,
+      final: false,
+      payload: new TextEncoder().encode("second"),
+    })))
+
+    await expect(relay.stopRecording({ tabId: 7 })).resolves.toMatchObject({
+      success: true,
+      size: 11,
+      mode: "tab-capture",
+    })
+    expect(await fs.readFile(outputPath, "utf8")).toBe("firstsecond")
+    expect((await fs.readdir(directory)).some((entry) => entry.includes(".partial-"))).toBe(false)
+  })
+
+  it("streams output larger than one frame without retaining the complete recording", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "browser-control-tab-recording-"))
+    temporaryPaths.push(directory)
+    const outputPath = path.join(directory, "large.webm")
+    let relay: RecordingRelay
+    relay = new RecordingRelay({
+      isExtensionConnected: () => true,
+      sendDebuggerCommand: async () => ({}),
+      sendToExtension: async (command) => {
+        if (command.method === "recording.start") return { success: true, tabId: 7, startedAt: 1_000, mimeType: "video/webm" }
+        if (command.method === "recording.stop") {
+          queueMicrotask(() => relay.handleBinaryData(Buffer.from(encodeRecordingFrame({
+            tabId: 7,
+            sequence: 2,
+            final: true,
+            payload: new Uint8Array(),
+          }))))
+          return { success: true, tabId: 7, duration: 100 }
+        }
+        return { success: true }
+      },
+    })
+    await relay.startRecording({ tabId: 7, owner: "user", outputPath })
+    const chunk = new Uint8Array(3 * 1024 * 1024).fill(0x5a)
+    relay.handleBinaryData(Buffer.from(encodeRecordingFrame({ tabId: 7, sequence: 0, final: false, payload: chunk })))
+    relay.handleBinaryData(Buffer.from(encodeRecordingFrame({ tabId: 7, sequence: 1, final: false, payload: chunk })))
+
+    await expect(relay.stopRecording({ tabId: 7 })).resolves.toMatchObject({ success: true, size: 6 * 1024 * 1024 })
+    const contents = await fs.readFile(outputPath)
+    expect(contents.byteLength).toBe(6 * 1024 * 1024)
+    expect(contents[0]).toBe(0x5a)
+    expect(contents.at(-1)).toBe(0x5a)
+  })
+
+  it("keeps interleaved tab frames isolated", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "browser-control-tab-recording-"))
+    temporaryPaths.push(directory)
+    const outputs = new Map([[1, path.join(directory, "one.webm")], [2, path.join(directory, "two.webm")]])
+    let relay: RecordingRelay
+    relay = new RecordingRelay({
+      isExtensionConnected: () => true,
+      sendDebuggerCommand: async () => ({}),
+      sendToExtension: async (command) => {
+        const tabId = typeof command.params?.tabId === "number" ? command.params.tabId : 0
+        if (command.method === "recording.start") return { success: true, tabId, startedAt: 1_000, mimeType: "video/webm" }
+        if (command.method === "recording.stop") {
+          queueMicrotask(() => relay.handleBinaryData(Buffer.from(encodeRecordingFrame({
+            tabId,
+            sequence: 1,
+            final: true,
+            payload: new Uint8Array(),
+          }))))
+          return { success: true, tabId, duration: 100 }
+        }
+        return { success: true }
+      },
+    })
+
+    await relay.startRecording({ tabId: 1, owner: "user", outputPath: outputs.get(1) ?? "" })
+    await relay.startRecording({ tabId: 2, owner: "user", outputPath: outputs.get(2) ?? "" })
+    relay.handleBinaryData(Buffer.from(encodeRecordingFrame({ tabId: 2, sequence: 0, final: false, payload: Uint8Array.of(2) })))
+    relay.handleBinaryData(Buffer.from(encodeRecordingFrame({ tabId: 1, sequence: 0, final: false, payload: Uint8Array.of(1) })))
+
+    await Promise.all([relay.stopRecording({ tabId: 1 }), relay.stopRecording({ tabId: 2 })])
+    expect(Array.from(await fs.readFile(outputs.get(1) ?? ""))).toEqual([1])
+    expect(Array.from(await fs.readFile(outputs.get(2) ?? ""))).toEqual([2])
+  })
+
+  it("shares an in-flight stop across concurrent callers", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "browser-control-tab-recording-"))
+    temporaryPaths.push(directory)
+    let stopCalls = 0
+    let relay: RecordingRelay
+    relay = new RecordingRelay({
+      isExtensionConnected: () => true,
+      sendDebuggerCommand: async () => ({}),
+      sendToExtension: async (command) => {
+        if (command.method === "recording.start") return { success: true, tabId: 7, startedAt: 1_000, mimeType: "video/webm" }
+        if (command.method === "recording.stop") {
+          stopCalls += 1
+          queueMicrotask(() => relay.handleBinaryData(Buffer.from(encodeRecordingFrame({
+            tabId: 7,
+            sequence: 1,
+            final: true,
+            payload: new Uint8Array(),
+          }))))
+          return { success: true, tabId: 7, duration: 100 }
+        }
+        return { success: true }
+      },
+    })
+    await relay.startRecording({ tabId: 7, owner: "user", outputPath: path.join(directory, "shared.webm") })
+    relay.handleBinaryData(Buffer.from(encodeRecordingFrame({ tabId: 7, sequence: 0, final: false, payload: Uint8Array.of(1) })))
+
+    const [first, second] = await Promise.all([
+      relay.stopRecording({ tabId: 7 }),
+      relay.stopRecording({ tabId: 7 }),
+    ])
+    expect(first).toEqual(second)
+    expect(first).toMatchObject({ success: true, size: 1 })
+    expect(stopCalls).toBe(1)
+  })
+
+  it("does not let cancellation race a stream that is already finalizing", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "browser-control-tab-recording-"))
+    temporaryPaths.push(directory)
+    const outputPath = path.join(directory, "finalizing.webm")
+    const relay = new RecordingRelay({
+      isExtensionConnected: () => true,
+      sendDebuggerCommand: async () => ({}),
+      sendToExtension: async (command) => command.method === "recording.start"
+        ? { success: true, tabId: 7, startedAt: 1_000, mimeType: "video/webm" }
+        : { success: true },
+    })
+    await relay.startRecording({ tabId: 7, owner: "user", outputPath })
+    relay.handleBinaryData(Buffer.from(encodeRecordingFrame({ tabId: 7, sequence: 0, final: false, payload: Uint8Array.of(1, 2, 3) })))
+    relay.handleBinaryData(Buffer.from(encodeRecordingFrame({ tabId: 7, sequence: 1, final: true, payload: new Uint8Array() })))
+
+    await expect(relay.cancelRecording({ tabId: 7 })).resolves.toEqual({ success: true })
+    await relay.cleanupAll("test shutdown")
+    expect(Array.from(await fs.readFile(outputPath))).toEqual([1, 2, 3])
+    expect((await fs.readdir(directory)).some((entry) => entry.includes(".partial-"))).toBe(false)
+  })
+
+  it("aborts and removes partial output on a sequence violation", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "browser-control-tab-recording-"))
+    temporaryPaths.push(directory)
+    const outputPath = path.join(directory, "bad.webm")
+    const commands: string[] = []
+    const relay = new RecordingRelay({
+      isExtensionConnected: () => true,
+      sendDebuggerCommand: async () => ({}),
+      sendToExtension: async (command) => {
+        commands.push(command.method)
+        return command.method === "recording.start"
+          ? { success: true, tabId: 7, startedAt: 1_000, mimeType: "video/webm" }
+          : { success: true }
+      },
+    })
+    await relay.startRecording({ tabId: 7, owner: "user", outputPath })
+
+    relay.handleBinaryData(Buffer.from(encodeRecordingFrame({ tabId: 7, sequence: 1, final: false, payload: Uint8Array.of(1) })))
+    await vi.waitFor(async () => {
+      expect((await relay.statusRecording({ tabId: 7 })).isRecording).toBe(false)
+    })
+
+    expect(commands).toContain("recording.cancel")
+    await vi.waitFor(async () => {
+      expect((await fs.readdir(directory)).some((entry) => entry.includes(".partial-"))).toBe(false)
+    })
+  })
+
+  it("aborts when pending disk writes exceed the memory bound", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "browser-control-tab-recording-"))
+    temporaryPaths.push(directory)
+    const commands: string[] = []
+    const relay = new RecordingRelay({
+      isExtensionConnected: () => true,
+      sendDebuggerCommand: async () => ({}),
+      sendToExtension: async (command) => {
+        commands.push(command.method)
+        return command.method === "recording.start"
+          ? { success: true, tabId: 7, startedAt: 1_000, mimeType: "video/webm" }
+          : { success: true }
+      },
+    })
+    await relay.startRecording({ tabId: 7, owner: "user", outputPath: path.join(directory, "bounded.webm") })
+    const chunk = new Uint8Array(4 * 1024 * 1024)
+    for (let sequence = 0; sequence < 5; sequence += 1) {
+      relay.handleBinaryData(Buffer.from(encodeRecordingFrame({ tabId: 7, sequence, final: false, payload: chunk })))
+    }
+
+    await vi.waitFor(async () => {
+      expect((await relay.statusRecording({ tabId: 7 })).isRecording).toBe(false)
+      expect((await fs.readdir(directory)).some((entry) => entry.includes(".partial-"))).toBe(false)
+    })
+    expect(commands).toContain("recording.cancel")
+  })
 })
 
 describe("RecordingRelay CDP screencast", () => {

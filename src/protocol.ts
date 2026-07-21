@@ -4,7 +4,7 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { readonly [key: string]: 
 
 export type JsonObject = { readonly [key: string]: JsonValue }
 
-export const extensionProtocolVersion = 1
+export const extensionProtocolVersion = 2
 export const legacyExtensionProtocolVersion = 1
 
 export type ExtensionProtocolCompatibility = {
@@ -104,7 +104,6 @@ export type ExtensionEvent = {
     | "tabs.removed"
     | "pong"
     | "log"
-    | "recording.data"
     | "recording.cancelled"
     | "pageStatus.requested"
   readonly params?: JsonObject
@@ -149,7 +148,6 @@ const extensionEventMethods = new Set<ExtensionEvent["method"]>([
   "tabs.removed",
   "pong",
   "log",
-  "recording.data",
   "recording.cancelled",
   "pageStatus.requested",
 ])
