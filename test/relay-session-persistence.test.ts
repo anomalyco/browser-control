@@ -260,7 +260,7 @@ async function openProtocolExtension(relayUrl: string, targetId?: string): Promi
       : {}
     extension.send(JSON.stringify({ id: command.id, result }))
   })
-  extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.22", protocolVersion: 1 } }))
+  extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2 } }))
   if (targetId) extension.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 7 } }))
   extension.send(JSON.stringify({ method: "ready" }))
   return Object.assign(extension, { commands })
@@ -275,7 +275,7 @@ async function openFakeExtension(relayUrl: string, targetId: string): Promise<We
       : {}
     extension.send(JSON.stringify({ id: command.id, result }))
   })
-  extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.17" } }))
+  extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2 } }))
   extension.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 7 } }))
   return extension
 }

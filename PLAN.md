@@ -17,8 +17,8 @@ Agent / MCP client / CLI
   -> user's Chromium-family browser tabs
 ```
 
-The end-to-end path is working. Current work should finish CDP routing
-correctness, simplify the relay, and make recording robust. New features
+The end-to-end path is working. Current work should simplify the relay and make
+recording robust. New features
 should not weaken the code-first interface or move behavior into the extension
 without a concrete browser-API reason.
 
@@ -27,60 +27,39 @@ without a concrete browser-API reason.
 Work these in order unless field evidence changes the priority. Every item
 should land with unit or smoke evidence appropriate to the behavior.
 
-### 1. Finish CDP routing correctness
+### 1. Split the relay into testable responsibilities
 
-- Emit child `Target.detachedFromTarget` events when a root target detaches so
-  clients cannot retain orphaned child sessions.
-- Remove arbitrary-first-target fallbacks from `Target.getTargetInfo` and other
-  sessionless CDP routing.
-- Store `autoAttachParams` per client instead of using global
-  last-writer-wins state.
+Extract cohesive modules from `makeRelay` without changing the protocol:
+
+- Deepen `CdpRouter` with command classification, guardrails, and compatibility
+  shims.
+- `ExtensionEventHandler`: extension event decoding and registry mutation.
+
+`CdpClientPool` now owns client sockets, per-client attachment sets, aliases,
+auto-attach settings, and connection generations. `CdpRouter` now owns
+client-relative visibility, target inventory, target and alias resolution, and
+exact root-versus-child Chrome session routing.
+
+The goal is browser-free testing of routing and lifecycle behavior, not smaller
+files for their own sake. Keep orchestration in `makeRelay` and avoid exposing
+internal protocol details to the CLI or MCP server.
 
 Verification:
 
 - Extend reconnect, OOPIF, and multi-client smoke cases to cover root detach and
   conflicting client auto-attach settings.
 
-### 2. Split the relay into testable responsibilities
+### 2. Extend recording surfaces
 
-Extract cohesive modules from `makeRelay` without changing the protocol:
-
-- `CdpRouter`: command routing, guardrails, and compatibility shims.
-- `ExtensionEventHandler`: extension event decoding and registry mutation.
-- `CdpClientPool`: client sockets, per-client attachment sets, and connection
-  generations.
-
-The goal is browser-free testing of routing and lifecycle behavior, not smaller
-files for their own sake. Keep orchestration in `makeRelay` and avoid exposing
-internal protocol details to the CLI or MCP server.
-
-### 3. Stream recordings with unambiguous framing
-
-- Include the tab id and sequence number in each binary websocket frame instead
-  of pairing a JSON metadata frame with the next binary frame.
-- Stream chunks to disk instead of buffering complete recordings in relay
-  memory.
 - Add MCP recording start, stop, status, and cancel tools after the relay path is
   robust.
 - Build the flight-recorder ring buffer only after chunk streaming lands.
 
 Verification:
 
-- Exercise interleaved recordings and a recording larger than the intended
-  in-memory bound.
 - Confirm CLI and MCP recording behavior match.
 
-### 4. Resolve smaller agent-experience gaps
-
-- Make `fillInput` and `fillInputs` search open shadow roots recursively. Closed
-  shadow roots remain unsupported. When no DOM match exists, the error should
-  explain the helper's boundary and suggest `locator.fill()` if Playwright can
-  resolve the field. The current zero-match error was observed on
-  api.data.gov's signup component.
-- Accept `--session` and `-s` on `session reset` and `session delete`, matching
-  `execute` and `journal`.
-- Add smoke coverage proving explicit missing session ids fail for both
-  `--session x` and `BROWSER_CONTROL_SESSION=x`.
+### 3. Resolve smaller agent-experience gaps
 
 Verification:
 
@@ -91,6 +70,46 @@ Verification:
   human-shell current session unexpectedly.
 
 ## Recently Shipped
+
+### Tab-capture recordings stream with intrinsic framing
+
+Extension protocol `2` sends each recording chunk as a sequenced `BCRD` binary
+frame containing its tab id. The relay validates framing and sequence, bounds
+pending writes, streams each tab to an adjacent temporary file, and atomically
+renames complete recordings. Interleaving, oversized queues, malformed frames,
+and output larger than a single frame have direct coverage.
+
+### Fill helpers traverse open shadow roots
+
+String selectors passed to `fillInput` and `fillInputs` now search recursively
+through open shadow roots. A zero-match error explains that closed roots remain
+unavailable and suggests `locator.fill()` when Playwright can resolve the field.
+
+### Session lifecycle selectors are consistent
+
+`session reset` and `session delete` accept positional ids, `--session`/`-s`,
+and `BROWSER_CONTROL_SESSION` before falling back to the saved current session.
+Smoke coverage verifies explicit missing flag and environment ids fail instead
+of falling back to the saved current session.
+
+### CDP routing fails closed
+
+Identity-free `Target.getTargetInfo` no longer returns an arbitrary tab, and
+otherwise-unhandled sessionless CDP commands require an explicit session. All
+explicit target and session routing now rechecks client visibility, including
+session-scoped auto-attach. Root teardown emits each announced child detach
+before detaching the root so clients cannot retain orphaned sessions. The
+browser-free `CdpRouter` module keeps these visibility, alias, and generation
+rules out of relay transport orchestration.
+
+### CDP client state is isolated per connection
+
+`CdpClientPool` now owns each CDP client's session identity, target
+announcements, aliases, auto-attach settings, and idle-reset generation. New
+targets use the originating client's auto-attach settings instead of global
+last-writer-wins state. Ownership visibility changes also invalidate target
+aliases, so a client cannot continue routing commands to a tab after it becomes
+hidden.
 
 ### Wedged session pages recover or fail fast
 
@@ -437,8 +456,7 @@ restarts can be distinguished from session eviction.
 - Native `locator.fill()` can hang on login-style fields when installed browser
   extensions inject focus handlers or overlays. `fillInput` is the explicit
   fallback for ordinary `input` and `textarea` elements.
-- `fillInput` currently uses `querySelector` semantics and cannot reach fields
-  in shadow roots.
+- `fillInput` cannot reach fields inside closed shadow roots.
 - OOPIF behavior is guaranteed only by the current reconnect smoke scenarios.
 - Clipboard automation on insecure origins is not guaranteed.
 - Playwright download events and `download.saveAs()` are unavailable in

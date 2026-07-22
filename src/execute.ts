@@ -1866,7 +1866,6 @@ async function fillInput(options: { readonly page: Page; readonly target: InputT
     const prototype = Object.getPrototypeOf(element) as HTMLInputElement | HTMLTextAreaElement
     const valueSetter = Object.getOwnPropertyDescriptor(element, "value")?.set
     const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set
-    element.focus()
     if (prototypeValueSetter && valueSetter !== prototypeValueSetter) {
       prototypeValueSetter.call(element, nextValue)
     } else {
@@ -1874,7 +1873,6 @@ async function fillInput(options: { readonly page: Page; readonly target: InputT
     }
     element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: nextValue }))
     element.dispatchEvent(new Event("change", { bubbles: true }))
-    element.blur()
   }, options.value, { timeout: 30_000 })
 }
 
@@ -1899,8 +1897,20 @@ export async function fillInputs(page: Page, fields: ReadonlyArray<InputField>):
       return inputFields.map((field) => {
         let element: Node | undefined
         if (typeof field.target === "string") {
-          const matches = document.querySelectorAll(field.target)
+          const matches: Element[] = []
+          const roots: Array<Document | ShadowRoot> = [document]
+          for (let index = 0; index < roots.length; index += 1) {
+            const root = roots[index]
+            if (!root) continue
+            matches.push(...root.querySelectorAll(field.target))
+            for (const candidate of root.querySelectorAll("*")) {
+              if (candidate.shadowRoot) roots.push(candidate.shadowRoot)
+            }
+          }
           if (matches.length !== 1) {
+            if (matches.length === 0) {
+              throw new Error(`fillInputs found no match for ${field.label} in the document or open shadow roots; closed shadow roots are unavailable. Try locator.fill() if Playwright can resolve the field.`)
+            }
             throw new Error(`fillInputs expects exactly one match for ${field.label}; got ${matches.length}`)
           }
           element = matches[0]
@@ -1913,7 +1923,6 @@ export async function fillInputs(page: Page, fields: ReadonlyArray<InputField>):
         const prototype = Object.getPrototypeOf(element) as HTMLInputElement | HTMLTextAreaElement
         const valueSetter = Object.getOwnPropertyDescriptor(element, "value")?.set
         const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set
-        element.focus()
         if (prototypeValueSetter && valueSetter !== prototypeValueSetter) {
           prototypeValueSetter.call(element, field.value)
         } else {
@@ -1921,7 +1930,6 @@ export async function fillInputs(page: Page, fields: ReadonlyArray<InputField>):
         }
         element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: field.value }))
         element.dispatchEvent(new Event("change", { bubbles: true }))
-        element.blur()
         return field.label
       })
     }, resolvedFields)

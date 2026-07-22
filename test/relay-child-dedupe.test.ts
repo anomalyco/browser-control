@@ -61,7 +61,7 @@ describe("relay child target announce dedupe", () => {
             : {}
           extension.send(JSON.stringify({ id: command.id, result }))
         })
-        extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.17" } }))
+        extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2 } }))
         extension.send(JSON.stringify({ method: "toolbar.clicked", params: { tabId: 1 } }))
         await waitFor(() => extensionCommands.some((command) => command.method === "action.setAttached"))
 
@@ -201,7 +201,7 @@ describe("relay child target announce dedupe", () => {
             : {}
           extension.send(JSON.stringify({ id: command.id, result }))
         })
-        extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.17" } }))
+        extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2 } }))
         extension.send(JSON.stringify({ method: "toolbar.clicked", params: { tabId: 1 } }))
         await waitFor(() => extensionCommands.some((command) => command.method === "action.setAttached"))
 
@@ -264,7 +264,7 @@ describe("relay child target announce dedupe", () => {
             : {}
           extension.send(JSON.stringify({ id: command.id, result }))
         })
-        extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.11" } }))
+        extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2 } }))
         extension.send(JSON.stringify({ method: "toolbar.clicked", params: { tabId: 1 } }))
         await waitFor(() => extensionCommands.some((command) => command.method === "action.setAttached"))
 
@@ -361,6 +361,18 @@ describe("relay child target announce dedupe", () => {
             command.params?.sessionId === "worker-session"
         }))
 
+        client.send(JSON.stringify({
+          id: 3,
+          sessionId: "worker-session",
+          method: "Target.setAutoAttach",
+          params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+        }))
+        await waitFor(() => extensionCommands.some((command) => {
+          return command.method === "debugger.sendCommand" &&
+            command.params?.method === "Target.setAutoAttach" &&
+            command.params?.sessionId === "worker-session"
+        }))
+
         client.close()
         extension.close()
       })
@@ -382,7 +394,7 @@ describe("relay child target announce dedupe", () => {
             : {}
           extension.send(JSON.stringify({ id: command.id, result }))
         })
-        extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.7" } }))
+        extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2 } }))
         extension.send(JSON.stringify({ method: "toolbar.clicked", params: { tabId: 1 } }))
         await waitFor(() => extensionCommands.includes("action.setAttached"))
 
@@ -427,6 +439,25 @@ describe("relay child target announce dedupe", () => {
           ["Target.detachedFromTarget", "child-session-1"],
           ["Target.attachedToTarget", "child-session-2"],
         ])
+
+        const rootAttach = messages.find((message): message is CdpEvent => {
+          const info = "method" in message && message.method === "Target.attachedToTarget" ? message.params?.targetInfo : undefined
+          return info !== undefined && info !== null && typeof info === "object" && !Array.isArray(info) && info.targetId === "root-target"
+        })
+        const rootSessionId = typeof rootAttach?.params?.sessionId === "string" ? rootAttach.params.sessionId : undefined
+        expect(rootSessionId).toBeDefined()
+        extension.send(JSON.stringify({ method: "tabs.removed", params: { tabId: 1 } }))
+        await waitFor(() => messages.some((message) => {
+          return "method" in message && message.method === "Target.detachedFromTarget" && message.params?.sessionId === rootSessionId
+        }))
+
+        const detachEvents = messages.filter((message): message is CdpEvent => {
+          return "method" in message && message.method === "Target.detachedFromTarget"
+        })
+        const childDetachIndex = detachEvents.findIndex((event) => event.params?.sessionId === "child-session-2")
+        const rootDetachIndex = detachEvents.findIndex((event) => event.params?.sessionId === rootSessionId)
+        expect(childDetachIndex).toBeGreaterThanOrEqual(0)
+        expect(rootDetachIndex).toBeGreaterThan(childDetachIndex)
 
         client.close()
         extension.close()

@@ -248,7 +248,7 @@ describe("relay-schema", () => {
     const full = decodeExtensionStatus({
       connected: true,
       version: "0.0.5",
-      protocolVersion: 1,
+      protocolVersion: 2,
       protocolCompatible: true,
       protocolLegacy: false,
       activeTargets: 2,

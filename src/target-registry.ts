@@ -104,26 +104,6 @@ export function shouldExposeChildTarget(target: ChildTarget): boolean {
   return target.targetInfo.type !== "page" || target.targetInfo.url !== ""
 }
 
-export function resolveTargetInfoTarget(options: {
-  readonly registry: TargetRegistry
-  readonly targetId?: string
-  readonly sessionId?: string
-  readonly aliasedTargetId?: string
-  readonly fallback?: () => ConnectedTarget | undefined
-}): ConnectedTarget | ChildTarget | undefined {
-  const explicit = Boolean(options.targetId || options.sessionId || options.aliasedTargetId)
-  return (options.targetId
-    ? options.registry.targetsByTargetId.get(options.targetId) ?? options.registry.childTargetsByTargetId.get(options.targetId)
-    : undefined) ??
-    (options.aliasedTargetId
-      ? options.registry.targetsByTargetId.get(options.aliasedTargetId) ?? options.registry.childTargetsByTargetId.get(options.aliasedTargetId)
-      : undefined) ??
-    (options.sessionId
-      ? options.registry.targets.get(options.sessionId) ?? options.registry.childTargets.get(options.sessionId)
-      : undefined) ??
-    (explicit ? undefined : options.fallback?.())
-}
-
 export class TargetRegistry {
   readonly targets = new Map<string, ConnectedTarget>()
   readonly tabTargets = new Map<number, ConnectedTarget>()

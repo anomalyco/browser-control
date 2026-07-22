@@ -3,6 +3,7 @@ import { spawn } from "node:child_process"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { terminateChildProcess } from "./child-process.ts"
 import { redactKnownValues, type CredentialSlot } from "./network-redaction.ts"
 
 const StoredCredentialSlot = Schema.Struct({
@@ -348,7 +349,7 @@ function runChild(options: {
       closePromiseResolve = resolve
     })
     const timeout = setTimeout(() => {
-      void terminateChild(child, closePromise, () => closed)
+      void terminateChildProcess({ child, exit: closePromise, graceMs: 1_000, isExited: () => closed })
     }, options.timeoutMs)
     child.once("error", (cause) => {
       clearTimeout(timeout)
@@ -373,7 +374,7 @@ function runChild(options: {
         stderrTruncated,
       }))
     })
-    return Effect.promise(() => terminateChild(child, closePromise, () => closed))
+    return Effect.promise(() => terminateChildProcess({ child, exit: closePromise, graceMs: 1_000, isExited: () => closed }))
   })
 }
 
@@ -382,28 +383,6 @@ function childEnvironment(profile: Readonly<Record<string, string>>): NodeJS.Pro
     Object.entries(process.env).filter(([name]) => !/^BC_SECRET_[1-9][0-9]*$/.test(name)),
   )
   return { ...inherited, ...profile }
-}
-
-async function terminateChild(child: ReturnType<typeof spawn>, closePromise: Promise<void>, isClosed: () => boolean): Promise<void> {
-  if (isClosed()) return
-  signalChild(child, "SIGTERM")
-  await Promise.race([closePromise, new Promise<void>((resolve) => setTimeout(resolve, 1_000))])
-  if (!isClosed()) {
-    signalChild(child, "SIGKILL")
-    await closePromise
-  }
-}
-
-function signalChild(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
-  if (process.platform !== "win32" && child.pid !== undefined) {
-    try {
-      process.kill(-child.pid, signal)
-      return
-    } catch {
-      // The child may have exited between the state check and the signal.
-    }
-  }
-  child.kill(signal)
 }
 
 function isNodeError(value: unknown): value is NodeJS.ErrnoException {

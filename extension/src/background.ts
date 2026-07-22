@@ -1,4 +1,5 @@
 import { extensionProtocolVersion, parseExtensionCommand, type ExtensionCommand as ShimCommand, type JsonObject } from "../../src/protocol.ts"
+import { encodeRecordingFrame } from "../../src/recording-protocol.ts"
 import type {
   OffscreenCancelRecordingResult,
   OffscreenOutgoingMessage,
@@ -9,31 +10,28 @@ import type {
 import { isBrowserControlGroupTitle, isCurrentBrowserControlGroupTitle, isLegacyBrowserControlGroupTitle, shouldUngroupBrowserControlTab, tabGroupColor, tabGroupTitle } from "./tab-groups.ts"
 import { pageStatusFromJson } from "./page-status.ts"
 import { debuggerDetachedEvent } from "./debugger-detach.ts"
+import { ensureReconnectAlarm, reconnectAlarmName, startSocketKeepAlive } from "./connection-lifecycle.ts"
 
 const relayHost = "127.0.0.1"
 const relayPort = 19989
 const offscreenDocumentPath = "offscreen.html"
+const maxRecordingSocketBufferedBytes = 16 * 1024 * 1024
 
 let socket: WebSocket | undefined
 let connectionPromise: Promise<void> | undefined
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined
 let offscreenDocumentCreating: Promise<void> | undefined
-const activeRecordings = new Map<number, { readonly startedAt: number }>()
-
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.alarms.create("browser-control-reconnect", { periodInMinutes: 0.5 })
-})
-
-chrome.runtime.onStartup.addListener(() => {
-  chrome.alarms.create("browser-control-reconnect", { periodInMinutes: 0.5 })
-})
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name !== "browser-control-reconnect") {
+  if (alarm.name !== reconnectAlarmName) {
     return
   }
   void ensureConnection().catch(() => {})
 })
+
+// Chrome can clear persisted alarms, so repair the reconnect wake-up whenever
+// the MV3 service worker starts rather than only on install or browser startup.
+void ensureReconnectAlarm(chrome.alarms).catch(() => {})
 
 chrome.action.onClicked.addListener((tab) => {
   if (tab.id) sendMessage({ method: "toolbar.clicked", params: { tabId: tab.id } })
@@ -72,9 +70,12 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   sendMessage({ method: "tabs.removed", params: { tabId } })
 })
 
-chrome.runtime.onMessage.addListener((message: unknown, sender) => {
-  handleRuntimeMessage(message, sender)
-  return false
+chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
+  void handleRuntimeMessage(message, sender).then(
+    () => sendResponse({ success: true }),
+    (error: unknown) => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }),
+  )
+  return true
 })
 
 connect()
@@ -89,14 +90,23 @@ function startConnection(): WebSocket {
     reconnectTimer = undefined
   }
   const currentSocket = new WebSocket(`ws://${relayHost}:${relayPort}/extension`)
+  let stopKeepAlive: (() => void) | undefined
   socket = currentSocket
   currentSocket.onopen = () => {
-    void announceHelloAndAttachedTabs(currentSocket).catch((error) => reportAnnouncementFailure(currentSocket, error))
+    void announceHelloAndAttachedTabs(currentSocket).then(
+      () => {
+        if (socket === currentSocket && currentSocket.readyState === WebSocket.OPEN) {
+          stopKeepAlive = startSocketKeepAlive(() => sendOnCurrentSocket(currentSocket, { method: "pong" }))
+        }
+      },
+      (error) => reportAnnouncementFailure(currentSocket, error),
+    )
   }
   currentSocket.onmessage = (event) => {
     void handleSocketMessage(currentSocket, event.data)
   }
   currentSocket.onclose = () => {
+    stopKeepAlive?.()
     if (socket !== currentSocket) {
       return
     }
@@ -346,9 +356,6 @@ async function handleCommand(command: ShimCommand): Promise<JsonObject> {
 
 async function startRecording(params: JsonObject | undefined): Promise<JsonObject> {
   const tabId = numberParam(params, "tabId")
-  if (activeRecordings.has(tabId)) {
-    return { success: false, error: "Recording already in progress for this tab" }
-  }
   await ensureOffscreenDocument()
   const streamId = await getTabCaptureStreamId(tabId)
   const result = await chrome.runtime.sendMessage({
@@ -363,39 +370,25 @@ async function startRecording(params: JsonObject | undefined): Promise<JsonObjec
   if (!result.success) {
     return { success: false, error: result.error }
   }
-  activeRecordings.set(tabId, { startedAt: result.startedAt })
   return { success: true, tabId: result.tabId, startedAt: result.startedAt, mimeType: result.mimeType }
 }
 
 async function stopRecording(params: JsonObject | undefined): Promise<JsonObject> {
   const tabId = numberParam(params, "tabId")
-  if (!activeRecordings.has(tabId)) {
-    return { success: false, error: "No active recording for this tab" }
-  }
   const result = await chrome.runtime.sendMessage({ action: "recording.stop", tabId }) as OffscreenStopRecordingResult
   if (!result.success) {
     return { success: false, error: result.error }
   }
-  activeRecordings.delete(tabId)
   return { success: true, tabId: result.tabId, duration: result.duration }
 }
 
 async function statusRecording(params: JsonObject | undefined): Promise<JsonObject> {
   const tabId = numberParam(params, "tabId")
-  const recording = activeRecordings.get(tabId)
-  if (!recording) {
-    return { isRecording: false, tabId }
-  }
-  try {
-    const result = await chrome.runtime.sendMessage({ action: "recording.status", tabId }) as OffscreenStatusRecordingResult
-    return {
-      isRecording: result.isRecording,
-      tabId,
-      ...(result.startedAt === undefined ? { startedAt: recording.startedAt } : { startedAt: result.startedAt }),
-    }
-  } catch {
-    activeRecordings.delete(tabId)
-    return { isRecording: false, tabId }
+  const result = await chrome.runtime.sendMessage({ action: "recording.status", tabId }) as OffscreenStatusRecordingResult
+  return {
+    isRecording: result.isRecording,
+    tabId,
+    ...(result.startedAt === undefined ? {} : { startedAt: result.startedAt }),
   }
 }
 
@@ -405,11 +398,7 @@ async function cancelRecording(params: JsonObject | undefined): Promise<JsonObje
 }
 
 async function cancelRecordingForTab(tabId: number): Promise<JsonObject> {
-  if (!activeRecordings.has(tabId)) {
-    return { success: true }
-  }
   const result = await chrome.runtime.sendMessage({ action: "recording.cancel", tabId }) as OffscreenCancelRecordingResult
-  activeRecordings.delete(tabId)
   if (!result.success) {
     return { success: false, error: result.error }
   }
@@ -419,15 +408,11 @@ async function cancelRecordingForTab(tabId: number): Promise<JsonObject> {
 async function cleanupRecordingForTab(tabId: number): Promise<void> {
   try {
     await cancelRecordingForTab(tabId)
-  } catch {
-    activeRecordings.delete(tabId)
-  }
+  } catch {}
 }
 
 async function cancelAllRecordings(): Promise<void> {
-  await Promise.all(Array.from(activeRecordings.keys()).map(async (tabId) => {
-    await cleanupRecordingForTab(tabId)
-  }))
+  await chrome.runtime.sendMessage({ action: "recording.cancelAll" }).catch(() => {})
 }
 
 async function ensureOffscreenDocument(): Promise<void> {
@@ -522,7 +507,7 @@ async function guardedUngroupBrowserControlTab(tabId: number): Promise<void> {
   }
 }
 
-function handleRuntimeMessage(message: unknown, sender: chrome.runtime.MessageSender): void {
+async function handleRuntimeMessage(message: unknown, sender: chrome.runtime.MessageSender): Promise<void> {
   if (!message || typeof message !== "object" || Array.isArray(message)) {
     return
   }
@@ -541,18 +526,15 @@ function handleRuntimeMessage(message: unknown, sender: chrome.runtime.MessageSe
   }
   const offscreenMessage = message as OffscreenOutgoingMessage
   if (offscreenMessage.action === "recording.chunk") {
-    if (offscreenMessage.data) {
-      sendMessage({ method: "recording.data", params: { tabId: offscreenMessage.tabId } })
-      sendBinary(Uint8Array.from(offscreenMessage.data))
-      return
-    }
-    if (offscreenMessage.final) {
-      sendMessage({ method: "recording.data", params: { tabId: offscreenMessage.tabId, final: true } })
-    }
+    await sendBinaryAfterConnection(encodeRecordingFrame({
+      tabId: offscreenMessage.tabId,
+      sequence: offscreenMessage.sequence,
+      final: offscreenMessage.final,
+      payload: offscreenMessage.final ? new Uint8Array() : decodeBase64(offscreenMessage.dataBase64),
+    }))
     return
   }
   if (offscreenMessage.action === "recording.cancelled") {
-    activeRecordings.delete(offscreenMessage.tabId)
     sendMessage({ method: "recording.cancelled", params: { tabId: offscreenMessage.tabId } })
   }
 }
@@ -580,10 +562,26 @@ async function sendMessageAfterConnection(message: JsonObject): Promise<void> {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
 }
 
-function sendBinary(data: Uint8Array): void {
-  if (socket?.readyState === WebSocket.OPEN) {
-    socket.send(data.buffer)
+async function sendBinaryAfterConnection(data: Uint8Array): Promise<void> {
+  if (socket?.readyState !== WebSocket.OPEN) await ensureConnection()
+  const currentSocket = socket
+  if (currentSocket?.readyState !== WebSocket.OPEN) throw new Error("Browser Control relay is not connected")
+  const deadline = Date.now() + 30_000
+  while (currentSocket.bufferedAmount + data.byteLength > maxRecordingSocketBufferedBytes) {
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    if (socket !== currentSocket || currentSocket.readyState !== WebSocket.OPEN) {
+      throw new Error("Browser Control relay disconnected while sending recording data")
+    }
+    if (Date.now() >= deadline) throw new Error("Timed out sending recording data to the Browser Control relay")
   }
+  currentSocket.send(data.buffer)
+}
+
+function decodeBase64(value: string): Uint8Array {
+  const binary = atob(value)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+  return bytes
 }
 
 function isAlreadyAttachedError(error: unknown): boolean {

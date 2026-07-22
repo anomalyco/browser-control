@@ -170,6 +170,9 @@ export function managedRelayLaunch(
 
 export function managedRelayEntrypoint(entrypoint: string): string {
   const name = path.basename(entrypoint)
+  if (name === "browser-control-mcp") {
+    return path.join(path.dirname(entrypoint), "browser-control")
+  }
   if (name === "mcp.js" || name === "index.js" || name === "browser-control-client.js") {
     return path.join(path.dirname(entrypoint), "cli.js")
   }

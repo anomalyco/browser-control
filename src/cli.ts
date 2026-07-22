@@ -14,6 +14,7 @@ import { startRelay } from "./relay.ts"
 import { defaultJournalBaseDir, formatJournalEntry, readJournalEntries } from "./session-journal.ts"
 import * as SessionStore from "./session-store.ts"
 import { browserControlVersion } from "./version.ts"
+import { resolveExplicitSessionSelector } from "./cli-session-selector.ts"
 
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const sessionIdConfig = Config.option(Config.string("BROWSER_CONTROL_SESSION"))
@@ -370,12 +371,17 @@ const sessionReset = Command.make(
   "reset",
   {
     id: Argument.string("id").pipe(Argument.optional),
+    session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Reset this Browser Control session id")),
   },
-  Effect.fn("Cli.sessionReset")(function* ({ id }) {
+  Effect.fn("Cli.sessionReset")(function* ({ id, session }) {
     const relay = yield* RelayClient.Service
-    const sessionId = yield* resolveExistingSessionId(optionString(id))
-    const session = yield* relay.sessionReset(sessionId)
-    yield* Console.log(session.id)
+    const sessionId = yield* resolveExistingSessionId(resolveExplicitSessionSelector({
+      positional: optionString(id),
+      flag: optionString(session),
+      environment: Option.getOrUndefined(yield* sessionIdConfig),
+    }))
+    const resetSession = yield* relay.sessionReset(sessionId)
+    yield* Console.log(resetSession.id)
   }),
 ).pipe(Command.withDescription("Reset a Browser Control session state and page"))
 
@@ -420,11 +426,16 @@ const sessionDelete = Command.make(
   "delete",
   {
     id: Argument.string("id").pipe(Argument.optional),
+    session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Delete this Browser Control session id")),
   },
-  Effect.fn("Cli.sessionDelete")(function* ({ id }) {
+  Effect.fn("Cli.sessionDelete")(function* ({ id, session }) {
     const relay = yield* RelayClient.Service
     const store = yield* SessionStore.Service
-    const sessionId = yield* resolveExistingSessionId(optionString(id))
+    const sessionId = yield* resolveExistingSessionId(resolveExplicitSessionSelector({
+      positional: optionString(id),
+      flag: optionString(session),
+      environment: Option.getOrUndefined(yield* sessionIdConfig),
+    }))
     yield* relay.sessionDelete(sessionId)
     const current = yield* store.read
     if (current === sessionId) {
