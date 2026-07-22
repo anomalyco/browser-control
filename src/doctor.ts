@@ -25,6 +25,7 @@ const PackageMetadata = Schema.Struct({
 const ManifestVersion = Schema.Struct({
   version: Schema.String,
 })
+const bundledExtensionManifestPath = "extension/dist/manifest.json"
 
 type PackageInfo = {
   readonly name: string
@@ -163,13 +164,12 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
       Effect.catch(() => Effect.succeed(false)),
     )
 
-  const [packageResult, sourceManifestVersion, distManifestVersion, distCliExists, distMcpExists, extensionDistManifestExists, currentResult] = yield* Effect.all([
+  const [packageResult, bundledManifestVersion, distCliExists, distMcpExists, extensionDistManifestExists, currentResult] = yield* Effect.all([
     probe(readPackageInfo),
-    probe(readManifestVersion("extension/manifest.json")),
-    probe(readManifestVersion("extension/dist/manifest.json")),
+    probe(readManifestVersion(bundledExtensionManifestPath)),
     fileExists("dist/cli.js"),
     fileExists("dist/mcp.js"),
-    fileExists("extension/dist/manifest.json"),
+    fileExists(bundledExtensionManifestPath),
     probe(store.read),
   ])
   const relayResult = yield* probe(relay.version)
@@ -189,7 +189,7 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
       { ok: false, error: relayResult.error } satisfies ProbeResult<readonly TargetSummary[]>,
       { ok: false, error: relayResult.error } satisfies ProbeResult<readonly SessionSummary[]>,
     ]
-  const expectedVersion = sourceManifestVersion.ok ? sourceManifestVersion.value : null
+  const expectedVersion = bundledManifestVersion.ok ? bundledManifestVersion.value : null
   const extensionVersion = extensionResult.ok ? extensionResult.value.version : null
   const extensionVersionMatches = extensionResult.ok && extensionVersion && expectedVersion ? extensionVersion === expectedVersion : null
   const current = currentResult.ok ? currentResult.value ?? null : null
@@ -211,17 +211,16 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
     { path: "dist/cli.js", exists: distCliExists },
     { path: "dist/mcp.js", exists: distMcpExists },
     {
-      path: "extension/dist/manifest.json",
+      path: bundledExtensionManifestPath,
       exists: extensionDistManifestExists,
-      ...(distManifestVersion.ok ? { version: distManifestVersion.value } : {}),
+      ...(bundledManifestVersion.ok ? { version: bundledManifestVersion.value } : {}),
     },
   ]
   const checks = buildDoctorChecks({
     packageResult,
     relayResult,
     extensionResult,
-    sourceManifestVersion,
-    extensionVersionMatches,
+    bundledManifestVersion,
     artifacts,
     currentResult,
     staleCurrent,
@@ -299,8 +298,7 @@ function buildDoctorChecks(options: {
   readonly packageResult: ProbeResult<PackageInfo>
   readonly relayResult: ProbeResult<RelayVersion>
   readonly extensionResult: ProbeResult<ExtensionStatus>
-  readonly sourceManifestVersion: ProbeResult<string>
-  readonly extensionVersionMatches: boolean | null
+  readonly bundledManifestVersion: ProbeResult<string>
   readonly artifacts: readonly DoctorArtifact[]
   readonly currentResult: ProbeResult<string | undefined>
   readonly staleCurrent: boolean
@@ -355,12 +353,10 @@ function buildDoctorChecks(options: {
       status: options.extensionResult.ok && options.extensionResult.value.connected ? "ok" : "fail",
       message: options.extensionResult.ok ? options.extensionResult.value.connected ? `connected${options.extensionResult.value.version ? ` (${options.extensionResult.value.version})` : ""}` : "disconnected" : options.extensionResult.error,
     },
-    {
-      id: "extension-version",
-      label: "extension version",
-      status: extensionVersionCheckStatus({ extensionResult: options.extensionResult, sourceManifestVersion: options.sourceManifestVersion, versionMatches: options.extensionVersionMatches }),
-      message: extensionVersionCheckMessage({ extensionResult: options.extensionResult, sourceManifestVersion: options.sourceManifestVersion, versionMatches: options.extensionVersionMatches }),
-    },
+    extensionVersionCheck({
+      extensionResult: options.extensionResult,
+      bundledManifestVersion: options.bundledManifestVersion,
+    }),
     extensionProtocolCheck(options.extensionResult),
     {
       id: "targets-readable",
@@ -458,40 +454,35 @@ export function relayBuildCheck(options: {
   }
 }
 
-function extensionVersionCheckStatus(options: {
+function extensionVersionCheck(options: {
   readonly extensionResult: ProbeResult<ExtensionStatus>
-  readonly sourceManifestVersion: ProbeResult<string>
-  readonly versionMatches: boolean | null
-}): DoctorCheckStatus {
-  if (!options.extensionResult.ok || !options.extensionResult.value.connected) {
-    return "warn"
-  }
-  if (!options.sourceManifestVersion.ok || !options.extensionResult.value.version) {
-    return "warn"
-  }
-  return "ok"
-}
-
-function extensionVersionCheckMessage(options: {
-  readonly extensionResult: ProbeResult<ExtensionStatus>
-  readonly sourceManifestVersion: ProbeResult<string>
-  readonly versionMatches: boolean | null
-}): string {
+  readonly bundledManifestVersion: ProbeResult<string>
+}): DoctorCheck {
+  const check = (status: DoctorCheckStatus, message: string): DoctorCheck => ({
+    id: "extension-version",
+    label: "extension version",
+    status,
+    message,
+  })
   if (!options.extensionResult.ok) {
-    return options.extensionResult.error
+    return check("warn", options.extensionResult.error)
   }
   if (!options.extensionResult.value.connected) {
-    return "extension disconnected; cannot compare runtime version"
+    return check("warn", "extension disconnected; cannot compare runtime version")
   }
-  if (!options.sourceManifestVersion.ok) {
-    return `could not read extension/manifest.json: ${options.sourceManifestVersion.error}`
+  if (!options.bundledManifestVersion.ok) {
+    return check("warn", `could not read ${bundledExtensionManifestPath}: ${options.bundledManifestVersion.error}`)
   }
-  if (!options.extensionResult.value.version) {
-    return "extension did not report a version"
+  const runtimeVersion = options.extensionResult.value.version
+  if (!runtimeVersion) {
+    return check("warn", "extension did not report a version")
   }
-  return options.versionMatches
-    ? `matches bundled extension (${options.sourceManifestVersion.value})`
-    : `runtime ${options.extensionResult.value.version} differs from bundled ${options.sourceManifestVersion.value}; protocol compatibility determines support`
+  return check(
+    "ok",
+    runtimeVersion === options.bundledManifestVersion.value
+      ? `matches bundled extension (${options.bundledManifestVersion.value})`
+      : `runtime ${runtimeVersion} differs from bundled ${options.bundledManifestVersion.value}; protocol compatibility determines support`,
+  )
 }
 
 export function extensionProtocolCheck(extensionResult: ProbeResult<ExtensionStatus>): DoctorCheck {

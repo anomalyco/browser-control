@@ -247,6 +247,9 @@ browser-control skill
 - On socket open the shim sends `hello` and then re-announces every tab it still
   has `chrome.debugger` attached to (`debugger.attached` events), so a restarted
   relay rebuilds its target registry without the user re-clicking the toolbar.
+- Repair the reconnect alarm whenever the MV3 worker starts and send heartbeat
+  traffic every 20 seconds while its relay socket is open. Chrome may clear
+  persisted alarms and retires idle extension workers even with an open socket.
 - The relay dedupes target announcements per CDP client by targetId: a
   re-announce under a new sessionId emits `Target.detachedFromTarget` for the
   old session first. Never announce the same targetId twice to one client

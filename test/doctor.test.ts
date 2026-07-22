@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest"
-import { extensionProtocolCheck, formatTargetSummary, relayBuildCheck, unhealthyTargetsCheck } from "../src/doctor.ts"
+import { NodeFileSystem, NodePath } from "@effect/platform-node"
+import { Effect, Layer } from "effect"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
+import { createDoctorReport, extensionProtocolCheck, formatTargetSummary, relayBuildCheck, unhealthyTargetsCheck } from "../src/doctor.ts"
+import * as RelayClient from "../src/relay-client.ts"
+import * as SessionStore from "../src/session-store.ts"
 
 describe("formatTargetSummary", () => {
   it("shows crashed target state", () => {
@@ -95,5 +102,61 @@ describe("extensionProtocolCheck", () => {
         activeTargets: 0,
       },
     })).toMatchObject({ status: "fail", message: "runtime 3 is incompatible with relay 2" })
+  })
+})
+
+describe("createDoctorReport", () => {
+  it("compares the runtime extension with the manifest shipped in the package", async () => {
+    const packageRoot = await fs.mkdtemp(path.join(os.tmpdir(), "browser-control-doctor-"))
+    try {
+      await fs.mkdir(path.join(packageRoot, "dist"), { recursive: true })
+      await fs.mkdir(path.join(packageRoot, "extension", "dist"), { recursive: true })
+      await Promise.all([
+        fs.writeFile(path.join(packageRoot, "package.json"), JSON.stringify({
+          name: "@opencode-ai/browser-control",
+          version: "1.0.0",
+          bin: { "browser-control": "./dist/cli.js", "browser-control-mcp": "./dist/mcp.js" },
+        })),
+        fs.writeFile(path.join(packageRoot, "dist", "cli.js"), ""),
+        fs.writeFile(path.join(packageRoot, "dist", "mcp.js"), ""),
+        fs.writeFile(path.join(packageRoot, "extension", "manifest.json"), JSON.stringify({ version: "9.9.9" })),
+        fs.writeFile(path.join(packageRoot, "extension", "dist", "manifest.json"), JSON.stringify({ version: "0.0.23" })),
+      ])
+      const relay = {
+        endpoint: "http://127.0.0.1:19989",
+        version: Effect.succeed({ version: "1.0.0", buildId: "test" }),
+        extensionStatus: Effect.succeed({
+          connected: true,
+          version: "0.0.23",
+          protocolVersion: 2,
+          protocolCompatible: true,
+          protocolLegacy: false,
+          activeTargets: 0,
+        }),
+        targets: Effect.succeed([]),
+        sessions: Effect.succeed([]),
+      } as unknown as RelayClient.Interface
+      const store = {
+        endpoint: relay.endpoint,
+        filePath: path.join(packageRoot, "session.json"),
+        read: Effect.succeed(undefined),
+      } as unknown as SessionStore.Interface
+      const report = await Effect.runPromise(createDoctorReport({ packageRoot }).pipe(
+        Effect.provide(Layer.mergeAll(
+          NodeFileSystem.layer,
+          NodePath.layer,
+          Layer.succeed(RelayClient.Service, relay),
+          Layer.succeed(SessionStore.Service, store),
+        )),
+      ))
+
+      expect(report.extension).toMatchObject({ expectedVersion: "0.0.23", versionMatches: true })
+      expect(report.checks.find((check) => check.id === "extension-version")).toMatchObject({
+        status: "ok",
+        message: "matches bundled extension (0.0.23)",
+      })
+    } finally {
+      await fs.rm(packageRoot, { recursive: true, force: true })
+    }
   })
 })

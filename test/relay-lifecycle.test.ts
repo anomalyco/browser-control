@@ -203,6 +203,7 @@ describe("relay lifecycle", () => {
     expect(managedRelayEntrypoint("/package/dist/index.js")).toBe("/package/dist/cli.js")
     expect(managedRelayEntrypoint("/package/src/browser-control-client.ts")).toBe("/package/src/cli.ts")
     expect(managedRelayEntrypoint("/package/dist/cli.js")).toBe("/package/dist/cli.js")
+    expect(managedRelayEntrypoint("/package/bin/browser-control-mcp")).toBe("/package/bin/browser-control")
   })
 
   it("can launch the Node relay independently of a Bun consumer runtime", () => {

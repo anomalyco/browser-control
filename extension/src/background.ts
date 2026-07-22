@@ -10,6 +10,7 @@ import type {
 import { isBrowserControlGroupTitle, isCurrentBrowserControlGroupTitle, isLegacyBrowserControlGroupTitle, shouldUngroupBrowserControlTab, tabGroupColor, tabGroupTitle } from "./tab-groups.ts"
 import { pageStatusFromJson } from "./page-status.ts"
 import { debuggerDetachedEvent } from "./debugger-detach.ts"
+import { ensureReconnectAlarm, reconnectAlarmName, startSocketKeepAlive } from "./connection-lifecycle.ts"
 
 const relayHost = "127.0.0.1"
 const relayPort = 19989
@@ -21,20 +22,16 @@ let connectionPromise: Promise<void> | undefined
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined
 let offscreenDocumentCreating: Promise<void> | undefined
 
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.alarms.create("browser-control-reconnect", { periodInMinutes: 0.5 })
-})
-
-chrome.runtime.onStartup.addListener(() => {
-  chrome.alarms.create("browser-control-reconnect", { periodInMinutes: 0.5 })
-})
-
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name !== "browser-control-reconnect") {
+  if (alarm.name !== reconnectAlarmName) {
     return
   }
   void ensureConnection().catch(() => {})
 })
+
+// Chrome can clear persisted alarms, so repair the reconnect wake-up whenever
+// the MV3 service worker starts rather than only on install or browser startup.
+void ensureReconnectAlarm(chrome.alarms).catch(() => {})
 
 chrome.action.onClicked.addListener((tab) => {
   if (tab.id) sendMessage({ method: "toolbar.clicked", params: { tabId: tab.id } })
@@ -93,14 +90,23 @@ function startConnection(): WebSocket {
     reconnectTimer = undefined
   }
   const currentSocket = new WebSocket(`ws://${relayHost}:${relayPort}/extension`)
+  let stopKeepAlive: (() => void) | undefined
   socket = currentSocket
   currentSocket.onopen = () => {
-    void announceHelloAndAttachedTabs(currentSocket).catch((error) => reportAnnouncementFailure(currentSocket, error))
+    void announceHelloAndAttachedTabs(currentSocket).then(
+      () => {
+        if (socket === currentSocket && currentSocket.readyState === WebSocket.OPEN) {
+          stopKeepAlive = startSocketKeepAlive(() => sendOnCurrentSocket(currentSocket, { method: "pong" }))
+        }
+      },
+      (error) => reportAnnouncementFailure(currentSocket, error),
+    )
   }
   currentSocket.onmessage = (event) => {
     void handleSocketMessage(currentSocket, event.data)
   }
   currentSocket.onclose = () => {
+    stopKeepAlive?.()
     if (socket !== currentSocket) {
       return
     }
