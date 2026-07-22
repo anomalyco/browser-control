@@ -127,6 +127,57 @@ describe("user code execution", () => {
 })
 
 describe("fillInputs", () => {
+  it("updates values without changing document focus", async () => {
+    class MockInput {
+      private currentValue = ""
+      readonly focus = vi.fn()
+      readonly blur = vi.fn()
+      readonly dispatchEvent = vi.fn()
+
+      get value() {
+        return this.currentValue
+      }
+
+      set value(value: string) {
+        this.currentValue = value
+      }
+    }
+
+    const input = new MockInput()
+    const evaluate = vi.fn(async (run: (fields: Array<{ readonly target: string; readonly label: string; readonly value: string }>) => unknown, fields) => {
+      const previousDocument = globalThis.document
+      const previousInput = globalThis.HTMLInputElement
+      const previousTextArea = globalThis.HTMLTextAreaElement
+      const previousInputEvent = globalThis.InputEvent
+      Object.assign(globalThis, {
+        document: {
+          querySelectorAll: vi.fn((selector: string) => selector === "#field" ? [input] : []),
+        },
+        HTMLInputElement: MockInput,
+        HTMLTextAreaElement: class {},
+        InputEvent: class {},
+      })
+      try {
+        return run(fields as Array<{ readonly target: string; readonly label: string; readonly value: string }>)
+      } finally {
+        Object.assign(globalThis, {
+          document: previousDocument,
+          HTMLInputElement: previousInput,
+          HTMLTextAreaElement: previousTextArea,
+          InputEvent: previousInputEvent,
+        })
+      }
+    })
+    const page = { evaluate } as unknown as Page
+
+    await fillInputs(page, [{ selector: "#field", value: "next" }])
+
+    expect(input.value).toBe("next")
+    expect(input.focus).not.toHaveBeenCalled()
+    expect(input.blur).not.toHaveBeenCalled()
+    expect(input.dispatchEvent).toHaveBeenCalledTimes(2)
+  })
+
   it("resolves locators before the single batched page evaluation", async () => {
     const dispose = vi.fn().mockResolvedValue(undefined)
     const handle = { dispose } as unknown as Awaited<ReturnType<Locator["elementHandle"]>>

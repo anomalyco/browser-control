@@ -595,6 +595,10 @@ const cases: SmokeCase[] = [
             `
 await page.setContent('<input id="one" placeholder="One"><input id="two"><textarea id="three"></textarea>')
 await page.evaluate(() => {
+  document.documentElement.dataset.fillFocusEvents = '0'
+  document.addEventListener('focusin', () => {
+    document.documentElement.dataset.fillFocusEvents = String(Number(document.documentElement.dataset.fillFocusEvents ?? '0') + 1)
+  })
   const outer = document.createElement('div')
   const outerRoot = outer.attachShadow({ mode: 'open' })
   const inner = document.createElement('div')
@@ -607,13 +611,50 @@ await page.evaluate(() => {
   const closed = document.createElement('div')
   closed.attachShadow({ mode: 'closed' }).append(document.createElement('input'))
   document.body.append(closed)
+
+  const controlled = document.createElement('input')
+  controlled.id = 'controlled'
+  const nativeValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
+  if (!nativeValue?.get || !nativeValue.set) throw new Error('missing native input value descriptor')
+  let trackedValue = ''
+  Object.defineProperty(controlled, 'value', {
+    configurable: true,
+    get: () => nativeValue.get?.call(controlled),
+    set: (value) => {
+      trackedValue = String(value)
+      nativeValue.set?.call(controlled, value)
+    },
+  })
+  controlled.addEventListener('input', () => {
+    trackedValue = String(nativeValue.get?.call(controlled) ?? '')
+    controlled.dataset.state = trackedValue
+    queueMicrotask(() => {
+      controlled.value = trackedValue
+    })
+  })
+  setTimeout(() => document.body.append(controlled), 100)
+
+  const frame = document.createElement('iframe')
+  frame.id = 'fixture-frame'
+  frame.srcdoc = '<input id="frame-input">'
+  document.body.append(frame)
 })
-await fillInput('#one', 'alpha')
+await fillInput(page.locator('#one'), 'alpha')
 await fillInput('#shadow-input', 'delta')
+await fillInput(page.locator('#controlled'), 'epsilon')
 await fillInputs(page, [
   { selector: page.getByRole('textbox').nth(1), value: 'beta' },
   { selector: '#three', value: 'gamma' },
 ])
+const fixtureFrame = page.frames().find((frame) => frame !== page.mainFrame())
+if (!fixtureFrame) throw new Error('fixture iframe did not attach')
+await fixtureFrame.locator('html').evaluate((element) => {
+  element.dataset.fillFocusEvents = '0'
+  element.addEventListener('focusin', () => {
+    element.dataset.fillFocusEvents = String(Number(element.dataset.fillFocusEvents ?? '0') + 1)
+  })
+})
+await fillInput(fixtureFrame.locator('#frame-input'), 'zeta')
 let closedBoundary
 try {
   await fillInput('#closed-input', 'should-not-appear')
@@ -625,13 +666,21 @@ const values = await page.evaluate(() => ({
   two: document.querySelector('#two')?.value,
   three: document.querySelector('#three')?.value,
   shadow: document.querySelector('div')?.shadowRoot?.querySelector('div')?.shadowRoot?.querySelector('input')?.value,
+  controlled: document.querySelector('#controlled')?.value,
+  controlledState: document.querySelector('#controlled')?.dataset.state,
+  focusEvents: document.documentElement.dataset.fillFocusEvents,
 }))
-return { ...values, closedBoundary }
+return {
+  ...values,
+  frame: await fixtureFrame.locator('#frame-input').inputValue(),
+  frameFocusEvents: await fixtureFrame.locator('html').getAttribute('data-fill-focus-events'),
+  closedBoundary,
+}
           `,
           ],
           { retryOnTimeout: true },
         )
-        if (!output.includes("alpha") || !output.includes("beta") || !output.includes("gamma") || !output.includes("delta") || !output.includes("closed shadow roots")) {
+        if (!output.includes("alpha") || !output.includes("beta") || !output.includes("gamma") || !output.includes("delta") || !output.includes("controlled: 'epsilon'") || !output.includes("controlledState: 'epsilon'") || !output.includes("frame: 'zeta'") || !output.includes("focusEvents: '0'") || !output.includes("frameFocusEvents: '0'") || !output.includes("closed shadow roots")) {
           return yield* Effect.fail(new Error(`execute fill helpers did not fill fields: ${output}`))
         }
         return output.trim()
@@ -1897,7 +1946,6 @@ const fillInput = Effect.fnUntraced(function* (locator: ReturnType<Page["locator
       const prototype = Object.getPrototypeOf(element) as HTMLInputElement | HTMLTextAreaElement
       const valueSetter = Object.getOwnPropertyDescriptor(element, "value")?.set
       const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set
-      element.focus()
       if (prototypeValueSetter && valueSetter !== prototypeValueSetter) {
         prototypeValueSetter.call(element, nextValue)
       } else {
@@ -1905,7 +1953,6 @@ const fillInput = Effect.fnUntraced(function* (locator: ReturnType<Page["locator
       }
       element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: nextValue }))
       element.dispatchEvent(new Event("change", { bubbles: true }))
-      element.blur()
     }, value),
   )
 })
@@ -1929,7 +1976,6 @@ const fillInputs = Effect.fnUntraced(function* (
         const prototype = Object.getPrototypeOf(element) as HTMLInputElement | HTMLTextAreaElement
         const valueSetter = Object.getOwnPropertyDescriptor(element, "value")?.set
         const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set
-        element.focus()
         if (prototypeValueSetter && valueSetter !== prototypeValueSetter) {
           prototypeValueSetter.call(element, field.value)
         } else {
@@ -1937,7 +1983,6 @@ const fillInputs = Effect.fnUntraced(function* (
         }
         element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: field.value }))
         element.dispatchEvent(new Event("change", { bubbles: true }))
-        element.blur()
         return field.selector
       })
     }, fields),

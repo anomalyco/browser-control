@@ -1866,7 +1866,6 @@ async function fillInput(options: { readonly page: Page; readonly target: InputT
     const prototype = Object.getPrototypeOf(element) as HTMLInputElement | HTMLTextAreaElement
     const valueSetter = Object.getOwnPropertyDescriptor(element, "value")?.set
     const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set
-    element.focus()
     if (prototypeValueSetter && valueSetter !== prototypeValueSetter) {
       prototypeValueSetter.call(element, nextValue)
     } else {
@@ -1874,7 +1873,6 @@ async function fillInput(options: { readonly page: Page; readonly target: InputT
     }
     element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: nextValue }))
     element.dispatchEvent(new Event("change", { bubbles: true }))
-    element.blur()
   }, options.value, { timeout: 30_000 })
 }
 
@@ -1925,7 +1923,6 @@ export async function fillInputs(page: Page, fields: ReadonlyArray<InputField>):
         const prototype = Object.getPrototypeOf(element) as HTMLInputElement | HTMLTextAreaElement
         const valueSetter = Object.getOwnPropertyDescriptor(element, "value")?.set
         const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set
-        element.focus()
         if (prototypeValueSetter && valueSetter !== prototypeValueSetter) {
           prototypeValueSetter.call(element, field.value)
         } else {
@@ -1933,7 +1930,6 @@ export async function fillInputs(page: Page, fields: ReadonlyArray<InputField>):
         }
         element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: field.value }))
         element.dispatchEvent(new Event("change", { bubbles: true }))
-        element.blur()
         return field.label
       })
     }, resolvedFields)
