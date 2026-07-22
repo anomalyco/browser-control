@@ -1,5 +1,30 @@
 # @opencode-ai/browser-control
 
+## 0.4.0
+
+### Minor Changes
+
+- 05b068d: Stream tab-capture recordings to disk with intrinsically framed, sequenced binary messages instead of buffering complete recordings in relay memory.
+
+### Patch Changes
+
+- 05b068d: Isolate CDP client state so concurrent clients retain their own auto-attach
+  settings, invalidate target aliases when ownership hides a tab, reject hidden
+  session routing, avoid arbitrary target fallback, and detach child targets when
+  their root disappears. Centralize target and alias routing so stale root and
+  child sessions fail closed.
+- 05b068d: Accept `--session`, `-s`, and `BROWSER_CONTROL_SESSION` for session reset and
+  delete while retaining positional and current-session selection.
+- 05b068d: Prepare an unlisted Chrome Web Store extension with protocol-based relay
+  compatibility, deterministic packaging, and more reliable cold-start target
+  creation. Session reset and delete now recover relay-owned targets whose
+  debugger attachment was permanently lost during an extension update.
+- 05b068d: Search recursively through open shadow roots in `fillInput` and `fillInputs`,
+  and report the closed-root boundary when a selector has no match.
+- 05b068d: Preserve page focus while `fillInput` and `fillInputs` update controlled fields,
+  preventing focus-sensitive extensions from making the target unresponsive.
+- 05b068d: Keep the Chrome extension connected across idle service-worker suspension, repair missing reconnect alarms whenever the worker starts, start the managed relay correctly when MCP runs through a package-manager bin symlink, and make Doctor compare the runtime extension with the manifest shipped in the npm package.
+
 ## 0.3.2
 
 ### Patch Changes
