@@ -1,5 +1,21 @@
 # @opencode-ai/browser-control
 
+## 0.3.2
+
+### Patch Changes
+
+- 4699f7d: Pin production WebSocket access to the assigned Chrome Web Store extension ID
+  while retaining an explicit source-development path for unpacked extensions.
+
+## 0.3.1
+
+### Patch Changes
+
+- abfcabb: Prepare an unlisted Chrome Web Store extension with protocol-based relay
+  compatibility, deterministic packaging, and more reliable cold-start target
+  creation. Session reset and delete now recover relay-owned targets whose
+  debugger attachment was permanently lost during an extension update.
+
 ## 0.3.0
 
 ### Minor Changes
