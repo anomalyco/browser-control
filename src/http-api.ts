@@ -27,6 +27,7 @@ import {
   NetworkStopRequest,
   RecordingStartRequest,
   RecordingTargetRequest,
+  RelayShutdownRequest,
   SessionAdoptRequest,
   SessionIdRequest,
   SessionEnsureRequest,
@@ -43,7 +44,8 @@ export function createHttpRequestHandler(options: {
   readonly host: string
   readonly port: number
   readonly browserId: string
-  readonly relayInstance: { readonly id: string; readonly startedAt: string; readonly pid: number }
+  readonly relayInstance: { readonly id: string; readonly startedAt: string; readonly pid: number; readonly managed: boolean }
+  readonly shutdown: () => void
   readonly extensionStatus: () => Pick<ExtensionStatus,
     "connected" | "version" | "protocolVersion" | "protocolCompatible" | "protocolLegacy" | "cdpClients"
   >
@@ -76,7 +78,23 @@ export function createHttpRequestHandler(options: {
         instanceId: options.relayInstance.id,
         startedAt: options.relayInstance.startedAt,
         pid: options.relayInstance.pid,
+        managed: options.relayInstance.managed,
       })
+      return
+    }
+    if (pathname === "/shutdown" && request.method === "POST") {
+      runRequestEffect(response, Effect.gen(function* () {
+        const body = yield* decodeRequest(RelayShutdownRequest, yield* readJsonBody(request), "relay shutdown")
+        if (!options.relayInstance.managed || body.instanceId !== options.relayInstance.id) {
+          return yield* Effect.fail(new HttpRouteError({
+            message: "Relay shutdown does not match the active managed instance",
+            status: 409,
+            code: "invalid-request",
+          }))
+        }
+        response.once("finish", options.shutdown)
+        sendJson(response, { stopping: true })
+      }))
       return
     }
     if (pathname === "/json/version") {

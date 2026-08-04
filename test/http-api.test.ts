@@ -37,7 +37,8 @@ describe("HTTP request schemas", () => {
     const sessions = new BrowserControlSessions(`http://127.0.0.1:${port}`, undefined, undefined, registry)
     sessions.createNew("beta")
     handler = createHttpRequestHandler({
-      relayInstance: { id: "relay-test", startedAt: "2026-07-19T00:00:00.000Z", pid: 123 },
+      relayInstance: { id: "relay-test", startedAt: "2026-07-19T00:00:00.000Z", pid: 123, managed: false },
+      shutdown: () => {},
       host: "127.0.0.1",
       port,
       browserId: "test-browser",

@@ -17,10 +17,12 @@ const version = { version: "0.1.0", buildId: "build-current" }
 function relay(options: {
   readonly version: Effect.Effect<typeof version, RelayClient.RelayClientError>
   readonly extensionStatus?: RelayClient.Interface["extensionStatus"]
+  readonly shutdown?: RelayClient.Interface["shutdown"]
 }): RelayClient.Interface {
   return {
     endpoint: "http://127.0.0.1:19989",
     version: options.version,
+    shutdown: options.shutdown ?? (() => Effect.die("unexpected relay shutdown")),
     extensionStatus: options.extensionStatus ?? Effect.succeed({ connected: true, version: "0.0.11", activeTargets: 0 }),
   } as RelayClient.Interface
 }
@@ -110,7 +112,7 @@ describe("relay lifecycle", () => {
     expect(starts).toBe(0)
   })
 
-  it("reports a stale relay instead of silently using it", async () => {
+  it("reports a stale relay that has no safe process identity", async () => {
     const result = await Effect.runPromise(ensureRelay({
       relay: relay({ version: Effect.succeed({ ...version, buildId: "build-old" }) }),
       buildId: "build-current",
@@ -118,6 +120,102 @@ describe("relay lifecycle", () => {
     }))
 
     expect(result.buildProblem).toContain("does not match CLI build")
+  })
+
+  it("replaces a stale relay with the current build", async () => {
+    const current = { ...version, buildId: "2026-08-04T12:00:00.000Z" }
+    const stale = { ...version, buildId: "2026-08-03T12:00:00.000Z", instanceId: "stale", pid: 123, managed: true }
+    let running: typeof stale | typeof current | undefined = stale
+    let stops = 0
+    let starts = 0
+    const client = relay({
+      version: Effect.suspend(() => running ? Effect.succeed(running) : Effect.fail(unreachable())),
+    })
+
+    const result = await Effect.runPromise(ensureRelay({
+      relay: client,
+      buildId: current.buildId,
+      stop: () => Effect.sync(() => {
+        stops++
+        running = undefined
+      }),
+      start: Effect.sync(() => {
+        starts++
+        running = current
+      }),
+      retryDelayMs: 0,
+    }))
+
+    expect(result).toEqual({ version: current, started: true })
+    expect(stops).toBe(1)
+    expect(starts).toBe(1)
+  })
+
+  it("does not stop a relay instance that changed after the stale probe", async () => {
+    const stale = { ...version, buildId: "2026-08-03T12:00:00.000Z", instanceId: "stale", pid: 123, managed: true }
+    const current = { ...version, buildId: "2026-08-04T12:00:00.000Z", pid: 123, managed: true }
+    let probes = 0
+    let stops = 0
+    const client = relay({
+      version: Effect.sync(() => ++probes === 1 ? stale : current),
+    })
+
+    const result = await Effect.runPromise(ensureRelay({
+      relay: client,
+      buildId: current.buildId,
+      stop: () => Effect.sync(() => { stops++ }),
+      start: Effect.die("should not start"),
+      retryDelayMs: 0,
+    }))
+
+    expect(result).toEqual({ version: current, started: false })
+    expect(stops).toBe(0)
+  })
+
+  it("observes a concurrent replacement when stale shutdown loses the race", async () => {
+    const stale = { ...version, buildId: "2026-08-03T12:00:00.000Z", instanceId: "stale", pid: 123, managed: true }
+    const current = { ...version, buildId: "2026-08-04T12:00:00.000Z", instanceId: "current", pid: 456, managed: true }
+    let probes = 0
+    const client = relay({
+      version: Effect.sync(() => ++probes <= 2 ? stale : current),
+      shutdown: () => Effect.fail(new RelayClient.RelayRejected({
+        message: "Relay shutdown does not match the active managed instance",
+        status: 409,
+        path: "/shutdown",
+        code: "invalid-request",
+      })),
+    })
+
+    const result = await Effect.runPromise(ensureRelay({
+      relay: client,
+      buildId: current.buildId,
+      start: Effect.die("should not start"),
+      retryDelayMs: 0,
+    }))
+
+    expect(result).toEqual({ version: current, started: false })
+  })
+
+  it("does not replace a managed relay with an older CLI build", async () => {
+    const newer = { ...version, buildId: "2026-08-04T12:00:00.000Z", instanceId: "newer", pid: 456, managed: true }
+    let shutdowns = 0
+    const client = relay({
+      version: Effect.succeed(newer),
+      shutdown: () => Effect.sync(() => {
+        shutdowns++
+        return { stopping: true as const }
+      }),
+    })
+
+    const result = await Effect.runPromise(ensureRelay({
+      relay: client,
+      buildId: "2026-08-03T12:00:00.000Z",
+      start: Effect.die("should not start"),
+      retryDelayMs: 0,
+    }))
+
+    expect(result.buildProblem).toContain("does not match CLI build")
+    expect(shutdowns).toBe(0)
   })
 
   it("waits for the extension to reconnect after relay startup", async () => {
