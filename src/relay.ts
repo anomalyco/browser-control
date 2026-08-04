@@ -503,11 +503,13 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     refreshPageStatus(tabId)
     refreshTabGrouping(tabId)
   }
+  const managed = yield* Config.boolean("BROWSER_CONTROL_MANAGED_RELAY").pipe(Config.withDefault(false))
   const relayRequestHandler = createHttpRequestHandler({
     host,
     port,
     browserId,
-    relayInstance: { id: browserId, startedAt: new Date().toISOString(), pid: process.pid },
+    relayInstance: { id: browserId, startedAt: new Date().toISOString(), pid: process.pid, managed },
+    shutdown: () => process.kill(process.pid, "SIGTERM"),
     registry,
     recordingRelay,
     sessions,

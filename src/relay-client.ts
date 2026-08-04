@@ -25,6 +25,7 @@ import {
   RecordingStopResponse,
   type RecordingTargetRequest,
   RelayErrorCode,
+  RelayShutdownResponse,
   RelayVersion,
   SessionAdoptResponse,
   SessionContainer,
@@ -107,6 +108,7 @@ export type RelayClientError = RelayUnreachable | RelayRejected | RelayDecodeFai
 export interface Interface {
   readonly endpoint: string
   readonly version: Effect.Effect<RelayVersion, RelayClientError>
+  readonly shutdown: (instanceId: string) => Effect.Effect<RelayShutdownResponse, RelayClientError>
   readonly extensionStatus: Effect.Effect<ExtensionStatus, RelayClientError>
   readonly targets: Effect.Effect<readonly TargetSummary[], RelayClientError>
   readonly sessions: Effect.Effect<readonly SessionSummary[], RelayClientError>
@@ -241,6 +243,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
   return Service.of({
     endpoint,
     version: getJson("/version", RelayVersion),
+    shutdown: (instanceId) => postJson("/shutdown", { instanceId }, RelayShutdownResponse),
     extensionStatus: getJson("/extension/status", ExtensionStatus),
     targets: getJson("/json/list", TargetSummaries),
     sessions: getJson("/cli/sessions", SessionsContainer).pipe(Effect.map((container) => container.sessions)),
