@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
+  completeExtensionHandshake,
   ensureReconnectAlarm,
   reconnectAlarmName,
   startSocketKeepAlive,
@@ -41,5 +42,32 @@ describe("extension connection lifecycle", () => {
     vi.advanceTimersByTime(20_000)
 
     expect(heartbeat).toHaveBeenCalledTimes(2)
+  })
+
+  it("does not block readiness on tab-group reconciliation", () => {
+    const sendReady = vi.fn()
+    const reconcileGroups = vi.fn(() => new Promise<void>(() => {}))
+    const reportReconciliationFailure = vi.fn()
+
+    completeExtensionHandshake({ sendReady, reconcileGroups, reportReconciliationFailure })
+
+    expect(sendReady).toHaveBeenCalledOnce()
+    expect(reconcileGroups).toHaveBeenCalledOnce()
+    expect(reportReconciliationFailure).not.toHaveBeenCalled()
+  })
+
+  it("reports tab-group reconciliation failures after readiness", async () => {
+    const failure = new Error("tab groups unavailable")
+    const sendReady = vi.fn()
+    const reportReconciliationFailure = vi.fn()
+
+    completeExtensionHandshake({
+      sendReady,
+      reconcileGroups: () => Promise.reject(failure),
+      reportReconciliationFailure,
+    })
+    await vi.waitFor(() => expect(reportReconciliationFailure).toHaveBeenCalledWith(failure))
+
+    expect(sendReady).toHaveBeenCalledOnce()
   })
 })

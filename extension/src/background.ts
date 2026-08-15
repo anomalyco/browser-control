@@ -7,10 +7,10 @@ import type {
   OffscreenStatusRecordingResult,
   OffscreenStopRecordingResult,
 } from "./recording-types.ts"
-import { isBrowserControlGroupTitle, isCurrentBrowserControlGroupTitle, isLegacyBrowserControlGroupTitle, shouldUngroupBrowserControlTab, tabGroupColor, tabGroupTitle } from "./tab-groups.ts"
+import { isCurrentBrowserControlGroupTitle, isLegacyBrowserControlGroupTitle, shouldUngroupBrowserControlTab, tabGroupColor, tabGroupTitle } from "./tab-groups.ts"
 import { pageStatusFromJson } from "./page-status.ts"
 import { debuggerDetachedEvent } from "./debugger-detach.ts"
-import { ensureReconnectAlarm, reconnectAlarmName, startSocketKeepAlive } from "./connection-lifecycle.ts"
+import { completeExtensionHandshake, ensureReconnectAlarm, reconnectAlarmName, startSocketKeepAlive } from "./connection-lifecycle.ts"
 
 const relayHost = "127.0.0.1"
 const relayPort = 19989
@@ -174,26 +174,37 @@ async function announceHelloAndAttachedTabs(currentSocket: WebSocket): Promise<v
       protocolVersion: extensionProtocolVersion,
     },
   })
-  await reannounceAttachedTabsAndReconcileGroups(currentSocket)
-  sendOnSocket(currentSocket, { method: "ready" })
+  await reannounceAttachedTabs(currentSocket)
+  completeExtensionHandshake({
+    sendReady: () => sendOnSocket(currentSocket, { method: "ready" }),
+    reconcileGroups: () => reconcileBrowserControlGroups(),
+    reportReconciliationFailure: (error) => reportGroupReconciliationFailure(currentSocket, error),
+  })
 }
 
 function reportAnnouncementFailure(currentSocket: WebSocket, error: unknown): void {
   if (socket !== currentSocket || currentSocket.readyState !== WebSocket.OPEN) return
-  currentSocket.send(JSON.stringify({ method: "log", params: { level: "error", message: `Failed to re-announce attached tabs and reconcile groups: ${error instanceof Error ? error.message : String(error)}` } }))
+  currentSocket.send(JSON.stringify({ method: "log", params: { level: "error", message: `Failed to re-announce attached tabs: ${error instanceof Error ? error.message : String(error)}` } }))
   currentSocket.close(1011, "Attached-tab inventory failed")
 }
 
-async function reannounceAttachedTabsAndReconcileGroups(currentSocket: WebSocket): Promise<void> {
-  const attachedTabIds = new Set<number>()
+function reportGroupReconciliationFailure(currentSocket: WebSocket, error: unknown): void {
+  sendOnCurrentSocket(currentSocket, {
+    method: "log",
+    params: {
+      level: "error",
+      message: `Failed to reconcile tab groups: ${error instanceof Error ? error.message : String(error)}`,
+    },
+  })
+}
+
+async function reannounceAttachedTabs(currentSocket: WebSocket): Promise<void> {
   const targets = await chrome.debugger.getTargets()
   for (const target of targets) {
     if (target.attached && typeof target.tabId === "number") {
-      attachedTabIds.add(target.tabId)
       sendOnSocket(currentSocket, { method: "debugger.attached", params: { tabId: target.tabId } })
     }
   }
-  await reconcileBrowserControlGroups(attachedTabIds)
 }
 
 function sendOnSocket(currentSocket: WebSocket, message: JsonObject): void {
@@ -451,12 +462,12 @@ async function getTabCaptureStreamId(tabId: number): Promise<string> {
   }
 }
 
-async function reconcileBrowserControlGroups(knownAttachedTabIds?: ReadonlySet<number>): Promise<void> {
+async function reconcileBrowserControlGroups(): Promise<void> {
   if (!chrome.tabGroups) {
     return
   }
-  const attachedTabIds = knownAttachedTabIds ?? await getAttachedTabIds()
   const groups = await chrome.tabGroups.query({})
+  const attachedTabIds = await getAttachedTabIds()
   for (const group of groups) {
     if (!isCurrentBrowserControlGroupTitle(group.title) && !isLegacyBrowserControlGroupTitle(group.title)) {
       continue
@@ -469,7 +480,7 @@ async function reconcileBrowserControlGroups(knownAttachedTabIds?: ReadonlySet<n
       if (attachedTabIds.has(tab.id)) {
         continue
       }
-      await guardedUngroupBrowserControlTab(tab.id)
+      await guardedUngroupBrowserControlTab(tab.id, true)
     }
   }
 }
@@ -485,7 +496,7 @@ async function getAttachedTabIds(): Promise<Set<number>> {
   return attachedTabIds
 }
 
-async function guardedUngroupBrowserControlTab(tabId: number): Promise<void> {
+async function guardedUngroupBrowserControlTab(tabId: number, preserveAttached = false): Promise<void> {
   try {
     const tab = await chrome.tabs.get(tabId)
     if (tab.groupId === undefined || tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) {
@@ -497,6 +508,9 @@ async function guardedUngroupBrowserControlTab(tabId: number): Promise<void> {
       groupTitle = group.title
     }
     if (!shouldUngroupBrowserControlTab(groupTitle)) {
+      return
+    }
+    if (preserveAttached && (await getAttachedTabIds()).has(tabId)) {
       return
     }
     await chrome.tabs.ungroup(tabId)
