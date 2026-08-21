@@ -490,8 +490,8 @@ These items are accepted directions but are not current priorities:
 - Promote the reviewed Chrome Web Store extension from unlisted beta to public
   after one successful extension/relay compatibility cycle.
 - Bundle an unpacked extension for managed and development browser launch.
-- Add token-authenticated remote relay mode only if the relay must bind beyond
-  trusted local interfaces.
+- Add token-authenticated remote relay mode before allowing the relay to bind
+  beyond loopback.
 - Evaluate custom CDP or a smaller Playwright-compatible client only after stock
   Playwright creates a concrete blocker.
 - Add richer compact snapshot semantics only in response to demonstrated agent

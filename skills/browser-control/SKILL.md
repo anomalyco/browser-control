@@ -340,11 +340,6 @@ Common diagnoses:
 
 - `connected:false`: run a relay-backed command, then reload the unpacked
   extension only if its reconnect loop does not recover.
-- WSL (Windows Chrome, relay in WSL): `ERR_CONNECTION_REFUSED` then a `403`
-  handshake because the relay and browser are on different hosts. Set
-  `BROWSER_CONTROL_HOST=0.0.0.0` so Windows can reach the relay and
-  `BROWSER_CONTROL_EXTENSION_ORIGINS=chrome-extension://<id>` to trust the
-  Windows-loaded extension. See docs/WSL.md.
 - Incompatible extension protocol: update either the extension or npm package;
   exact extension and relay release versions do not need to match.
 - Stale relay build: operational commands reject it with restart guidance;

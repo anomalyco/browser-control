@@ -197,11 +197,10 @@ const serve = Command.make(
   {},
   Effect.fn("Cli.serve")(function* () {
     const port = yield* RelayClient.portConfig
-    const host = yield* RelayClient.hostConfig
     const additionalExtensionOrigins = parseAdditionalExtensionOrigins(yield* RelayClient.extensionOriginsConfig)
     yield* Effect.scoped(
       Effect.gen(function* () {
-        const relay = yield* startRelay({ host, port, additionalExtensionOrigins })
+        const relay = yield* startRelay({ port, additionalExtensionOrigins })
         yield* Console.log(`browser-control relay listening at ${relay.url}`)
         yield* Console.log("Load extension/dist as an unpacked extension and click the toolbar button to attach a tab.")
         yield* Effect.never

@@ -63,7 +63,6 @@ import { browserControlVersion } from "./version.ts"
 export type { RelayServer } from "./relay-types.ts"
 
 export const startRelay = Effect.fn("Relay.start")(function* (options: {
-  readonly host?: string
   readonly port?: number
   readonly releaseTargetGraceMs?: number
   readonly sessionCatalogPath?: string | null
@@ -148,13 +147,12 @@ function getBundledUnpackedExtensionOrigin(): string | undefined {
 }
 
 const makeRelay = Effect.fnUntraced(function* (options: {
-  readonly host?: string
   readonly port?: number
   readonly releaseTargetGraceMs?: number
   readonly sessionCatalogPath?: string | null
   readonly additionalExtensionOrigins?: readonly string[]
 } = {}) {
-  const host = options.host ?? defaultHost
+  const host = defaultHost
   const port = options.port ?? defaultPort
   const releaseTargetGraceMs = Math.max(0, options.releaseTargetGraceMs ?? 10_000)
   const browserId = crypto.randomUUID()

@@ -29,9 +29,8 @@ const chromeExtensionOriginPattern = /^chrome-extension:\/\/[a-p]+$/
  * addition to the built-ins. Entries are separated by commas or whitespace;
  * anything that is not a bare `chrome-extension://` origin (web origins, paths,
  * scheme-less ids) is dropped so a malformed value can never widen the origin
- * check to a non-extension origin. Used for cross-host setups (e.g. Chrome on
- * Windows driving a relay in WSL) where the path-derived unpacked id cannot
- * match the relay's own bundled path.
+ * check to a non-extension origin. Used for same-host unpacked installs where
+ * the path-derived id cannot match the relay's own bundled path.
  */
 export function parseAdditionalExtensionOrigins(raw: string | undefined): string[] {
   if (!raw) {
