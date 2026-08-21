@@ -83,6 +83,9 @@ describe("validateWebSocketOrigin", () => {
     expect(chromeExtensionOriginForPath(extensionPath, "win32")).toBe(
       "chrome-extension://lojdoljaoemkbeamblbblebkgffocjke",
     )
+    expect(chromeExtensionOriginForPath(`c${extensionPath.slice(1)}`, "win32")).toBe(
+      "chrome-extension://lojdoljaoemkbeamblbblebkgffocjke",
+    )
   })
 
   it("rejects web origins for the extension endpoint", () => {

@@ -14,7 +14,10 @@ export const chromeWebStoreExtensionOrigin = "chrome-extension://gmjpoplfomnnjip
 export const stableUnpackedExtensionOrigin = "chrome-extension://eibhgjafffkigblngnhafgbcipofaeon"
 
 export function chromeExtensionOriginForPath(extensionPath: string, platform: NodeJS.Platform = process.platform): string {
-  const pathBytes = platform === "win32" ? Buffer.from(extensionPath, "utf16le") : extensionPath
+  const normalizedPath = platform === "win32" && /^[a-z]:/.test(extensionPath)
+    ? extensionPath.charAt(0).toUpperCase() + extensionPath.slice(1)
+    : extensionPath
+  const pathBytes = platform === "win32" ? Buffer.from(normalizedPath, "utf16le") : normalizedPath
   const digest = crypto.createHash("sha256").update(pathBytes).digest()
   let extensionId = ""
   for (const byte of digest.subarray(0, 16)) {
