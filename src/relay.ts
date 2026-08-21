@@ -177,6 +177,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     verificationRetries: number
   }
   const rootReconciliationWorkers = new Map<string, RootReconciliationWorker>()
+  type TabGroupingMethod = "tabs.group" | "tabs.ungroup"
+  const pendingTabGrouping = new Map<number, TabGroupingMethod>()
+  const tabGroupingWorkers = new Map<number, Promise<void>>()
   let relayClosing = false
   let extensionGeneration = 0
   const extensionRpc = new ExtensionRpc()
@@ -214,6 +217,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const activeHandoffTabs = new Map<string, Set<number>>()
   const clearLiveExtensionState = (reason: string) => {
     void recordingRelay.cleanupAll(reason).catch(() => {})
+    pendingTabGrouping.clear()
     for (const target of [...registry.listRootTargets()]) {
       detachTargetState(target.tabId, { preserveSessionTarget: true, updateExtension: false })
     }
@@ -473,11 +477,31 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const sessionId = pageStatusSessionId(target) ?? activeHandoffSessionIdForTab(tabId)
     sendPageStatus(target, sessionId && sessions.isExecuting(sessionId) ? "running" : "attached", sessionId ? { sessionId } : {})
   }
+  function scheduleTabGrouping(tabId: number, method: TabGroupingMethod): void {
+    pendingTabGrouping.set(tabId, method)
+    if (tabGroupingWorkers.has(tabId)) return
+    const worker = (async () => {
+      while (true) {
+        const next = pendingTabGrouping.get(tabId)
+        if (!next) return
+        pendingTabGrouping.delete(tabId)
+        await Effect.runPromise(Effect.ignore(sendToExtension({ method: next, params: { tabId } })))
+      }
+    })().finally(() => {
+      if (tabGroupingWorkers.get(tabId) !== worker) return
+      tabGroupingWorkers.delete(tabId)
+      const next = pendingTabGrouping.get(tabId)
+      if (next) scheduleTabGrouping(tabId, next)
+    })
+    tabGroupingWorkers.set(tabId, worker)
+  }
+  function refreshTabGrouping(tabId: number): void {
+    const target = registry.tabTargets.get(tabId)
+    scheduleTabGrouping(tabId, target && pageStatusSessionId(target) ? "tabs.group" : "tabs.ungroup")
+  }
   function refreshTabPresentation(tabId: number): void {
     refreshPageStatus(tabId)
-    const target = registry.tabTargets.get(tabId)
-    const method = target && pageStatusSessionId(target) ? "tabs.group" : "tabs.ungroup"
-    Effect.runPromise(Effect.ignore(sendToExtension({ method, params: { tabId } }))).catch(() => {})
+    refreshTabGrouping(tabId)
   }
   const relayRequestHandler = createHttpRequestHandler({
     host,
@@ -754,6 +778,13 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (extensionMethod === "hello") {
       return
     }
+    if (extensionMethod === "log") {
+      const text = typeof message.params?.message === "string" ? message.params.message : undefined
+      if (!text) return
+      const level = message.params?.level === "error" || message.params?.level === "warn" ? message.params.level : "log"
+      console[level](`[browser-control extension] ${text}`)
+      return
+    }
     if (extensionMethod === "ready") {
       const workers = Array.from(rootReconciliationWorkers.values())
         .filter((worker) => worker.generation === generation)
@@ -765,6 +796,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
             if (!announcedRootTabIds.has(target.tabId)) detachTargetState(target.tabId)
           }
           extensionRpc.markReady()
+          for (const target of registry.listRootTargets()) refreshTabGrouping(target.tabId)
         } else {
           socket.close(1011, "Target inventory reconciliation failed")
         }
@@ -1395,10 +1427,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (committedTarget.browserControlSessionId) {
       pruneInvisibleAnnouncementsForSession(committedTarget.browserControlSessionId)
     }
-    yield* Effect.ignore(sendToExtension({
-      method: committedTarget.browserControlSessionId ? "tabs.group" : "tabs.ungroup",
-      params: { tabId },
-    }))
+    if (extensionRpc.connected) {
+      refreshTabGrouping(tabId)
+    }
     yield* Effect.ignore(sendToExtension({ method: "action.setAttached", params: { tabId, attached: true } }))
     const pendingHandoff = handoffs.pendingForTab(tabId)
     if (pendingHandoff) {
@@ -1612,7 +1643,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   } = {}): void {
     if (options.updateExtension !== false) {
       Effect.runPromise(Effect.ignore(sendToExtension({ method: "pageStatus.clear", params: { tabId } }))).catch(() => {})
-      Effect.runPromise(Effect.ignore(sendToExtension({ method: "tabs.ungroup", params: { tabId } }))).catch(() => {})
+      scheduleTabGrouping(tabId, "tabs.ungroup")
       Effect.runPromise(Effect.ignore(sendToExtension({ method: "action.setAttached", params: { tabId, attached: false } }))).catch(() => {})
       void recordingRelay.abortRecordingForTab({ tabId, reason: "Tab detached" }).catch((error: unknown) => {
         console.error("Failed to abort recording for detached tab", error)

@@ -22,3 +22,19 @@ export function isBrowserControlGroupTitle(title: string | undefined): boolean {
 export function shouldUngroupBrowserControlTab(groupTitle: string | undefined): boolean {
   return isBrowserControlGroupTitle(groupTitle)
 }
+
+export async function finalizeBrowserControlGrouping(options: {
+  readonly assertCurrent: () => void
+  readonly update: () => Promise<void>
+  readonly rollback: () => Promise<void>
+}): Promise<void> {
+  try {
+    options.assertCurrent()
+  } catch (error) {
+    // chrome.tabs.group mutates before it resolves, so a stale command must
+    // remove that anonymous group before the newer per-tab command can run.
+    await options.rollback().catch(() => {})
+    throw error
+  }
+  await options.update()
+}

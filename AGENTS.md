@@ -242,11 +242,18 @@ browser-control skill
 
 - Load `extension/dist` as the unpacked extension.
 - The relay listens on `127.0.0.1:19989` by default.
-- Current shim version is `0.0.23` and extension protocol version is `2`.
+- Current shim version is `0.0.24` and extension protocol version is `2`.
 - Store and npm versions may differ while their extension protocol versions remain compatible.
+- The source and unpacked-build manifest carries the public key for stable id
+  `eibhgjafffkigblngnhafgbcipofaeon`. Store packaging must strip that key so the
+  Chrome Web Store keeps its assigned extension id.
 - On socket open the shim sends `hello` and then re-announces every tab it still
   has `chrome.debugger` attached to (`debugger.attached` events), so a restarted
   relay rebuilds its target registry without the user re-clicking the toolbar.
+- Send `ready` after the attached-tab inventory; tab-group presentation and
+  stale-group cleanup are best-effort and must never block extension readiness.
+  Serialize group and ungroup presentation per tab so delayed browser APIs
+  cannot apply an older ownership state after a newer one.
 - Repair the reconnect alarm whenever the MV3 worker starts and send heartbeat
   traffic every 20 seconds while its relay socket is open. Chrome may clear
   persisted alarms and retires idle extension workers even with an open socket.

@@ -71,6 +71,14 @@ Verification:
 
 ## Recently Shipped
 
+### Unpacked extension connectivity survives browser and path differences
+
+The unpacked manifest carries a stable public key, while Store packaging strips
+it before creating the review ZIP. Extension readiness waits only for debugger
+inventory: Arc tab-group queries and restored-tab presentation run afterward,
+cannot mutate from stale sockets, serialize ownership changes per tab, and
+report failures through relay diagnostics.
+
 ### Tab-capture recordings stream with intrinsic framing
 
 Extension protocol `2` sends each recording chunk as a sequenced `BCRD` binary
@@ -186,7 +194,9 @@ require a new extension capture protocol and permission model.
   link`.
 - Until the first Store review completes, the browser extension is loaded
   unpacked from the npm package's `extension/dist` directory or a source build.
-  Its current shim version is `0.0.23`.
+  Its current shim version is `0.0.24`. A manifest public key gives unpacked
+  builds one stable extension id across install paths and operating systems;
+  Store packaging strips that key so the Store keeps its assigned id.
 - Extension and npm releases are independently versioned. The extension hello
   reports an explicit protocol version, and compatibility rather than exact
   package-version equality determines whether the local driver may use it.

@@ -11,9 +11,11 @@ import { RelayErrorCode } from "./relay-schema.ts"
 export const defaultHost = "127.0.0.1"
 export const defaultPort = 19989
 export const chromeWebStoreExtensionOrigin = "chrome-extension://gmjpoplfomnnjipeiojccjbpjlodkjhn"
+export const stableUnpackedExtensionOrigin = "chrome-extension://eibhgjafffkigblngnhafgbcipofaeon"
 
-export function chromeExtensionOriginForPath(extensionPath: string): string {
-  const digest = crypto.createHash("sha256").update(extensionPath).digest()
+export function chromeExtensionOriginForPath(extensionPath: string, platform: NodeJS.Platform = process.platform): string {
+  const pathBytes = platform === "win32" ? Buffer.from(extensionPath, "utf16le") : extensionPath
+  const digest = crypto.createHash("sha256").update(pathBytes).digest()
   let extensionId = ""
   for (const byte of digest.subarray(0, 16)) {
     extensionId += String.fromCharCode(97 + (byte >> 4), 97 + (byte & 0x0f))
@@ -102,6 +104,7 @@ export function validateWebSocketOrigin(options: {
   }
   if (
     options.origin === chromeWebStoreExtensionOrigin
+    || options.origin === stableUnpackedExtensionOrigin
     || options.additionalChromeExtensionOrigins?.has(options.origin)
   ) {
     return undefined

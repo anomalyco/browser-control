@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Browser Control",
-  "version": "0.0.23",
+  "version": "0.0.24",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAzTg+VNnMmpavX6z5WKu4FYh9xa2J+jjxTS/EmxYdgbzh33amUxawAVWV3p5NF58Y9yZxBEv11M1BUPWVVdAYyTsHYj70+xpCXGCnljQF6igo8hKBPoNNvg/+/IyI+FPbj34Mv2P1u+ZUCR9cAhFcqmD5mSvMbB8zFVSa+Rgknwwz5Uegu1bKzpI5Z9nO2EI6KOgjeJV/YEjl6NecC743FlCVztFZ1NIiJKl7DFmTSUa1/Piu7WHucBNfNDnoc6A9tmLTTLYnOH+KinXV3MsakWGNhGQTPCBRGLlGQ3SAa6HN7SPzZIkqHABBdMbf/1nO9Vj7dWAKIhX3Zud3GHxObwIDAQAB",
   "description": "Connect browser tabs to the local Browser Control driver.",
   "minimum_chrome_version": "120",
   "permissions": ["activeTab", "alarms", "debugger", "offscreen", "tabCapture", "tabGroups"],

@@ -110,5 +110,8 @@ Upload `artifacts/browser-control-extension-<version>.zip`. Record the printed
 SHA-256 digest with the release notes.
 
 The production relay accepts Store extension ID
-`gmjpoplfomnnjipeiojccjbpjlodkjhn`. Source-mode relays additionally accept
-unpacked development extension origins.
+`gmjpoplfomnnjipeiojccjbpjlodkjhn` and stable unpacked ID
+`eibhgjafffkigblngnhafgbcipofaeon`. The source manifest carries the unpacked
+public key; `package:extension` strips it from the Store ZIP so the Store keeps
+its assigned ID. Source-mode relays additionally accept development extension
+origins.

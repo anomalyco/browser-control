@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
+  completeExtensionHandshake,
   ensureReconnectAlarm,
   reconnectAlarmName,
   startSocketKeepAlive,
@@ -41,5 +42,33 @@ describe("extension connection lifecycle", () => {
     vi.advanceTimersByTime(20_000)
 
     expect(heartbeat).toHaveBeenCalledTimes(2)
+  })
+
+  it("announces attached tabs before ready without waiting for group reconciliation", async () => {
+    let finishInventory: (() => void) | undefined
+    const inventory = new Promise<void>((resolve) => {
+      finishInventory = resolve
+    })
+    const events: string[] = []
+    const reconciliation = new Promise<void>(() => {})
+
+    const handshake = completeExtensionHandshake({
+      announceAttachedTabs: async () => {
+        events.push("inventory-started")
+        await inventory
+        events.push("inventory-finished")
+      },
+      sendReady: () => events.push("ready"),
+      startGroupReconciliation: () => {
+        events.push("groups-started")
+        void reconciliation
+      },
+    })
+
+    await Promise.resolve()
+    expect(events).toEqual(["inventory-started"])
+    finishInventory?.()
+    await handshake
+    expect(events).toEqual(["inventory-started", "inventory-finished", "ready", "groups-started"])
   })
 })

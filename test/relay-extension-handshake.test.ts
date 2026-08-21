@@ -1,8 +1,19 @@
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
 import { Effect } from "effect"
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { WebSocket } from "ws"
-import type { CdpEvent, CdpRequest, CdpResponse } from "../src/protocol.ts"
+import type { CdpEvent, CdpRequest, CdpResponse, ExtensionCommand } from "../src/protocol.ts"
 import { startRelay } from "../src/relay.ts"
+import { SessionCatalog } from "../src/session-catalog.ts"
+
+const temporaryDirectories: string[] = []
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  for (const directory of temporaryDirectories.splice(0)) fs.rmSync(directory, { recursive: true, force: true })
+})
 
 describe("relay extension handshake", () => {
   it("rejects pre-hello events and keeps them from mutating target state", async () => {
@@ -59,6 +70,65 @@ describe("relay extension handshake", () => {
     })))
   })
 
+  it("does not wait for restored-tab grouping before becoming ready", async () => {
+    const port = 24_000 + Math.floor(Math.random() * 10_000)
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "browser-control-extension-handshake-"))
+    temporaryDirectories.push(directory)
+    const sessionCatalogPath = path.join(directory, "sessions.json")
+    await new SessionCatalog(sessionCatalogPath).save([{
+      id: "restored",
+      createdAt: "2026-08-21T00:00:00.000Z",
+      updatedAt: "2026-08-21T00:01:00.000Z",
+      readOnly: false,
+      target: { id: "restored-target", owner: "user" },
+    }])
+
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port, sessionCatalogPath })
+      const extension = yield* Effect.promise(() => connectRespondingExtension(relay.url, {
+        targetId: "restored-target",
+        suspendedMethod: "tabs.group",
+      }))
+      extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2 } }))
+      extension.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 7 } }))
+      extension.send(JSON.stringify({ method: "ready" }))
+
+      const status = yield* Effect.promise(() => waitForStatus(relay.url, (candidate) => candidate.connected === true))
+      expect(status).toMatchObject({ connected: true, activeTargets: 1 })
+      yield* Effect.promise(() => waitFor(() => extension.commands.some((command) => command.method === "tabs.group")))
+      const group = extension.commands.find((command) => command.method === "tabs.group")
+      expect(group).toBeDefined()
+
+      extension.send(JSON.stringify({ method: "debugger.detached", params: { tabId: 7, reason: "canceled_by_user" } }))
+      yield* Effect.sleep("20 millis")
+      expect(extension.commands.some((command) => command.method === "tabs.ungroup")).toBe(false)
+
+      extension.respond(group!)
+      yield* Effect.promise(() => waitFor(() => extension.commands.some((command) => command.method === "tabs.ungroup")))
+      expect(extension.commands.filter((command) => command.method === "tabs.group" || command.method === "tabs.ungroup").map((command) => command.method)).toEqual([
+        "tabs.group",
+        "tabs.ungroup",
+      ])
+      extension.close()
+    })))
+  })
+
+  it("reports extension log events", async () => {
+    const port = 24_000 + Math.floor(Math.random() * 10_000)
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port, sessionCatalogPath: null })
+      const extension = yield* Effect.promise(() => connectExtension(relay.url))
+      extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2 } }))
+      extension.send(JSON.stringify({ method: "log", params: { level: "error", message: "tab groups unavailable" } }))
+
+      yield* Effect.promise(() => waitFor(() => error.mock.calls.some((call) => {
+        return call[0] === "[browser-control extension] tab groups unavailable"
+      })))
+      extension.close()
+    })))
+  })
+
   it("does not let an incompatible extension replace a compatible socket before ready", async () => {
     const port = 24_000 + Math.floor(Math.random() * 10_000)
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
@@ -82,7 +152,7 @@ describe("relay extension handshake", () => {
     const port = 24_000 + Math.floor(Math.random() * 10_000)
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const relay = yield* startRelay({ port, sessionCatalogPath: null })
-      const first = yield* Effect.promise(() => connectRespondingExtension(relay.url, "stale-target"))
+      const first = yield* Effect.promise(() => connectRespondingExtension(relay.url, { targetId: "stale-target" }))
       first.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2 } }))
       first.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 7 } }))
       first.send(JSON.stringify({ method: "ready" }))
@@ -107,7 +177,7 @@ describe("relay extension handshake", () => {
     const port = 24_000 + Math.floor(Math.random() * 10_000)
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const relay = yield* startRelay({ port, sessionCatalogPath: null })
-      const extension = yield* Effect.promise(() => connectRespondingExtension(relay.url, undefined, "synthetic reconciliation failure"))
+      const extension = yield* Effect.promise(() => connectRespondingExtension(relay.url, { error: "synthetic reconciliation failure" }))
       const closed = waitForClose(extension)
       extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2 } }))
       extension.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 7 } }))
@@ -123,20 +193,35 @@ describe("relay extension handshake", () => {
 type ExtensionStatus = { readonly connected: boolean; readonly activeTargets: number }
 type CdpMessage = CdpEvent | CdpResponse
 
-async function connectRespondingExtension(relayUrl: string, targetId?: string, error?: string): Promise<WebSocket> {
+async function connectRespondingExtension(
+  relayUrl: string,
+  options: {
+    readonly targetId?: string
+    readonly error?: string
+    readonly suspendedMethod?: ExtensionCommand["method"]
+  } = {},
+): Promise<WebSocket & {
+  readonly commands: ExtensionCommand[]
+  readonly respond: (command: ExtensionCommand) => void
+}> {
   const socket = await connectExtension(relayUrl)
-  socket.on("message", (data) => {
-    const command = JSON.parse(data.toString()) as { readonly id: number; readonly method: string; readonly params?: { readonly method?: string } }
-    if (error) {
-      socket.send(JSON.stringify({ id: command.id, error }))
+  const commands: ExtensionCommand[] = []
+  const respond = (command: ExtensionCommand) => {
+    if (options.error) {
+      socket.send(JSON.stringify({ id: command.id, error: options.error }))
       return
     }
-    const result = command.method === "debugger.sendCommand" && command.params?.method === "Target.getTargetInfo" && targetId
-      ? { targetInfo: { targetId, type: "page", title: "Test", url: "https://example.com/", attached: true, canAccessOpener: false } }
+    const result = command.method === "debugger.sendCommand" && command.params?.method === "Target.getTargetInfo" && options.targetId
+      ? { targetInfo: { targetId: options.targetId, type: "page", title: "Test", url: "https://example.com/", attached: true, canAccessOpener: false } }
       : {}
     socket.send(JSON.stringify({ id: command.id, result }))
+  }
+  socket.on("message", (data) => {
+    const command = JSON.parse(data.toString()) as ExtensionCommand
+    commands.push(command)
+    if (command.method !== options.suspendedMethod) respond(command)
   })
-  return socket
+  return Object.assign(socket, { commands, respond })
 }
 
 function connectExtension(relayUrl: string): Promise<WebSocket> {

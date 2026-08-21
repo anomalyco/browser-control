@@ -7,10 +7,10 @@ import type {
   OffscreenStatusRecordingResult,
   OffscreenStopRecordingResult,
 } from "./recording-types.ts"
-import { isBrowserControlGroupTitle, isCurrentBrowserControlGroupTitle, isLegacyBrowserControlGroupTitle, shouldUngroupBrowserControlTab, tabGroupColor, tabGroupTitle } from "./tab-groups.ts"
+import { finalizeBrowserControlGrouping, isBrowserControlGroupTitle, shouldUngroupBrowserControlTab, tabGroupColor, tabGroupTitle } from "./tab-groups.ts"
 import { pageStatusFromJson } from "./page-status.ts"
 import { debuggerDetachedEvent } from "./debugger-detach.ts"
-import { ensureReconnectAlarm, reconnectAlarmName, startSocketKeepAlive } from "./connection-lifecycle.ts"
+import { completeExtensionHandshake, ensureReconnectAlarm, reconnectAlarmName, startSocketKeepAlive } from "./connection-lifecycle.ts"
 
 const relayHost = "127.0.0.1"
 const relayPort = 19989
@@ -21,6 +21,11 @@ let socket: WebSocket | undefined
 let connectionPromise: Promise<void> | undefined
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined
 let offscreenDocumentCreating: Promise<void> | undefined
+let groupReconciliation: Promise<void> | undefined
+let socketGeneration = 0
+const tabGroupingCommands = new Map<number, Promise<unknown>>()
+
+class ConnectionChangedError extends Error {}
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== reconnectAlarmName) {
@@ -90,10 +95,11 @@ function startConnection(): WebSocket {
     reconnectTimer = undefined
   }
   const currentSocket = new WebSocket(`ws://${relayHost}:${relayPort}/extension`)
+  const currentGeneration = ++socketGeneration
   let stopKeepAlive: (() => void) | undefined
   socket = currentSocket
   currentSocket.onopen = () => {
-    void announceHelloAndAttachedTabs(currentSocket).then(
+    void announceHelloAndAttachedTabs(currentSocket, currentGeneration).then(
       () => {
         if (socket === currentSocket && currentSocket.readyState === WebSocket.OPEN) {
           stopKeepAlive = startSocketKeepAlive(() => sendOnCurrentSocket(currentSocket, { method: "pong" }))
@@ -166,7 +172,7 @@ async function ensureConnection(): Promise<void> {
   }
 }
 
-async function announceHelloAndAttachedTabs(currentSocket: WebSocket): Promise<void> {
+async function announceHelloAndAttachedTabs(currentSocket: WebSocket, currentGeneration: number): Promise<void> {
   sendOnSocket(currentSocket, {
     method: "hello",
     params: {
@@ -174,32 +180,55 @@ async function announceHelloAndAttachedTabs(currentSocket: WebSocket): Promise<v
       protocolVersion: extensionProtocolVersion,
     },
   })
-  await reannounceAttachedTabsAndReconcileGroups(currentSocket)
-  sendOnSocket(currentSocket, { method: "ready" })
+  await completeExtensionHandshake({
+    announceAttachedTabs: () => reannounceAttachedTabs(currentSocket),
+    sendReady: () => sendOnSocket(currentSocket, { method: "ready" }),
+    startGroupReconciliation: () => startGroupReconciliation(currentGeneration),
+  })
 }
 
 function reportAnnouncementFailure(currentSocket: WebSocket, error: unknown): void {
   if (socket !== currentSocket || currentSocket.readyState !== WebSocket.OPEN) return
-  currentSocket.send(JSON.stringify({ method: "log", params: { level: "error", message: `Failed to re-announce attached tabs and reconcile groups: ${error instanceof Error ? error.message : String(error)}` } }))
+  currentSocket.send(JSON.stringify({ method: "log", params: { level: "error", message: `Failed to re-announce attached tabs: ${error instanceof Error ? error.message : String(error)}` } }))
   currentSocket.close(1011, "Attached-tab inventory failed")
 }
 
-async function reannounceAttachedTabsAndReconcileGroups(currentSocket: WebSocket): Promise<void> {
-  const attachedTabIds = new Set<number>()
+function startGroupReconciliation(currentGeneration: number): void {
+  if (groupReconciliation) return
+  const pending = reconcileBrowserControlGroups(currentGeneration)
+    .catch((error: unknown) => {
+      if (error instanceof ConnectionChangedError || currentGeneration !== socketGeneration) return
+      const currentSocket = socket
+      if (!currentSocket) return
+      sendOnCurrentSocket(currentSocket, {
+        method: "log",
+        params: {
+          level: "error",
+          message: `Failed to reconcile tab groups: ${error instanceof Error ? error.message : String(error)}`,
+        },
+      })
+    })
+    .finally(() => {
+      if (groupReconciliation !== pending) return
+      groupReconciliation = undefined
+      if (currentGeneration !== socketGeneration && socket?.readyState === WebSocket.OPEN) {
+        startGroupReconciliation(socketGeneration)
+      }
+    })
+  groupReconciliation = pending
+}
+
+async function reannounceAttachedTabs(currentSocket: WebSocket): Promise<void> {
   const targets = await chrome.debugger.getTargets()
   for (const target of targets) {
     if (target.attached && typeof target.tabId === "number") {
-      attachedTabIds.add(target.tabId)
       sendOnSocket(currentSocket, { method: "debugger.attached", params: { tabId: target.tabId } })
     }
   }
-  await reconcileBrowserControlGroups(attachedTabIds)
 }
 
 function sendOnSocket(currentSocket: WebSocket, message: JsonObject): void {
-  if (socket !== currentSocket || currentSocket.readyState !== WebSocket.OPEN) {
-    throw new Error("Extension connection changed during attached-tab inventory")
-  }
+  assertCurrentSocket(currentSocket)
   currentSocket.send(JSON.stringify(message))
 }
 
@@ -212,7 +241,7 @@ async function handleSocketMessage(currentSocket: WebSocket, data: unknown): Pro
     return
   }
   try {
-    const result = await handleCommand(command)
+    const result = await handleCommand(command, currentSocket)
     sendOnCurrentSocket(currentSocket, { id: command.id, result })
   } catch (error) {
     sendOnCurrentSocket(currentSocket, { id: command.id, error: error instanceof Error ? error.message : String(error) })
@@ -220,12 +249,12 @@ async function handleSocketMessage(currentSocket: WebSocket, data: unknown): Pro
 }
 
 function sendOnCurrentSocket(currentSocket: WebSocket, message: JsonObject): void {
-  if (socket === currentSocket && currentSocket.readyState === WebSocket.OPEN) {
+  if (isCurrentSocket(currentSocket)) {
     currentSocket.send(JSON.stringify(message))
   }
 }
 
-async function handleCommand(command: ShimCommand): Promise<JsonObject> {
+async function handleCommand(command: ShimCommand, currentSocket: WebSocket): Promise<JsonObject> {
   if (command.method === "ping") {
     return {}
   }
@@ -243,7 +272,9 @@ async function handleCommand(command: ShimCommand): Promise<JsonObject> {
   if (command.method === "debugger.detach") {
     const tabId = numberParam(command.params, "tabId")
     await chrome.debugger.detach({ tabId })
-    await guardedUngroupBrowserControlTab(tabId)
+    await runTabGroupingCommand(tabId, () => guardedUngroupBrowserControlTab(tabId, {
+      assertCurrent: () => assertCurrentSocket(currentSocket),
+    }))
     return {}
   }
   if (command.method === "debugger.sendCommand") {
@@ -270,35 +301,13 @@ async function handleCommand(command: ShimCommand): Promise<JsonObject> {
   }
   if (command.method === "tabs.group") {
     const tabId = numberParam(command.params, "tabId")
-    const tab = await chrome.tabs.get(tabId)
-    if (tab.groupId !== undefined && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
-      const currentGroup = await chrome.tabGroups.get(tab.groupId)
-      if (currentGroup.title === tabGroupTitle && currentGroup.color === tabGroupColor) {
-        return { groupId: currentGroup.id }
-      }
-    }
-    const attachedTabIds = await getAttachedTabIds()
-    let existingGroup: chrome.tabGroups.TabGroup | undefined
-    for (const group of await chrome.tabGroups.query({ windowId: tab.windowId })) {
-      if (group.title !== tabGroupTitle || group.color !== tabGroupColor) {
-        continue
-      }
-      const groupedTabs = await chrome.tabs.query({ groupId: group.id })
-      if (groupedTabs.some((groupedTab) => typeof groupedTab.id === "number" && attachedTabIds.has(groupedTab.id))) {
-        existingGroup = group
-        break
-      }
-    }
-    const groupId = await chrome.tabs.group({
-      tabIds: [tabId],
-      ...(existingGroup ? { groupId: existingGroup.id } : {}),
-    })
-    await chrome.tabGroups.update(groupId, { title: tabGroupTitle, color: tabGroupColor })
-    return { groupId }
+    return await runTabGroupingCommand(tabId, () => groupBrowserControlTab(tabId, currentSocket))
   }
   if (command.method === "tabs.ungroup") {
     const tabId = numberParam(command.params, "tabId")
-    await guardedUngroupBrowserControlTab(tabId)
+    await runTabGroupingCommand(tabId, () => guardedUngroupBrowserControlTab(tabId, {
+      assertCurrent: () => assertCurrentSocket(currentSocket),
+    }))
     return {}
   }
   if (command.method === "action.setAttached") {
@@ -451,25 +460,32 @@ async function getTabCaptureStreamId(tabId: number): Promise<string> {
   }
 }
 
-async function reconcileBrowserControlGroups(knownAttachedTabIds?: ReadonlySet<number>): Promise<void> {
+async function reconcileBrowserControlGroups(currentGeneration: number): Promise<void> {
   if (!chrome.tabGroups) {
     return
   }
-  const attachedTabIds = knownAttachedTabIds ?? await getAttachedTabIds()
   const groups = await chrome.tabGroups.query({})
+  assertCurrentGeneration(currentGeneration)
+  const attachedTabIds = await getAttachedTabIds()
+  assertCurrentGeneration(currentGeneration)
   for (const group of groups) {
-    if (!isCurrentBrowserControlGroupTitle(group.title) && !isLegacyBrowserControlGroupTitle(group.title)) {
+    if (!isBrowserControlGroupTitle(group.title)) {
       continue
     }
     const tabs = await chrome.tabs.query({ groupId: group.id })
+    assertCurrentGeneration(currentGeneration)
     for (const tab of tabs) {
       if (typeof tab.id !== "number") {
         continue
       }
-      if (attachedTabIds.has(tab.id)) {
+      const tabId = tab.id
+      if (attachedTabIds.has(tabId)) {
         continue
       }
-      await guardedUngroupBrowserControlTab(tab.id)
+      await runTabGroupingCommand(tabId, () => guardedUngroupBrowserControlTab(tabId, {
+        assertCurrent: () => assertCurrentGeneration(currentGeneration),
+        preserveAttached: true,
+      }))
     }
   }
 }
@@ -485,9 +501,59 @@ async function getAttachedTabIds(): Promise<Set<number>> {
   return attachedTabIds
 }
 
-async function guardedUngroupBrowserControlTab(tabId: number): Promise<void> {
+async function groupBrowserControlTab(tabId: number, currentSocket: WebSocket): Promise<JsonObject> {
+  const tab = await chrome.tabs.get(tabId)
+  if (tab.groupId !== undefined && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
+    const currentGroup = await chrome.tabGroups.get(tab.groupId)
+    if (currentGroup.title === tabGroupTitle && currentGroup.color === tabGroupColor) {
+      return { groupId: currentGroup.id }
+    }
+  }
+  const groups = await chrome.tabGroups.query({ windowId: tab.windowId })
+  assertCurrentSocket(currentSocket)
+  const attachedTabIds = await getAttachedTabIds()
+  assertCurrentSocket(currentSocket)
+  let existingGroup: chrome.tabGroups.TabGroup | undefined
+  for (const group of groups) {
+    if (group.title !== tabGroupTitle || group.color !== tabGroupColor) continue
+    const groupedTabs = await chrome.tabs.query({ groupId: group.id })
+    if (groupedTabs.some((groupedTab) => typeof groupedTab.id === "number" && attachedTabIds.has(groupedTab.id))) {
+      existingGroup = group
+      break
+    }
+  }
+  assertCurrentSocket(currentSocket)
+  const groupId = await chrome.tabs.group({
+    tabIds: [tabId],
+    ...(existingGroup ? { groupId: existingGroup.id } : {}),
+  })
+  await finalizeBrowserControlGrouping({
+    assertCurrent: () => assertCurrentSocket(currentSocket),
+    update: () => chrome.tabGroups.update(groupId, { title: tabGroupTitle, color: tabGroupColor }).then(() => {}),
+    rollback: () => chrome.tabs.ungroup(tabId),
+  })
+  return { groupId }
+}
+
+async function runTabGroupingCommand<A>(tabId: number, command: () => Promise<A>): Promise<A> {
+  const previous = tabGroupingCommands.get(tabId) ?? Promise.resolve()
+  const current = previous.catch(() => {}).then(command)
+  tabGroupingCommands.set(tabId, current)
+  try {
+    return await current
+  } finally {
+    if (tabGroupingCommands.get(tabId) === current) tabGroupingCommands.delete(tabId)
+  }
+}
+
+async function guardedUngroupBrowserControlTab(tabId: number, options: {
+  readonly assertCurrent?: () => void
+  readonly preserveAttached?: boolean
+} = {}): Promise<void> {
+  const assertCurrent = options.assertCurrent ?? (() => {})
   try {
     const tab = await chrome.tabs.get(tabId)
+    assertCurrent()
     if (tab.groupId === undefined || tab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) {
       return
     }
@@ -495,15 +561,35 @@ async function guardedUngroupBrowserControlTab(tabId: number): Promise<void> {
     if (chrome.tabGroups) {
       const group = await chrome.tabGroups.get(tab.groupId)
       groupTitle = group.title
+      assertCurrent()
     }
     if (!shouldUngroupBrowserControlTab(groupTitle)) {
       return
     }
+    if (options.preserveAttached && (await getAttachedTabIds()).has(tabId)) {
+      return
+    }
+    assertCurrent()
     await chrome.tabs.ungroup(tabId)
-  } catch {
+  } catch (error) {
+    if (error instanceof ConnectionChangedError) throw error
     // Tabs and groups can disappear while detach/close/reconnect cleanup is racing
     // the browser. Ungrouping is best-effort because stale groups are reconciled
     // again on service-worker startup and relay reconnect.
+  }
+}
+
+function assertCurrentSocket(currentSocket: WebSocket): void {
+  if (!isCurrentSocket(currentSocket)) throw new ConnectionChangedError("Extension connection changed")
+}
+
+function isCurrentSocket(currentSocket: WebSocket): boolean {
+  return socket === currentSocket && currentSocket.readyState === WebSocket.OPEN
+}
+
+function assertCurrentGeneration(currentGeneration: number): void {
+  if (currentGeneration !== socketGeneration || socket?.readyState !== WebSocket.OPEN) {
+    throw new ConnectionChangedError("Extension connection changed")
   }
 }
 

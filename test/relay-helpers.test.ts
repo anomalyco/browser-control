@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest"
 import {
   chromeExtensionOriginForPath,
   chromeWebStoreExtensionOrigin,
+  stableUnpackedExtensionOrigin,
   generateSessionId,
   getTargetInfo,
   isRestrictedTarget,
@@ -53,6 +54,7 @@ describe("validateBrowserFetchSite", () => {
 describe("validateWebSocketOrigin", () => {
   it("accepts the Store extension and missing origins for non-extension clients", () => {
     expect(validateWebSocketOrigin({ origin: chromeWebStoreExtensionOrigin })).toBeUndefined()
+    expect(validateWebSocketOrigin({ origin: stableUnpackedExtensionOrigin })).toBeUndefined()
     expect(validateWebSocketOrigin({ origin: undefined })).toBeUndefined()
   })
 
@@ -74,6 +76,13 @@ describe("validateWebSocketOrigin", () => {
       requireChromeExtension: true,
       additionalChromeExtensionOrigins: new Set([unpackedOrigin]),
     })).toBeDefined()
+  })
+
+  it("matches Chromium's UTF-16LE path hashing on Windows", () => {
+    const extensionPath = "C:\\Users\\USER\\AppData\\Roaming\\npm\\node_modules\\@opencode-ai\\browser-control\\extension\\dist"
+    expect(chromeExtensionOriginForPath(extensionPath, "win32")).toBe(
+      "chrome-extension://lojdoljaoemkbeamblbblebkgffocjke",
+    )
   })
 
   it("rejects web origins for the extension endpoint", () => {
