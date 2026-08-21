@@ -21,6 +21,7 @@ import * as NetworkCapture from "./network-capture.ts"
 import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest, ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary, ExecuteMedia } from "./relay-schema.ts"
 import type { SessionTarget } from "./relay-types.ts"
 import { executionContextFailureDiagnostic, runtimeFailureKind } from "./runtime-diagnostics.ts"
+import { ariaSnapshotWithoutTextControlValues } from "./aria-snapshot.ts"
 
 const nodeModules = { fs, path, os, crypto, url, util, events, stream, buffer, http, https, zlib }
 const nodeModuleAliases = Object.keys(nodeModules).join(", ")
@@ -1223,7 +1224,9 @@ function ghostCursorOptions(options: ShowGhostCursorOptions | undefined): GhostC
 export function createAriaSnapshotHelper(page: Pick<Page, "locator">): AriaSnapshotHelper {
   return async (target, options) => {
     const locator = target === undefined ? page.locator("body") : typeof target === "string" ? page.locator(target) : target
-    return await locator.ariaSnapshot({ timeout: options?.timeout ?? defaultAriaSnapshotTimeoutMs })
+    return await ariaSnapshotWithoutTextControlValues(locator, {
+      timeout: options?.timeout ?? defaultAriaSnapshotTimeoutMs,
+    })
   }
 }
 

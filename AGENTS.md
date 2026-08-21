@@ -125,9 +125,12 @@ local Node relay.
   semantic groups, lists, tables, block code, alerts, and primary links before
   repeated metadata; text input and textarea values are omitted. Snapshot diffs
   are explicit, require a compatible prior baseline, invalidate earlier refs,
-  and expose refs only for added or changed current lines. Keep `ariaSnapshot()`
-  and raw Playwright as deeper inspection layers; do not replace the code-first
-  execute interface with many action commands.
+  and expose refs only for added or changed current lines. `ariaSnapshot()` also
+  omits text-control values while preserving the surrounding accessibility
+  tree. It temporarily masks those values in Playwright's isolated world, so do
+  not run it concurrently with other operations on the same page. Keep raw
+  Playwright as a deeper inspection layer; do not replace the code-first execute
+  interface with many action commands.
 - Authenticated network capture is owned by the persistent Execute Sandbox and
   records normalized exchanges; HAR is only an export adapter. Written
   artifacts always use route-scoped stable `BC_SECRET_N` references. Lossless

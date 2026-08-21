@@ -179,7 +179,10 @@ Use the least expensive view that answers the question:
   baseline. A diff invalidates earlier refs and exposes refs only for added or
   changed current lines.
 - `ariaSnapshot(target?, { timeout })` returns Playwright's detailed YAML aria
-  tree when the compact snapshot omits needed structure.
+  tree when the compact snapshot omits needed structure. Text-control values are
+  omitted so password, token, search, numeric, range, and textarea contents do
+  not enter tool output. Await it separately; do not run other operations on the
+  same page concurrently.
 - `screenshotWithLabels({ page, path? })` adds visual labels and metadata when
   layout matters.
 

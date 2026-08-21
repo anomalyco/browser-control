@@ -312,7 +312,10 @@ reconciles existing client announcements, browser grouping, and page status.
 - `ref(id)` resolves controls from the latest valid snapshot and fails closed
   after navigation or incompatible DOM drift.
 - `ariaSnapshot()` and raw Playwright provide deeper inspection when compact
-  snapshots are insufficient.
+  snapshots are insufficient. The helper omits text-control values so password,
+  token, search, numeric, range, and textarea contents do not enter tool output.
+  It must be awaited separately from other operations on the same page while its
+  isolated-world value mask is active.
 - `screenshotWithLabels({ page, path? })` annotates likely interactive elements
   and returns label metadata.
 - `fillInput` and `fillInputs` provide a DOM-evaluation fallback when browser
