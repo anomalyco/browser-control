@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url"
 import { createDoctorReport, formatDoctorReport } from "./doctor.ts"
 import { runMcpServer } from "./mcp.ts"
 import * as RelayClient from "./relay-client.ts"
+import { parseAdditionalExtensionOrigins } from "./relay-helpers.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"
 import type { ExecuteAftermath, ExecuteLogEntry, ExecuteResponse, NetworkStatusResponse, NetworkStopResponse } from "./relay-schema.ts"
 import { startRelay } from "./relay.ts"
@@ -196,9 +197,11 @@ const serve = Command.make(
   {},
   Effect.fn("Cli.serve")(function* () {
     const port = yield* RelayClient.portConfig
+    const host = yield* RelayClient.hostConfig
+    const additionalExtensionOrigins = parseAdditionalExtensionOrigins(yield* RelayClient.extensionOriginsConfig)
     yield* Effect.scoped(
       Effect.gen(function* () {
-        const relay = yield* startRelay({ port })
+        const relay = yield* startRelay({ host, port, additionalExtensionOrigins })
         yield* Console.log(`browser-control relay listening at ${relay.url}`)
         yield* Console.log("Load extension/dist as an unpacked extension and click the toolbar button to attach a tab.")
         yield* Effect.never

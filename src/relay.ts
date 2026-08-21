@@ -67,6 +67,7 @@ export const startRelay = Effect.fn("Relay.start")(function* (options: {
   readonly port?: number
   readonly releaseTargetGraceMs?: number
   readonly sessionCatalogPath?: string | null
+  readonly additionalExtensionOrigins?: readonly string[]
 } = {}) {
   yield* installRelayProcessGuard
   return yield* Effect.acquireRelease(makeRelay(options), (server) => {
@@ -151,6 +152,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   readonly port?: number
   readonly releaseTargetGraceMs?: number
   readonly sessionCatalogPath?: string | null
+  readonly additionalExtensionOrigins?: readonly string[]
 } = {}) {
   const host = options.host ?? defaultHost
   const port = options.port ?? defaultPort
@@ -159,9 +161,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const endpointUrl = `http://${formatHostForUrl(host)}:${port}`
   const allowAnyChromeExtension = browserControlVersion === "0.0.0-dev"
   const bundledUnpackedExtensionOrigin = getBundledUnpackedExtensionOrigin()
-  const additionalChromeExtensionOrigins = new Set(
-    bundledUnpackedExtensionOrigin ? [bundledUnpackedExtensionOrigin] : [],
-  )
+  const additionalChromeExtensionOrigins = new Set([
+    ...(bundledUnpackedExtensionOrigin ? [bundledUnpackedExtensionOrigin] : []),
+    ...(options.additionalExtensionOrigins ?? []),
+  ])
   const sessionCatalog = options.sessionCatalogPath === null
     ? undefined
     : new SessionCatalog(options.sessionCatalogPath ?? defaultSessionCatalogPath(port))

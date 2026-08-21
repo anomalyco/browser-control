@@ -383,6 +383,12 @@ Current limitations:
   versions may differ when they use the same reported protocol version.
 - **Stale relay warning**: run `browser-control doctor`, stop the old relay
   process it identifies, then rerun a relay-backed command.
+- **WSL (Windows Chrome → relay in WSL)**: the relay and browser are on
+  different hosts, which shows up as `ERR_CONNECTION_REFUSED` (relay unreachable)
+  then a `403` handshake (extension origin not trusted). Set
+  `BROWSER_CONTROL_HOST=0.0.0.0` and
+  `BROWSER_CONTROL_EXTENSION_ORIGINS=chrome-extension://<id>`; full steps in
+  [docs/WSL.md](docs/WSL.md).
 
 For PowerShell, print the unpacked extension path with:
 

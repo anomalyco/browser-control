@@ -6,6 +6,7 @@ import {
   getTargetInfo,
   isRestrictedTarget,
   optionalSessionId,
+  parseAdditionalExtensionOrigins,
   parseTargetSelection,
   validateBrowserFetchSite,
   validateHostHeader,
@@ -80,6 +81,40 @@ describe("validateWebSocketOrigin", () => {
     expect(validateWebSocketOrigin({ origin: "https://example.com", requireChromeExtension: true })).toBeDefined()
     expect(validateWebSocketOrigin({ origin: "https://example.com" })).toBeDefined()
     expect(validateWebSocketOrigin({ origin: "chrome-extension://different-extension" })).toBeDefined()
+  })
+
+  it("accepts an operator-provided extension origin (BROWSER_CONTROL_EXTENSION_ORIGINS)", () => {
+    const extra = parseAdditionalExtensionOrigins("chrome-extension://hkjpchgckkjgpkcpiikmdeobkhmejhda")
+    expect(validateWebSocketOrigin({
+      origin: "chrome-extension://hkjpchgckkjgpkcpiikmdeobkhmejhda",
+      requireChromeExtension: true,
+      additionalChromeExtensionOrigins: new Set(extra),
+    })).toBeUndefined()
+  })
+})
+
+describe("parseAdditionalExtensionOrigins", () => {
+  it("splits comma- and whitespace-separated chrome-extension origins", () => {
+    expect(
+      parseAdditionalExtensionOrigins("chrome-extension://aaaa, chrome-extension://bbbb\nchrome-extension://cccc"),
+    ).toEqual(["chrome-extension://aaaa", "chrome-extension://bbbb", "chrome-extension://cccc"])
+  })
+
+  it("trims entries and drops empties and duplicates", () => {
+    expect(
+      parseAdditionalExtensionOrigins("  chrome-extension://aaaa , , chrome-extension://aaaa "),
+    ).toEqual(["chrome-extension://aaaa"])
+  })
+
+  it("keeps only chrome-extension:// origins, rejecting web origins, paths, and bare ids", () => {
+    expect(
+      parseAdditionalExtensionOrigins("https://evil.example, chrome-extension://aaaa/background.js, bbbb, chrome-extension://cccc"),
+    ).toEqual(["chrome-extension://cccc"])
+  })
+
+  it("returns an empty array for undefined or empty input", () => {
+    expect(parseAdditionalExtensionOrigins(undefined)).toEqual([])
+    expect(parseAdditionalExtensionOrigins("   ")).toEqual([])
   })
 })
 

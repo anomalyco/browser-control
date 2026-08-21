@@ -46,6 +46,21 @@ import {
 
 export const portConfig = Config.int("BROWSER_CONTROL_PORT").pipe(Config.withDefault(19989))
 
+/**
+ * Host the relay binds to. Defaults to loopback. Set to `0.0.0.0` (or a specific
+ * interface) so a browser on another host can reach the relay — e.g. Chrome on
+ * Windows driving a relay running inside WSL. See docs/WSL.md.
+ */
+export const hostConfig = Config.string("BROWSER_CONTROL_HOST").pipe(Config.withDefault("127.0.0.1"))
+
+/**
+ * Extra `chrome-extension://<id>` origins to allowlist for the extension
+ * WebSocket, comma- or whitespace-separated. Needed when the unpacked
+ * extension's path-derived id cannot match the relay's own bundled path
+ * (cross-host / WSL setups). Parsed by `parseAdditionalExtensionOrigins`.
+ */
+export const extensionOriginsConfig = Config.string("BROWSER_CONTROL_EXTENSION_ORIGINS").pipe(Config.withDefault(""))
+
 export const endpointForPort = (port: number): string => `http://127.0.0.1:${port}`
 
 export class RelayUnreachable extends Schema.TaggedErrorClass<RelayUnreachable>()(
