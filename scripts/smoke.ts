@@ -10,6 +10,7 @@ import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import util from "node:util"
+import { createAriaSnapshotHelper } from "../src/execute.ts"
 import { getObject } from "../src/relay-helpers.ts"
 import { browserControlBuildId } from "../src/version.ts"
 
@@ -255,6 +256,18 @@ const cases: SmokeCase[] = [
       )
       yield* click(page.locator("#buttonGenerate"), "shadow generate")
       results.push({ challenge: "shadow-dom", generated: yield* inputValue(page.locator("#editField"), "shadow generated value") })
+
+      yield* playwright("set ARIA redaction fixture", () =>
+        page.setContent(`<main><h2>Amount <input type="number" value="aria-number-value"></h2><input role="heading" value="aria-role-value"><textarea role="combobox">aria-textarea-value</textarea><div contenteditable>aria-editor-value</div><input type="button" value="Keep label"></main>`),
+      )
+      const safeAria = yield* playwright("capture redacted ARIA snapshot", () => createAriaSnapshotHelper(page)("main"))
+      if (safeAria.includes("aria-")) throw new Error("ARIA snapshot exposed a fixture form value")
+      if (!safeAria.includes('button "Keep label"')) throw new Error("ARIA snapshot removed a native button label")
+      const restoredAria = yield* playwright("verify ARIA snapshot cleanup", () => page.locator("main").ariaSnapshot())
+      if (!restoredAria.includes("aria-role-value") || !restoredAria.includes("aria-textarea-value")) {
+        throw new Error("ARIA snapshot value access was not restored")
+      }
+      results.push({ challenge: "aria-redaction", snapshot: safeAria })
       return results
     }),
   },
