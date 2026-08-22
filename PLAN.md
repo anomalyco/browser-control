@@ -108,7 +108,10 @@ explicit target and session routing now rechecks client visibility, including
 session-scoped auto-attach. Root teardown emits each announced child detach
 before detaching the root so clients cannot retain orphaned sessions. The
 browser-free `CdpRouter` module keeps these visibility, alias, and generation
-rules out of relay transport orchestration.
+rules out of relay transport orchestration. Browser-context permission and
+cookie commands route through a session-owned root for named clients, including
+multi-page sessions and browser CDP aliases, or exactly one visible root for raw
+clients, without falling through from a named client to an unrelated tab.
 
 ### CDP client state is isolated per connection
 

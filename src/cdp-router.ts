@@ -5,6 +5,18 @@ import { isRestrictedTarget } from "./relay-helpers.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
 import { shouldExposeChildTarget, type TargetRegistry } from "./target-registry.ts"
 
+const rootRoutableBrowserContextMethods = new Set([
+  "Browser.grantPermissions",
+  "Browser.resetPermissions",
+  "Storage.getCookies",
+  "Storage.setCookies",
+  "Storage.clearCookies",
+])
+
+export function isRootRoutableBrowserContextMethod(method: string): boolean {
+  return rootRoutableBrowserContextMethods.has(method)
+}
+
 export type CdpRoutedSession = {
   readonly tabId: number
   readonly rootSessionId?: string
@@ -37,9 +49,24 @@ export class CdpRouter<Client extends object> {
     return rootTarget ? this.canSeeTarget(client, rootTarget) : false
   }
 
-  singleVisibleRoot(client: Client): ConnectedTarget | undefined {
-    const visible = this.visibleRoots(client)
-    return visible.length === 1 ? visible[0] : undefined
+  preferredRoot(client: Client): ConnectedTarget | undefined {
+    const clientSessionId = this.clients.sessionId(client)
+    let preferred: ConnectedTarget | undefined
+    for (const target of this.registry.listRootTargets()) {
+      if (clientSessionId !== undefined) {
+        if (target.browserControlSessionId === clientSessionId) return target
+        continue
+      }
+      const matches = this.canSeeTarget(client, target)
+      if (!matches) continue
+      if (preferred) return undefined
+      preferred = target
+    }
+    return preferred
+  }
+
+  isBrowserAlias(client: Client, sessionId: string): boolean {
+    return this.clients.alias(client, sessionId)?.kind === "browser"
   }
 
   visibleRoots(client: Client): ConnectedTarget[] {

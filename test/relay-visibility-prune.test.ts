@@ -2,11 +2,138 @@ import { Effect } from "effect"
 import { describe, expect, it } from "vitest"
 import { WebSocket } from "ws"
 import { startRelay } from "../src/relay.ts"
-import type { CdpEvent, CdpRequest, JsonObject } from "../src/protocol.ts"
+import { parseExtensionCommand, type CdpEvent, type CdpRequest, type ExtensionCommand, type JsonObject } from "../src/protocol.ts"
 
 type CdpMessage = CdpEvent | { readonly id: number; readonly result?: JsonObject; readonly error?: { readonly message: string } }
 
 describe("relay target visibility pruning", () => {
+  it("routes browser-context commands only through the client's preferred root", async () => {
+    const port = 24_000 + Math.floor(Math.random() * 10_000)
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port, sessionCatalogPath: null })
+      const extension = yield* Effect.promise(() => connectFakeExtension(relay.url))
+      const rawClient = yield* Effect.promise(() => connectCdpClient(relay.url))
+      const sessionClient = yield* Effect.promise(() => connectCdpClient(relay.url, "session-a"))
+
+      try {
+        const rawCreate = yield* Effect.promise(() => sendCdp(rawClient, {
+          id: 1,
+          method: "Target.createTarget",
+          params: { url: "about:blank" },
+        }))
+        expect(rawCreate.result?.targetId).toBe("target-1")
+
+        extension.commands.length = 0
+        yield* Effect.promise(() => sendCdp(rawClient, {
+          id: 2,
+          method: "Storage.getCookies",
+          params: { browserContextId: "raw-context" },
+        }))
+        expect(extension.commands).toContainEqual(expect.objectContaining({
+          method: "debugger.sendCommand",
+          params: {
+            tabId: 1,
+            method: "Storage.getCookies",
+            params: { browserContextId: "raw-context" },
+          },
+        }))
+
+        extension.commands.length = 0
+        yield* Effect.promise(async () => {
+          await expect(sendCdp(sessionClient, {
+            id: 3,
+            method: "Storage.getCookies",
+            params: { browserContextId: "session-context" },
+          })).rejects.toThrow("A session-owned root target is required for Storage.getCookies")
+        })
+        expect(extension.commands).toEqual([])
+
+        const ownedCreate = yield* Effect.promise(() => sendCdp(sessionClient, {
+          id: 4,
+          method: "Target.createTarget",
+          params: { url: "about:blank" },
+        }))
+        expect(ownedCreate.result?.targetId).toBe("target-2")
+
+        const browserAttach = yield* Effect.promise(() => sendCdp(sessionClient, {
+          id: 5,
+          method: "Target.attachToBrowserTarget",
+        }))
+        const browserAlias = typeof browserAttach.result?.sessionId === "string"
+          ? browserAttach.result.sessionId
+          : undefined
+        expect(browserAlias).toBeDefined()
+        if (!browserAlias) throw new Error("Expected browser session alias")
+
+        const secondOwnedCreate = yield* Effect.promise(() => sendCdp(sessionClient, {
+          id: 6,
+          method: "Target.createTarget",
+          params: { url: "about:blank" },
+        }))
+        expect(secondOwnedCreate.result?.targetId).toBe("target-3")
+
+        extension.commands.length = 0
+        const routedCommands: CdpRequest[] = [
+          {
+            id: 7,
+            method: "Browser.grantPermissions",
+            params: {
+              browserContextId: "session-context",
+              origin: "https://example.com",
+              permissions: ["geolocation"],
+            },
+          },
+          {
+            id: 8,
+            sessionId: browserAlias,
+            method: "Browser.resetPermissions",
+            params: { browserContextId: "session-context" },
+          },
+          {
+            id: 9,
+            method: "Storage.getCookies",
+            params: { browserContextId: "session-context" },
+          },
+          {
+            id: 10,
+            method: "Storage.setCookies",
+            params: {
+              browserContextId: "session-context",
+              cookies: [{ name: "theme", value: "dark", domain: "example.com", path: "/" }],
+            },
+          },
+        ]
+        for (const command of routedCommands) {
+          yield* Effect.promise(() => sendCdp(sessionClient, command))
+        }
+
+        const forwarded = extension.commands.filter((command) => command.method === "debugger.sendCommand")
+        expect(forwarded).toHaveLength(routedCommands.length)
+        for (const [index, command] of routedCommands.entries()) {
+          expect(forwarded[index]?.params).toEqual({
+            tabId: 2,
+            method: command.method,
+            params: command.params,
+          })
+          expect(forwarded[index]?.params).not.toHaveProperty("sessionId")
+        }
+
+        yield* Effect.promise(async () => {
+          await expect(sendCdp(sessionClient, {
+            id: 11,
+            method: "Storage.clearCookies",
+            params: { browserContextId: "session-context" },
+          })).rejects.toThrow("Browser Control blocked Storage.clearCookies")
+        })
+        expect(extension.commands.filter((command) => command.method === "debugger.sendCommand")).toHaveLength(routedCommands.length)
+      } finally {
+        rawClient.close()
+        sessionClient.close()
+        extension.close()
+      }
+    })))
+  })
+
   it("detaches raw relay targets from a session client once that session gains an owned target", async () => {
     const port = 24_000 + Math.floor(Math.random() * 10_000)
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
@@ -170,12 +297,6 @@ describe("relay target visibility pruning", () => {
   })
 })
 
-type ExtensionCommand = {
-  readonly id: number
-  readonly method: string
-  readonly params?: { readonly tabId?: number; readonly method?: string; readonly params?: JsonObject }
-}
-
 function connectFakeExtension(relayUrl: string): Promise<WebSocket & { readonly commands: ExtensionCommand[] }> {
   return new Promise((resolve, reject) => {
     let nextTabId = 1
@@ -187,7 +308,7 @@ function connectFakeExtension(relayUrl: string): Promise<WebSocket & { readonly 
     })
     socket.on("error", reject)
     socket.on("message", (data) => {
-      const command = JSON.parse(data.toString()) as ExtensionCommand
+      const command = parseExtensionCommand(data.toString())
       commands.push(command)
       const params = command.params
       let result: JsonObject = {}
@@ -195,7 +316,7 @@ function connectFakeExtension(relayUrl: string): Promise<WebSocket & { readonly 
         result = { tabId: nextTabId++ }
       }
       if (command.method === "debugger.sendCommand" && params?.method === "Target.getTargetInfo") {
-        const tabId = params.tabId ?? 0
+        const tabId = typeof params.tabId === "number" ? params.tabId : 0
         result = {
           targetInfo: {
             targetId: `target-${tabId}`,

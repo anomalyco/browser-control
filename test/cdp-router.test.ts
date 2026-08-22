@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { CdpClientPool } from "../src/cdp-client-pool.ts"
-import { CdpRouter } from "../src/cdp-router.ts"
+import { CdpRouter, isRootRoutableBrowserContextMethod } from "../src/cdp-router.ts"
 import type { ConnectedTarget } from "../src/relay-types.ts"
 import { TargetRegistry } from "../src/target-registry.ts"
 
@@ -35,6 +35,85 @@ function setup() {
 }
 
 describe("CdpRouter", () => {
+  it("classifies browser-context methods that Chrome routes through a root tab", () => {
+    for (const method of [
+      "Browser.grantPermissions",
+      "Browser.resetPermissions",
+      "Storage.getCookies",
+      "Storage.setCookies",
+      "Storage.clearCookies",
+    ]) {
+      expect(isRootRoutableBrowserContextMethod(method)).toBe(true)
+    }
+    expect(isRootRoutableBrowserContextMethod("Runtime.evaluate")).toBe(false)
+  })
+
+  it("prefers a session-owned root for a named client", () => {
+    const { clients, registry, router } = setup()
+    const client = {}
+    clients.register(client, "session-a")
+    const owned = root({
+      tabId: 1,
+      sessionId: "owned-root",
+      targetId: "owned-target",
+      browserControlSessionId: "session-a",
+    })
+    registry.addRootTarget(owned)
+    registry.addRootTarget(root({
+      tabId: 2,
+      sessionId: "unrelated-root",
+      targetId: "unrelated-target",
+      owner: "user",
+    }))
+
+    expect(router.preferredRoot(client)).toBe(owned)
+
+    registry.addRootTarget(root({
+      tabId: 3,
+      sessionId: "second-owned-root",
+      targetId: "second-owned-target",
+      browserControlSessionId: "session-a",
+    }))
+    expect(router.preferredRoot(client)).toBe(owned)
+  })
+
+  it("recognizes browser session aliases", () => {
+    const { clients, router } = setup()
+    const client = {}
+    clients.register(client, "session-a")
+    const browserAlias = clients.createBrowserAlias(client)
+
+    expect(router.isBrowserAlias(client, browserAlias)).toBe(true)
+    expect(router.isBrowserAlias(client, "unknown-session")).toBe(false)
+  })
+
+  it("does not fall through from an empty named session to an unrelated root", () => {
+    const { clients, registry, router } = setup()
+    const client = {}
+    clients.register(client, "session-a")
+    registry.addRootTarget(root({
+      tabId: 1,
+      sessionId: "unrelated-root",
+      targetId: "unrelated-target",
+    }))
+
+    expect(router.visibleRoots(client)).toHaveLength(1)
+    expect(router.preferredRoot(client)).toBeUndefined()
+  })
+
+  it("selects exactly one visible root for a raw client", () => {
+    const { clients, registry, router } = setup()
+    const client = {}
+    clients.register(client)
+    const visible = root({ tabId: 1, sessionId: "root-1", targetId: "target-1" })
+    registry.addRootTarget(visible)
+
+    expect(router.preferredRoot(client)).toBe(visible)
+
+    registry.addRootTarget(root({ tabId: 2, sessionId: "root-2", targetId: "target-2" }))
+    expect(router.preferredRoot(client)).toBeUndefined()
+  })
+
   it("resolves only targets visible to the client", () => {
     const { clients, registry, router } = setup()
     const owner = {}

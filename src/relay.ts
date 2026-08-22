@@ -15,7 +15,7 @@ import {
   sendAttachedToTarget,
 } from "./cdp-shims.ts"
 import { CdpClientPool } from "./cdp-client-pool.ts"
-import { CdpRouter } from "./cdp-router.ts"
+import { CdpRouter, isRootRoutableBrowserContextMethod } from "./cdp-router.ts"
 import { ExtensionRpc } from "./extension-rpc.ts"
 import { createHttpRequestHandler } from "./http-api.ts"
 import type { CdpEvent, CdpRequest, JsonObject, PageStatus } from "./protocol.ts"
@@ -570,7 +570,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   function diagnosticTargetForClient(socket: WebSocket, sessionId: string | undefined): ConnectedTarget | ChildTarget | undefined {
     return sessionId
       ? cdpRouter.targetInfo(socket, { sessionId })
-      : cdpRouter.singleVisibleRoot(socket)
+      : cdpRouter.preferredRoot(socket)
   }
 
   function isRuntimeEvaluationMethod(method: string): boolean {
@@ -1299,9 +1299,20 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }
       return result
     }
-    const route = message.sessionId ? cdpRouter.session(socket, message.sessionId) : undefined
+    const browserAlias = message.sessionId !== undefined && cdpRouter.isBrowserAlias(socket, message.sessionId)
+    const rootRoutable = isRootRoutableBrowserContextMethod(message.method) && (!message.sessionId || browserAlias)
+    const preferredRoot = rootRoutable ? cdpRouter.preferredRoot(socket) : undefined
+    const route = rootRoutable && preferredRoot
+      ? { tabId: preferredRoot.tabId, rootSessionId: preferredRoot.sessionId }
+      : message.sessionId
+      ? cdpRouter.session(socket, message.sessionId)
+      : undefined
     if (!route) {
-      return yield* Effect.fail(new Error(message.sessionId
+      return yield* Effect.fail(new Error(rootRoutable
+        ? clientBrowserControlSessionId === undefined
+          ? `Exactly one visible root target is required for ${message.method}`
+          : `A session-owned root target is required for ${message.method}`
+        : message.sessionId
         ? `Unknown CDP session ${message.sessionId} for ${message.method}`
         : `CDP sessionId is required for ${message.method}`))
     }

@@ -79,6 +79,9 @@ local Node relay.
 - CDP guardrails are pure logic in `src/cdp-guardrails.ts`, enforced at the top
   of `routeCdpCommand`. Destructive browser-state methods are always blocked;
   read-only sessions additionally reject `Input.*`.
+- Browser-context CDP methods route through a session-owned root for named
+  clients or exactly one visible root for raw clients. A named client never
+  falls back to an unrelated unowned tab.
 - Human handoff waiters live in `src/handoff.ts`; derive their stable CDP target
   id from the actual Playwright `Page`, then bind the exact registry
   target/tab/session. The relay resolves only a matching handoff id from that
