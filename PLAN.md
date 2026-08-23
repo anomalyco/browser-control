@@ -79,6 +79,13 @@ inventory: Arc tab-group queries and restored-tab presentation run afterward,
 cannot mutate from stale sockets, serialize ownership changes per tab, and
 report failures through relay diagnostics.
 
+### Public clients tolerate extension reconnect windows
+
+`BrowserControlClient.make` gives a matching pre-existing relay the same bounded
+extension reconnect grace used after relay startup. Session summaries report
+connected only when the Playwright transport and a live default page are both
+available.
+
 ### Tab-capture recordings stream with intrinsic framing
 
 Extension protocol `2` sends each recording chunk as a sequenced `BCRD` binary

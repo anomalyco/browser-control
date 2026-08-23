@@ -173,6 +173,13 @@ export async function waitForPageContext(options: {
   throw lastError ?? new Error(`Execution context did not become available within ${options.timeoutMs}ms`)
 }
 
+export function isSessionPageConnected(options: {
+  readonly browserConnected: boolean
+  readonly pageUrl: string | null
+}): boolean {
+  return options.browserConnected && options.pageUrl !== null
+}
+
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
@@ -917,10 +924,11 @@ export class ExecuteSandbox {
   }
 
   getStatus(): { readonly sessionId?: string; readonly connected: boolean; readonly pageUrl: string | null; readonly stateKeys: string[] } {
+    const pageUrl = this.page && !this.page.isClosed() ? this.page.url() : null
     return {
       ...(this.options.sessionId ? { sessionId: this.options.sessionId } : {}),
-      connected: Boolean(this.browser?.isConnected()),
-      pageUrl: this.page && !this.page.isClosed() ? this.page.url() : null,
+      connected: isSessionPageConnected({ browserConnected: Boolean(this.browser?.isConnected()), pageUrl }),
+      pageUrl,
       stateKeys: Object.keys(this.state),
     }
   }

@@ -167,7 +167,7 @@ export const make = Effect.fn("BrowserControlClient.make")(function* (options: M
   }
   yield* RelayLifecycle.ensureExtensionConnected({
     relay,
-    waitForReconnect: readiness.started,
+    waitForReconnect: true,
   }).pipe(Effect.mapError((error) => clientError("connect", error)))
 
   const ensureSession = Effect.fn("BrowserControlClient.ensureSession")(function* (

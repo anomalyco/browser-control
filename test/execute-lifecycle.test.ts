@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest"
 import { Effect } from "effect"
-import { recoverSessionPage, runPlaywrightOperation, waitForPageContext } from "../src/execute.ts"
+import { isSessionPageConnected, recoverSessionPage, runPlaywrightOperation, waitForPageContext } from "../src/execute.ts"
 
 describe("execute lifecycle", () => {
+  it("reports a session connected only when it has a live default page", () => {
+    expect(isSessionPageConnected({ browserConnected: true, pageUrl: null })).toBe(false)
+    expect(isSessionPageConnected({ browserConnected: true, pageUrl: "about:blank" })).toBe(true)
+    expect(isSessionPageConnected({ browserConnected: false, pageUrl: "about:blank" })).toBe(false)
+  })
+
   it("bounds a Playwright operation that never settles", async () => {
     const error = await Effect.runPromise(runPlaywrightOperation({
       label: "Close test page",

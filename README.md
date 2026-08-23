@@ -170,6 +170,10 @@ journals and are rejected while session network capture is active. Reveal a
 sensitive result with `BrowserControlClient.reveal`; this keeps unwrapping in
 the same Effect runtime that created the redacted value, including when an
 application and Browser Control resolve separate Effect package instances.
+Client construction waits through a bounded extension reconnect window even
+when the matching relay was already running. A session summary reports
+`connected: true` only when its Playwright transport and live default page are
+both available.
 Use `resetSession(id)` to replace a persisted session generation that is no
 longer connected before creating a new authenticated-origin capability.
 
