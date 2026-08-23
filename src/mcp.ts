@@ -37,6 +37,7 @@ type AdoptArguments = {
 }
 
 const emptyInputSchema = objectSchema({})
+export const sessionDeleteIsIdempotent = true
 
 function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSession): readonly ToolSpec[] {
   return [
@@ -152,7 +153,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       }),
       readOnly: false,
       destructive: true,
-      idempotent: true,
+      idempotent: false,
       handle: (input) => Effect.gen(function* () {
         const id = optionalStringField(input, "id") ?? currentSession.id
         const session = yield* relay.sessionReset(id)
@@ -169,7 +170,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       }),
       readOnly: false,
       destructive: true,
-      idempotent: false,
+      idempotent: sessionDeleteIsIdempotent,
       handle: (input) => Effect.gen(function* () {
         const id = optionalStringField(input, "id") ?? currentSession.id
         const result = yield* relay.sessionDelete(id)
