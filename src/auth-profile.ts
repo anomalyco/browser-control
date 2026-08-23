@@ -51,6 +51,19 @@ export type AuthRunResult = {
   readonly durationMs: number
 }
 
+export interface AuthProfileOptions {
+  readonly baseDir?: string
+}
+
+export interface AuthRunOptions extends AuthProfileOptions {
+  readonly name: string
+  readonly command: string
+  readonly args?: readonly string[]
+  readonly cwd?: string
+  readonly timeoutMs?: number
+  readonly maxOutputBytes?: number
+}
+
 export class AuthProfileError extends Schema.TaggedError<AuthProfileError>()(
   "AuthProfile.Error",
   {
@@ -195,19 +208,11 @@ export const write = Effect.fn("AuthProfile.write")(function* (options: {
   return yield* writeLock.withPermit(writeProfile(options))
 })
 
-export const status = Effect.fn("AuthProfile.status")(function* (name: string, options: { readonly baseDir?: string } = {}) {
+export const status = Effect.fn("AuthProfile.status")(function* (name: string, options: AuthProfileOptions = {}) {
   return summary(yield* read(name, options))
 })
 
-export const run = Effect.fn("AuthProfile.run")(function* (options: {
-  readonly name: string
-  readonly command: string
-  readonly args?: readonly string[]
-  readonly cwd?: string
-  readonly timeoutMs?: number
-  readonly maxOutputBytes?: number
-  readonly baseDir?: string
-}) {
+export const run = Effect.fn("AuthProfile.run")(function* (options: AuthRunOptions) {
   if (!options.command.trim()) {
     return yield* Effect.fail(new AuthProfileError({ message: "Auth command must not be empty", operation: "run", reason: "run-failed" }))
   }
@@ -237,7 +242,7 @@ export const run = Effect.fn("AuthProfile.run")(function* (options: {
   } satisfies AuthRunResult
 })
 
-export const remove = Effect.fn("AuthProfile.remove")(function* (name: string, options: { readonly baseDir?: string } = {}) {
+export const remove = Effect.fn("AuthProfile.remove")(function* (name: string, options: AuthProfileOptions = {}) {
   const filePath = yield* profilePath(options.baseDir ?? defaultBaseDir(), name)
   return yield* Effect.tryPromise({
     try: async () => {

@@ -305,6 +305,23 @@ browser-control secrets status github
 browser-control secrets run github -- ./github-cli repositories
 ```
 
+Generated TypeScript applications can own that wrapper internally through the
+public SDK:
+
+```ts
+import { SecretProfile } from "@opencode-ai/browser-control"
+import { Effect } from "effect"
+
+const result = await Effect.runPromise(SecretProfile.run({
+  name: "github",
+  command: process.execPath,
+  args: ["./github-cli.js", "repositories"],
+}))
+```
+
+The worker receives `BC_SECRET_N` variables and its bounded output is redacted.
+The public SDK exposes profile metadata but never raw profile values.
+
 Refresh credentials normally renewed by a page reload with:
 
 ```bash

@@ -177,6 +177,30 @@ both available.
 Use `resetSession(id)` to replace a persisted session generation that is no
 longer connected before creating a new authenticated-origin capability.
 
+Applications with a generated direct client can also consume a Secret Profile
+without requiring users to wrap the application in `browser-control secrets
+run`:
+
+```ts
+import { SecretProfile } from "@opencode-ai/browser-control"
+import { Effect } from "effect"
+
+const result = await Effect.runPromise(SecretProfile.run({
+  name: "github",
+  command: process.execPath,
+  args: ["./github-cli.js", "repositories"],
+}))
+
+process.stdout.write(result.stdout)
+process.stderr.write(result.stderr)
+process.exitCode = result.exitCode
+```
+
+The child receives `BC_SECRET_N` variables. The parent never receives their raw
+values, and known values are redacted from bounded child output. `status()`
+returns metadata only; the public SDK intentionally does not expose raw profile
+reads.
+
 ## Work in Sessions
 
 A bare `execute` creates a fresh session. Pass its ID to continue with the same

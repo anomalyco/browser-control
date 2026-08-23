@@ -322,6 +322,9 @@ reconciles existing client announcements, browser grouping, and page status.
   reload-based refresh preserve references by observed request source.
 - `secrets run` injects profile values into a child process and redacts known
   values from bounded stdout and stderr before returning them.
+- The public `SecretProfile` SDK exposes metadata-only `status` and redacted
+  profile-worker `run`, so generated applications do not require a
+  user-authored `browser-control secrets run` wrapper or gain raw profile reads.
 - While capture is active, values observed in completed exchanges and
   secret-shaped returned data are removed from execute results, URLs, logs,
   and journal records before they leave the sandbox.
