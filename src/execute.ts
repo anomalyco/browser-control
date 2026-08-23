@@ -176,8 +176,9 @@ export async function waitForPageContext(options: {
 export function isSessionPageConnected(options: {
   readonly browserConnected: boolean
   readonly pageUrl: string | null
+  readonly healthCheckRequired: boolean
 }): boolean {
-  return options.browserConnected && options.pageUrl !== null
+  return options.browserConnected && options.pageUrl !== null && !options.healthCheckRequired
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -927,7 +928,11 @@ export class ExecuteSandbox {
     const pageUrl = this.page && !this.page.isClosed() ? this.page.url() : null
     return {
       ...(this.options.sessionId ? { sessionId: this.options.sessionId } : {}),
-      connected: isSessionPageConnected({ browserConnected: Boolean(this.browser?.isConnected()), pageUrl }),
+      connected: isSessionPageConnected({
+        browserConnected: Boolean(this.browser?.isConnected()),
+        pageUrl,
+        healthCheckRequired: this.pageHealthCheckRequired,
+      }),
       pageUrl,
       stateKeys: Object.keys(this.state),
     }

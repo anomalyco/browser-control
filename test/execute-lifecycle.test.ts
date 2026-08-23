@@ -4,9 +4,10 @@ import { isSessionPageConnected, recoverSessionPage, runPlaywrightOperation, wai
 
 describe("execute lifecycle", () => {
   it("reports a session connected only when it has a live default page", () => {
-    expect(isSessionPageConnected({ browserConnected: true, pageUrl: null })).toBe(false)
-    expect(isSessionPageConnected({ browserConnected: true, pageUrl: "about:blank" })).toBe(true)
-    expect(isSessionPageConnected({ browserConnected: false, pageUrl: "about:blank" })).toBe(false)
+    expect(isSessionPageConnected({ browserConnected: true, pageUrl: null, healthCheckRequired: false })).toBe(false)
+    expect(isSessionPageConnected({ browserConnected: true, pageUrl: "about:blank", healthCheckRequired: false })).toBe(true)
+    expect(isSessionPageConnected({ browserConnected: false, pageUrl: "about:blank", healthCheckRequired: false })).toBe(false)
+    expect(isSessionPageConnected({ browserConnected: true, pageUrl: "about:blank", healthCheckRequired: true })).toBe(false)
   })
 
   it("bounds a Playwright operation that never settles", async () => {
