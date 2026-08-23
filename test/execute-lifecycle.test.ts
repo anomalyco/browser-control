@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { Effect } from "effect"
-import { finishHandoff, isSessionPageConnected, recoverSessionPage, runPlaywrightOperation, waitForPageContext } from "../src/execute.ts"
+import { isSessionPageConnected, recoverSessionPage, runPlaywrightOperation, waitForPageContext } from "../src/execute.ts"
 
 describe("execute lifecycle", () => {
   it("reports a session connected only when it has a live default page", () => {
@@ -107,22 +107,6 @@ describe("execute lifecycle", () => {
     await expect(waitForPageContext({
       timeoutMs: 1_000,
       retryDelayMs: 10,
-      delay: () => Promise.resolve(),
-      evaluate: () => ++attempts < 3
-        ? Promise.reject(new Error("Execution context was destroyed"))
-        : Promise.resolve(),
-    })).resolves.toBeUndefined()
-    expect(attempts).toBe(3)
-  })
-
-  it("does not return from a resolved handoff until the destination context is available", async () => {
-    let attempts = 0
-    await expect(finishHandoff({
-      outcome: "resolved",
-      message: "complete authentication",
-      timeoutMs: 30_000,
-      contextTimeoutMs: 1_000,
-      retryDelayMs: 0,
       delay: () => Promise.resolve(),
       evaluate: () => ++attempts < 3
         ? Promise.reject(new Error("Execution context was destroyed"))

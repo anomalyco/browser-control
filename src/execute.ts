@@ -182,30 +182,6 @@ export function isSessionPageConnected(options: {
   return options.browserConnected && options.pageUrl !== null && !options.healthCheckRequired
 }
 
-export async function finishHandoff(options: {
-  readonly outcome: HandoffOutcome
-  readonly message: string
-  readonly timeoutMs: number
-  readonly evaluate: () => Promise<void>
-  readonly contextTimeoutMs?: number
-  readonly retryDelayMs?: number
-  readonly delay?: (milliseconds: number) => Promise<void>
-}): Promise<void> {
-  if (options.outcome === "timeout") {
-    throw new Error(`Handoff timed out after ${options.timeoutMs}ms waiting for the user: ${options.message}`)
-  }
-  if (options.outcome !== "resolved") {
-    const targetEvent = options.outcome.reason === "target-crashed" ? "crashed" : "detached"
-    throw new Error(`Handoff cancelled because its target ${targetEvent}: ${options.message}`)
-  }
-  await waitForPageContext({
-    evaluate: options.evaluate,
-    timeoutMs: options.contextTimeoutMs ?? sessionPageHealthCheckTimeoutMs,
-    ...(options.retryDelayMs === undefined ? {} : { retryDelayMs: options.retryDelayMs }),
-    ...(options.delay === undefined ? {} : { delay: options.delay }),
-  })
-}
-
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
@@ -815,11 +791,15 @@ export class ExecuteSandbox {
         ...(options?.start ? { start: options.start } : {}),
         ...(options?.start ? { cancelStart: () => Effect.runPromise(this.disconnectSettled()) } : {}),
       })
-      await finishHandoff({
-        outcome,
-        message: handoffMessage,
-        timeoutMs,
-        contextTimeoutMs: handoffPageContextTimeoutMs,
+      if (outcome === "timeout") {
+        throw new Error(`Handoff timed out after ${timeoutMs}ms waiting for the user: ${handoffMessage}`)
+      }
+      if (outcome !== "resolved") {
+        const targetEvent = outcome.reason === "target-crashed" ? "crashed" : "detached"
+        throw new Error(`Handoff cancelled because its target ${targetEvent}: ${handoffMessage}`)
+      }
+      await waitForPageContext({
+        timeoutMs: handoffPageContextTimeoutMs,
         evaluate: async () => {
           try {
             const currentPage = await this.getSessionPage({ context })
