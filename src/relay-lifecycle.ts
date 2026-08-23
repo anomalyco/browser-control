@@ -151,14 +151,16 @@ function prepareStaleRelayRestart(options: {
       return { _tag: "Changed", version: confirmed.success } as const
     }
     const instanceId = confirmed.success.instanceId
+    const shutdown = options.relay.shutdown
     if (
       confirmed.success.managed !== true
       || !instanceId
+      || !shutdown
       || !isNewerBuild(options.currentBuildId, confirmed.success.buildId)
     ) {
       return { _tag: "Unsupported" } as const
     }
-    yield* options.relay.shutdown(instanceId).pipe(
+    yield* shutdown(instanceId).pipe(
       Effect.catch((error) => isRelayUnreachable(error) || isRelayInstanceChanged(error)
         ? Effect.void
         : Effect.fail(error)),

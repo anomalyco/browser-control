@@ -108,7 +108,7 @@ export type RelayClientError = RelayUnreachable | RelayRejected | RelayDecodeFai
 export interface Interface {
   readonly endpoint: string
   readonly version: Effect.Effect<RelayVersion, RelayClientError>
-  readonly shutdown: (instanceId: string) => Effect.Effect<RelayShutdownResponse, RelayClientError>
+  readonly shutdown?: (instanceId: string) => Effect.Effect<RelayShutdownResponse, RelayClientError>
   readonly extensionStatus: Effect.Effect<ExtensionStatus, RelayClientError>
   readonly targets: Effect.Effect<readonly TargetSummary[], RelayClientError>
   readonly sessions: Effect.Effect<readonly SessionSummary[], RelayClientError>
