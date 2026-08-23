@@ -1,5 +1,20 @@
 # @opencode-ai/browser-control
 
+## 0.5.0
+
+### Minor Changes
+
+- b26536f: Update Playwright, WebSocket, parser, package-manager, build, test, and TypeScript dependencies to their current compatible releases. Align the documented Node.js requirement with the Node 22.19 minimum required by the current Effect Platform runtime.
+
+### Patch Changes
+
+- 6994459: Wait through transient extension reconnects when constructing the TypeScript client and report sessions connected only when they have a live default page.
+- 3146cdc: Wait for the destination page execution context before returning from a navigation-triggering human handoff.
+- 5271076: Expose safe Secret Profile status and profile-worker execution through the TypeScript SDK.
+- 2d05bbc: Automatically replace a stale detached relay that supports guarded shutdown with the current CLI build before running operational commands, while older and foreground relays continue to fail closed with restart guidance.
+- 2de472a: Make session deletion idempotent when the requested session is already absent.
+- 83904e5: Wake the extension service worker and reconnect to the relay after a full browser restart.
+
 ## 0.4.1
 
 ### Patch Changes
