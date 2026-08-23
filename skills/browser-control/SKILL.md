@@ -345,8 +345,9 @@ Common diagnoses:
   extension only if its reconnect loop does not recover.
 - Incompatible extension protocol: update either the extension or npm package;
   exact extension and relay release versions do not need to match.
-- Stale relay build: operational commands reject it with restart guidance;
-  rebuild the CLI and restart the relay.
+- Stale relay build: operational commands automatically replace an older
+  detached managed relay. Source, foreground, and newer relays fail closed with
+  restart guidance instead of being stopped.
 - `Target not found`: attach the intended tab, then select or adopt it using a
   unique URL substring or explicit index.
 - All targets disappeared: dismissing Chromium's debugging banner detaches every

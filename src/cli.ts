@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
-import { Config, Console, Effect, FileSystem, Layer, Option } from "effect"
+import { Config, Console, Deferred, Effect, FileSystem, Layer, Option } from "effect"
 import { Argument, Command, Flag } from "effect/unstable/cli"
 import path from "node:path"
 import process from "node:process"
@@ -200,10 +200,15 @@ const serve = Command.make(
     const additionalExtensionOrigins = parseAdditionalExtensionOrigins(yield* RelayClient.extensionOriginsConfig)
     yield* Effect.scoped(
       Effect.gen(function* () {
-        const relay = yield* startRelay({ port, additionalExtensionOrigins })
+        const shutdown = yield* Deferred.make<void>()
+        const relay = yield* startRelay({
+          port,
+          additionalExtensionOrigins,
+          shutdown: () => { Effect.runFork(Deferred.succeed(shutdown, undefined)) },
+        })
         yield* Console.log(`browser-control relay listening at ${relay.url}`)
         yield* Console.log("Load extension/dist as an unpacked extension and click the toolbar button to attach a tab.")
-        yield* Effect.never
+        yield* Deferred.await(shutdown)
       }),
     )
   }),

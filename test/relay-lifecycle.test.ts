@@ -130,15 +130,16 @@ describe("relay lifecycle", () => {
     let starts = 0
     const client = relay({
       version: Effect.suspend(() => running ? Effect.succeed(running) : Effect.fail(unreachable())),
+      shutdown: () => Effect.sync(() => {
+        stops++
+        running = undefined
+        return { stopping: true as const }
+      }),
     })
 
     const result = await Effect.runPromise(ensureRelay({
       relay: client,
       buildId: current.buildId,
-      stop: () => Effect.sync(() => {
-        stops++
-        running = undefined
-      }),
       start: Effect.sync(() => {
         starts++
         running = current
@@ -158,12 +159,15 @@ describe("relay lifecycle", () => {
     let stops = 0
     const client = relay({
       version: Effect.sync(() => ++probes === 1 ? stale : current),
+      shutdown: () => Effect.sync(() => {
+        stops++
+        return { stopping: true as const }
+      }),
     })
 
     const result = await Effect.runPromise(ensureRelay({
       relay: client,
       buildId: current.buildId,
-      stop: () => Effect.sync(() => { stops++ }),
       start: Effect.die("should not start"),
       retryDelayMs: 0,
     }))

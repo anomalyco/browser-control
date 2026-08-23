@@ -67,6 +67,7 @@ export const startRelay = Effect.fn("Relay.start")(function* (options: {
   readonly releaseTargetGraceMs?: number
   readonly sessionCatalogPath?: string | null
   readonly additionalExtensionOrigins?: readonly string[]
+  readonly shutdown?: () => void
 } = {}) {
   yield* installRelayProcessGuard
   return yield* Effect.acquireRelease(makeRelay(options), (server) => {
@@ -151,6 +152,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   readonly releaseTargetGraceMs?: number
   readonly sessionCatalogPath?: string | null
   readonly additionalExtensionOrigins?: readonly string[]
+  readonly shutdown?: () => void
 } = {}) {
   const host = defaultHost
   const port = options.port ?? defaultPort
@@ -503,13 +505,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     refreshPageStatus(tabId)
     refreshTabGrouping(tabId)
   }
-  const managed = yield* Config.boolean("BROWSER_CONTROL_MANAGED_RELAY").pipe(Config.withDefault(false))
+  const managed = options.shutdown !== undefined
+    && (yield* Config.boolean("BROWSER_CONTROL_MANAGED_RELAY").pipe(Config.withDefault(false)))
   const relayRequestHandler = createHttpRequestHandler({
     host,
     port,
     browserId,
     relayInstance: { id: browserId, startedAt: new Date().toISOString(), pid: process.pid, managed },
-    shutdown: () => process.kill(process.pid, "SIGTERM"),
+    shutdown: options.shutdown ?? (() => {}),
     registry,
     recordingRelay,
     sessions,

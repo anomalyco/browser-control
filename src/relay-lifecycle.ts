@@ -15,7 +15,6 @@ export type RelayReadiness = {
 export type EnsureRelayOptions = {
   readonly relay: RelayClient.Interface
   readonly start?: Effect.Effect<void, Error>
-  readonly stop?: (version: RelayVersion) => Effect.Effect<void, Error>
   readonly buildId?: string
   readonly retryTimes?: number
   readonly retryDelayMs?: number
@@ -69,7 +68,6 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
       relay: options.relay,
       version: initial.success,
       currentBuildId: buildId,
-      ...(options.stop ? { stop: options.stop } : {}),
     })
     if (restart._tag === "Unsupported") {
       return { version: initial.success, started: false, buildProblem } satisfies RelayReadiness
@@ -139,7 +137,6 @@ function prepareStaleRelayRestart(options: {
   readonly relay: RelayClient.Interface
   readonly version: RelayVersion
   readonly currentBuildId: string
-  readonly stop?: (version: RelayVersion) => Effect.Effect<void, Error>
 }): Effect.Effect<
   { readonly _tag: "Stopped" } | { readonly _tag: "Changed"; readonly version: RelayVersion } | { readonly _tag: "Unsupported" },
   Error | RelayClient.RelayClientError
@@ -153,23 +150,19 @@ function prepareStaleRelayRestart(options: {
     if (!isSameRelayInstance(options.version, confirmed.success)) {
       return { _tag: "Changed", version: confirmed.success } as const
     }
-    if (options.stop) {
-      yield* options.stop(confirmed.success)
-    } else {
-      const instanceId = confirmed.success.instanceId
-      if (
-        confirmed.success.managed !== true
-        || !instanceId
-        || !isNewerBuild(options.currentBuildId, confirmed.success.buildId)
-      ) {
-        return { _tag: "Unsupported" } as const
-      }
-      yield* options.relay.shutdown(instanceId).pipe(
-        Effect.catch((error) => isRelayUnreachable(error) || isRelayInstanceChanged(error)
-          ? Effect.void
-          : Effect.fail(error)),
-      )
+    const instanceId = confirmed.success.instanceId
+    if (
+      confirmed.success.managed !== true
+      || !instanceId
+      || !isNewerBuild(options.currentBuildId, confirmed.success.buildId)
+    ) {
+      return { _tag: "Unsupported" } as const
     }
+    yield* options.relay.shutdown(instanceId).pipe(
+      Effect.catch((error) => isRelayUnreachable(error) || isRelayInstanceChanged(error)
+        ? Effect.void
+        : Effect.fail(error)),
+    )
     return { _tag: "Stopped" } as const
   })
 }

@@ -64,6 +64,11 @@ describe("HTTP request schemas", () => {
         instanceId: "relay-test",
         startedAt: "2026-07-19T00:00:00.000Z",
         pid: 123,
+        managed: false,
+      })
+      await expect(postJson(port, "/shutdown", { instanceId: "relay-test" })).resolves.toMatchObject({
+        status: 409,
+        body: { error: expect.stringContaining("does not match the active managed instance"), code: "invalid-request" },
       })
       const extension = await fetch(`http://127.0.0.1:${port}/extension/status`).then((response) => response.json())
       expect(extension).toMatchObject({
@@ -137,6 +142,54 @@ describe("HTTP request schemas", () => {
         status: 409,
         body: { error: expect.stringContaining("already adopted by session alpha"), code: "target-owned" },
       })
+    } finally {
+      await close(server)
+    }
+  })
+
+  it("shuts down only the matching managed relay instance", async () => {
+    let handler: ReturnType<typeof createHttpRequestHandler> | undefined
+    let shutdowns = 0
+    const server = http.createServer((request, response) => {
+      if (!handler) {
+        response.writeHead(503).end()
+        return
+      }
+      handler(request, response)
+    })
+    await listen(server)
+    const address = server.address()
+    if (!address || typeof address === "string") throw new Error("test server did not bind a TCP port")
+    const port = address.port
+    const registry = new TargetRegistry()
+    handler = createHttpRequestHandler({
+      relayInstance: { id: "managed-relay", startedAt: "2026-08-23T00:00:00.000Z", pid: 456, managed: true },
+      shutdown: () => { shutdowns++ },
+      host: "127.0.0.1",
+      port,
+      browserId: "test-browser",
+      extensionStatus: () => ({ connected: false, version: null, protocolVersion: null, protocolCompatible: null, protocolLegacy: null }),
+      recordingRelay: new RecordingRelay({
+        isExtensionConnected: () => false,
+        sendToExtension: async () => ({}),
+        sendDebuggerCommand: async () => ({}),
+      }),
+      registry,
+      sessions: new BrowserControlSessions(`http://127.0.0.1:${port}`, undefined, undefined, registry),
+    })
+
+    try {
+      await expect(postJson(port, "/shutdown", { instanceId: "other-relay" })).resolves.toMatchObject({
+        status: 409,
+        body: { code: "invalid-request" },
+      })
+      expect(shutdowns).toBe(0)
+
+      await expect(postJson(port, "/shutdown", { instanceId: "managed-relay" })).resolves.toEqual({
+        status: 200,
+        body: { stopping: true },
+      })
+      expect(shutdowns).toBe(1)
     } finally {
       await close(server)
     }

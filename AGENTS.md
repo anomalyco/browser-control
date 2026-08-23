@@ -176,6 +176,9 @@ local Node relay.
   managed-relay process-fault diagnostics are retained with mode `0600` in
   `~/.browser-control/relay.log` so same-build restarts and session loss are
   diagnosable instead of appearing as eviction.
+- Operational commands may replace only an older managed relay after confirming
+  its exact instance id, and must wait for it to exit before starting the
+  current build. Never auto-stop source, foreground, or newer relays.
 - `dist/mcp.js` self-runs via the dedicated `src/mcp-main.ts` entrypoint. Do not
   add `process.argv[1] === import.meta.url` self-run guards to modules that get
   bundled into `dist/cli.js`; esbuild inlining makes the guard fire inside the

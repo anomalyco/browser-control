@@ -464,6 +464,10 @@ relay reports both values so `doctor` can identify a stale long-running relay.
 It also reports an instance id, start time, and PID; bounded managed-relay
 process-fault diagnostics are retained locally so unexpected same-build
 restarts can be distinguished from session eviction.
+Operational commands replace an older managed relay only after confirming its
+exact instance id, then wait for that process to exit before starting the
+current build. Source runs, foreground relays, and newer builds fail closed with
+restart guidance instead of being terminated automatically.
 
 ## Known Limitations
 

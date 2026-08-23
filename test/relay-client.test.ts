@@ -66,6 +66,13 @@ const session = {
 }
 
 describe("RelayClient", () => {
+  it("sends the guarded relay shutdown request", async () => {
+    routes.set("POST /shutdown", { status: 200, body: { stopping: true } })
+    const result = await withClient((client) => client.shutdown("relay-instance"))
+    expect(result).toEqual({ stopping: true })
+    expect(lastRequestBody).toEqual({ instanceId: "relay-instance" })
+  })
+
   it("decodes sessions", async () => {
     routes.set("GET /cli/sessions", { status: 200, body: { sessions: [session] } })
     const sessions = await withClient((client) => client.sessions)
