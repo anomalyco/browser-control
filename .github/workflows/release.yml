@@ -27,8 +27,10 @@ jobs:
       - run: npm install --global npm@latest
       - run: pnpm install --frozen-lockfile
       - run: pnpm run ci
-      - uses: changesets/action@v1
+      - uses: changesets/action@v2
         with:
-          publish: pnpm release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          publish-script: pnpm release
+          pr-draft: always
+          create-github-releases: true
+          push-git-tags: true
