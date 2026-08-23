@@ -71,6 +71,12 @@ Verification:
 
 ## Recently Shipped
 
+### Session cleanup is safely repeatable
+
+Deleting a resolved session id is idempotent across HTTP, CLI, and MCP. The
+structured result reports whether a live session was deleted, while CLI cleanup
+retries no longer turn an already-absent session into a failure.
+
 ### Handoffs return on a live destination context
 
 After a human completes a navigation-triggering handoff, Browser Control waits

@@ -438,11 +438,16 @@ const sessionDelete = Command.make(
   Effect.fn("Cli.sessionDelete")(function* ({ id, session }) {
     const relay = yield* RelayClient.Service
     const store = yield* SessionStore.Service
-    const sessionId = yield* resolveExistingSessionId(resolveExplicitSessionSelector({
+    const selectedSessionId = resolveExplicitSessionSelector({
       positional: optionString(id),
       flag: optionString(session),
       environment: Option.getOrUndefined(yield* sessionIdConfig),
-    }))
+    })
+    const sessionId = selectedSessionId ?? (yield* store.read)
+    if (!sessionId) {
+      return yield* Effect.fail(new Error("No session provided and no current Browser Control session exists"))
+    }
+    yield* ensureCliRelay()
     yield* relay.sessionDelete(sessionId)
     const current = yield* store.read
     if (current === sessionId) {

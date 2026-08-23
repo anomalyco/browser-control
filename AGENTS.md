@@ -164,6 +164,8 @@ local Node relay.
   navigation timestamps.
 - Session delete/reset must acquire the session's execute permit before closing
   the sandbox, so running scripts are never yanked mid-flight.
+- Session deletion is idempotent for a resolved session id: return whether a
+  live session was deleted instead of failing when it is already absent.
 - Reset/delete of an absent persisted relay-owned target waits for protocol-v1
   inventory reconciliation or a bounded grace, then forgets the dead identity
   without guessing a physical tab to close. Never apply this dead-target path

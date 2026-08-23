@@ -80,11 +80,16 @@ describe("RelayClient", () => {
   })
 
   it("keeps the relay's error message as the top-level failure message", async () => {
-    routes.set("POST /cli/session/delete", { status: 404, body: { error: "Session not found: ghost", code: "session-not-found" } })
-    const error = await withClient((client) => client.sessionDelete("ghost").pipe(Effect.flip))
+    routes.set("POST /cli/session/reset", { status: 404, body: { error: "Session not found: ghost", code: "session-not-found" } })
+    const error = await withClient((client) => client.sessionReset("ghost").pipe(Effect.flip))
     expect(error._tag).toBe("RelayClient.RelayRejected")
     expect(error.message).toBe("Session not found: ghost")
     expect(error._tag === "RelayClient.RelayRejected" ? error.code : undefined).toBe("session-not-found")
+  })
+
+  it("decodes an idempotent delete for an absent session", async () => {
+    routes.set("POST /cli/session/delete", { status: 200, body: { deleted: false, id: "ghost" } })
+    await expect(withClient((client) => client.sessionDelete("ghost"))).resolves.toEqual({ deleted: false, id: "ghost" })
   })
 
   it("fails with RelayRejected including HTTP status when no error envelope exists", async () => {

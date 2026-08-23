@@ -231,6 +231,9 @@ result envelope. Delete the session when you finish:
 browser-control session delete docs
 ```
 
+Deletion is idempotent for an explicit session id, so cleanup can be safely
+retried when that session is already absent.
+
 ## Control an Existing Tab
 
 Relay-created pages are isolated from other Browser Control sessions. To use a

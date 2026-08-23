@@ -119,6 +119,9 @@ browser-control session reset github
 browser-control session delete github
 ```
 
+Deletion is idempotent for an explicit session id, so cleanup can be safely
+retried when that session is already absent.
+
 Every execute is journaled under
 `~/.browser-control/sessions/<id>/journal.jsonl`. The journal records code,
 status, duration, URL movement, warnings, handoffs, and bounded diagnostics.

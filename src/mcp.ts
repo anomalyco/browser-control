@@ -152,7 +152,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       }),
       readOnly: false,
       destructive: true,
-      idempotent: false,
+      idempotent: true,
       handle: (input) => Effect.gen(function* () {
         const id = optionalStringField(input, "id") ?? currentSession.id
         const session = yield* relay.sessionReset(id)

@@ -374,11 +374,7 @@ function handleCliRequest(options: {
       const request = yield* decodeRequest(SessionIdRequest, body, "session delete")
       const id = requiredSessionId(request.id)
       const deleted = yield* options.sessions.delete(id)
-      if (!deleted) {
-        sendJson(options.response, { error: `Session not found: ${id}`, code: "session-not-found" }, 404)
-        return
-      }
-      sendJson(options.response, { deleted: true, id })
+      sendJson(options.response, { deleted, id })
       return
     }
     if (options.pathname === "/cli/session/reset" && options.request.method === "POST") {

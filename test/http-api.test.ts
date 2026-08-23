@@ -126,6 +126,10 @@ describe("HTTP request schemas", () => {
         status: 404,
         body: { error: "Session not found: ghost", code: "session-not-found" },
       })
+      await expect(postJson(port, "/cli/session/delete", { id: "ghost" })).resolves.toMatchObject({
+        status: 200,
+        body: { deleted: false, id: "ghost" },
+      })
       await expect(postJson(port, "/cli/session/adopt", {
         sessionId: "beta",
         createIfMissing: false,
