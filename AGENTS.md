@@ -269,9 +269,11 @@ browser-control skill
   stale-group cleanup are best-effort and must never block extension readiness.
   Serialize group and ungroup presentation per tab so delayed browser APIs
   cannot apply an older ownership state after a newer one.
-- Repair the reconnect alarm whenever the MV3 worker starts and send heartbeat
-  traffic every 20 seconds while its relay socket is open. Chrome may clear
-  persisted alarms and retires idle extension workers even with an open socket.
+- Register `runtime.onStartup` at global scope so a full browser restart wakes
+  the MV3 worker. Repair the reconnect alarm whenever the worker starts and send
+  heartbeat traffic every 20 seconds while its relay socket is open. Chrome may
+  clear persisted alarms and retires idle extension workers even with an open
+  socket.
 - The relay dedupes target announcements per CDP client by targetId: a
   re-announce under a new sessionId emits `Target.detachedFromTarget` for the
   old session first. Never announce the same targetId twice to one client

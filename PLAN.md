@@ -71,6 +71,13 @@ Verification:
 
 ## Recently Shipped
 
+### Browser restarts wake extension reconnection
+
+The extension registers a global `runtime.onStartup` listener so restarting the
+browser profile wakes its MV3 worker, repairs the reconnect alarm, and opens a
+fresh relay socket. The existing 20-second heartbeat keeps that socket active
+after reconnection.
+
 ### Unpacked extension connectivity survives browser and path differences
 
 The unpacked manifest carries a stable public key, while Store packaging strips

@@ -341,8 +341,9 @@ existence, and report the viewport, state, and interaction path actually tested.
 
 Common diagnoses:
 
-- `connected:false`: run a relay-backed command, then reload the unpacked
-  extension only if its reconnect loop does not recover.
+- `connected:false`: run a relay-backed command and allow the extension startup
+  or alarm wake-up to reconnect. Reload the unpacked extension only if that loop
+  does not recover.
 - Incompatible extension protocol: update either the extension or npm package;
   exact extension and relay release versions do not need to match.
 - Stale relay build: operational commands automatically replace an older

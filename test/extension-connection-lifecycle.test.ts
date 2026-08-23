@@ -3,6 +3,7 @@ import {
   completeExtensionHandshake,
   ensureReconnectAlarm,
   reconnectAlarmName,
+  startConnectionLifecycle,
   startSocketKeepAlive,
 } from "../extension/src/connection-lifecycle.ts"
 
@@ -30,6 +31,28 @@ describe("extension connection lifecycle", () => {
     await ensureReconnectAlarm({ create, get })
 
     expect(create).not.toHaveBeenCalled()
+  })
+
+  it("wakes and reconnects when the browser profile starts", () => {
+    let onStartup: (() => void) | undefined
+    let onInstalled: (() => void) | undefined
+    const connect = vi.fn()
+
+    startConnectionLifecycle({
+      alarms: {
+        create: vi.fn(async () => {}),
+        get: vi.fn(async () => undefined),
+      },
+      addStartupListener: (listener) => { onStartup = listener },
+      addInstalledListener: (listener) => { onInstalled = listener },
+      connect,
+    })
+
+    expect(connect).toHaveBeenCalledTimes(1)
+    onStartup?.()
+    expect(connect).toHaveBeenCalledTimes(2)
+    onInstalled?.()
+    expect(connect).toHaveBeenCalledTimes(3)
   })
 
   it("runs a heartbeat every 20 seconds and stops cleanly", () => {
