@@ -1,5 +1,11 @@
 # @opencode-ai/browser-control
 
+## 0.5.1
+
+### Patch Changes
+
+- 73beb8a: Simplify session, target, recording, and extension lifecycles while avoiding duplicate network-capture settlement and stale finalizer waiters.
+
 ## 0.5.0
 
 ### Minor Changes
