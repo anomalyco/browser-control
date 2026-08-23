@@ -63,61 +63,7 @@ export type PageStatus = {
   readonly handoffId?: string
 }
 
-export type ExtensionCommand = {
-  readonly id: number
-  readonly method:
-    | "ping"
-    | "debugger.attach"
-    | "debugger.detach"
-    | "debugger.sendCommand"
-    | "tabs.create"
-    | "tabs.remove"
-    | "tabs.group"
-    | "tabs.ungroup"
-    | "action.setAttached"
-    | "action.setBadge"
-    | "pageStatus.set"
-    | "pageStatus.clear"
-    | "runtime.reload"
-    | "recording.start"
-    | "recording.stop"
-    | "recording.status"
-    | "recording.cancel"
-  readonly params?: JsonObject
-}
-
-export type ExtensionResponse = {
-  readonly id: number
-  readonly result?: JsonObject
-  readonly error?: string
-}
-
-export type ExtensionEvent = {
-  readonly method:
-    | "hello"
-    | "ready"
-    | "toolbar.clicked"
-    | "handoff.completed"
-    | "debugger.event"
-    | "debugger.attached"
-    | "debugger.detached"
-    | "tabs.removed"
-    | "pong"
-    | "log"
-    | "recording.cancelled"
-    | "pageStatus.requested"
-  readonly params?: JsonObject
-}
-
-export function parseJsonObject(input: string): JsonObject {
-  const parsed: unknown = JSON.parse(input)
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Expected JSON object")
-  }
-  return parsed as JsonObject
-}
-
-const extensionCommandMethods = new Set<ExtensionCommand["method"]>([
+const extensionCommandMethodValues = [
   "ping",
   "debugger.attach",
   "debugger.detach",
@@ -135,9 +81,9 @@ const extensionCommandMethods = new Set<ExtensionCommand["method"]>([
   "recording.stop",
   "recording.status",
   "recording.cancel",
-])
+] as const
 
-const extensionEventMethods = new Set<ExtensionEvent["method"]>([
+const extensionEventMethodValues = [
   "hello",
   "ready",
   "toolbar.clicked",
@@ -150,14 +96,46 @@ const extensionEventMethods = new Set<ExtensionEvent["method"]>([
   "log",
   "recording.cancelled",
   "pageStatus.requested",
-])
+] as const
+
+type ExtensionCommandMethod = typeof extensionCommandMethodValues[number]
+type ExtensionEventMethod = typeof extensionEventMethodValues[number]
+
+export type ExtensionCommand = {
+  readonly id: number
+  readonly method: ExtensionCommandMethod
+  readonly params?: JsonObject
+}
+
+export type ExtensionResponse = {
+  readonly id: number
+  readonly result?: JsonObject
+  readonly error?: string
+}
+
+export type ExtensionEvent = {
+  readonly method: ExtensionEventMethod
+  readonly params?: JsonObject
+}
+
+export function parseJsonObject(input: string): JsonObject {
+  const parsed: unknown = JSON.parse(input)
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Expected JSON object")
+  }
+  return parsed as JsonObject
+}
+
+const extensionCommandMethods = new Set<string>(extensionCommandMethodValues)
+
+const extensionEventMethods = new Set<string>(extensionEventMethodValues)
 
 export function parseExtensionCommand(input: string): ExtensionCommand {
   const parsed = parseJsonObject(input)
   if (
     typeof parsed.id !== "number" ||
     typeof parsed.method !== "string" ||
-    !extensionCommandMethods.has(parsed.method as ExtensionCommand["method"]) ||
+    !extensionCommandMethods.has(parsed.method) ||
     (parsed.params !== undefined && !isJsonObject(parsed.params))
   ) {
     throw new Error("Invalid extension command")
@@ -181,10 +159,10 @@ export function isExtensionResponse(input: JsonObject): input is ExtensionRespon
 
 export function isExtensionEvent(input: JsonObject): input is ExtensionEvent {
   return typeof input.method === "string" &&
-    extensionEventMethods.has(input.method as ExtensionEvent["method"]) &&
+    extensionEventMethods.has(input.method) &&
     (input.params === undefined || isJsonObject(input.params))
 }
 
-function isJsonObject(value: JsonValue): value is JsonObject {
+export function isJsonObject(value: unknown): value is JsonObject {
   return value !== null && typeof value === "object" && !Array.isArray(value)
 }

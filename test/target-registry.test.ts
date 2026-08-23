@@ -42,6 +42,7 @@ describe("TargetRegistry root generations", () => {
         canAccessOpener: false,
       },
     })
+    expect(registry.tabIdForSession("child-1")).toBe(7)
 
     const change = registry.addRootTarget(root({ sessionId: "bc-tab-2", targetId: "target-2" }))
 

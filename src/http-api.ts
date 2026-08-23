@@ -8,7 +8,6 @@ import {
   formatHostForUrl,
   headerValue,
   optionalSessionId,
-  parseTargetSelection,
   readJsonBody,
   requiredSessionId,
   sendJson,
@@ -393,10 +392,7 @@ function handleCliRequest(options: {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(SessionAdoptRequest, body, "session adopt")
       const requestedSessionId = optionalSessionId(request.sessionId)
-      const targetSelection = parseTargetSelection(request.targetSelection)
-      if (!targetSelection) {
-        throw new Error("targetSelection is required")
-      }
+      const targetSelection = request.targetSelection
       const selectedTarget = selectTarget({
         targets: options.registry.listRootTargets(),
         selection: targetSelection,
@@ -419,7 +415,7 @@ function handleCliRequest(options: {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(ExecuteRequest, body, "execute")
       const requestedSessionId = optionalSessionId(request.sessionId)
-      const targetSelection = parseTargetSelection(request.targetSelection)
+      const targetSelection = request.targetSelection
       const { result, session } = yield* options.sessions.execute({
         ...(requestedSessionId ? { sessionId: requestedSessionId } : {}),
         code: request.code,

@@ -108,7 +108,6 @@ export class TargetRegistry {
   readonly targets = new Map<string, ConnectedTarget>()
   readonly tabTargets = new Map<number, ConnectedTarget>()
   readonly targetsByTargetId = new Map<string, ConnectedTarget>()
-  readonly childSessionTabs = new Map<string, number>()
   readonly childTargets = new Map<string, ChildTarget>()
   readonly childTargetsByTargetId = new Map<string, ChildTarget>()
   readonly tabFrameEvents = new Map<number, Map<string, StoredFrameEvents>>()
@@ -119,7 +118,6 @@ export class TargetRegistry {
     this.targets.clear()
     this.tabTargets.clear()
     this.targetsByTargetId.clear()
-    this.childSessionTabs.clear()
     this.childTargets.clear()
     this.childTargetsByTargetId.clear()
     this.tabFrameEvents.clear()
@@ -219,10 +217,8 @@ export class TargetRegistry {
     }
     const existingForTargetId = this.childTargetsByTargetId.get(target.targetInfo.targetId)
     if (existingForTargetId) {
-      this.childSessionTabs.delete(existingForTargetId.sessionId)
       this.childTargets.delete(existingForTargetId.sessionId)
     }
-    this.childSessionTabs.set(target.sessionId, target.tabId)
     this.childTargets.set(target.sessionId, target)
     this.childTargetsByTargetId.set(target.targetInfo.targetId, target)
   }
@@ -325,9 +321,9 @@ export class TargetRegistry {
     this.targetsByTargetId.delete(target.targetInfo.targetId)
     this.pendingOwnershipReservations.delete(target.targetInfo.targetId)
     if (!options.preserveFrameEvents) this.tabFrameEvents.delete(tabId)
-    const childSessionIds = Array.from(this.childSessionTabs.entries())
-      .filter(([, childTabId]) => {
-        return childTabId === tabId
+    const childSessionIds = Array.from(this.childTargets.entries())
+      .filter(([, child]) => {
+        return child.tabId === tabId
       })
       .filter(([sessionId]) => {
         return this.childTargets.get(sessionId)?.parentSessionId !== options.preserveChildParentSessionId
@@ -341,7 +337,6 @@ export class TargetRegistry {
 
   detachChildTargetState(sessionId: string): ChildTarget | undefined {
     const target = this.childTargets.get(sessionId)
-    this.childSessionTabs.delete(sessionId)
     this.childTargets.delete(sessionId)
     if (target) {
       this.childTargetsByTargetId.delete(target.targetInfo.targetId)
@@ -448,7 +443,7 @@ export class TargetRegistry {
     if (target) {
       return target.tabId
     }
-    return this.childSessionTabs.get(sessionId)
+    return this.childTargets.get(sessionId)?.tabId
   }
 
   allTargetInfos(options: {

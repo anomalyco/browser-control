@@ -1,5 +1,5 @@
 import type { PageStatus } from "../../src/protocol.ts"
-import { pageStatusView } from "./page-status.ts"
+import { pageStatusFromJson, pageStatusView } from "./page-status.ts"
 
 const hostId = "__browser_control_page_status__"
 let currentStatus: PageStatus | undefined
@@ -19,8 +19,9 @@ chrome.runtime.onMessage.addListener((message: unknown) => {
     clearStatus()
     return
   }
-  if (incoming.action === "page-status.set" && isPageStatus(incoming.status)) {
-    currentStatus = incoming.status
+  const status = pageStatusFromJson(incoming.status)
+  if (incoming.action === "page-status.set" && status) {
+    currentStatus = status
     completingHandoffId = undefined
     renderStatus()
   }
@@ -188,7 +189,7 @@ function renderStatus(): void {
     const vignette = document.createElement("div")
     vignette.id = "vignette"
     host.shadowRoot?.insertBefore(vignette, statusElement)
-    positionWaitingStatus(host, statusElement)
+    positionWaitingStatus(host)
   }
   if (!host.isConnected) {
     document.documentElement.append(host)
@@ -196,7 +197,7 @@ function renderStatus(): void {
   observeHost()
 }
 
-function positionWaitingStatus(host: HTMLElement, statusElement: HTMLElement): void {
+function positionWaitingStatus(host: HTMLElement): void {
   const cursor = document.getElementById("__browser_control_ghost_cursor__")
   const x = Number(cursor?.dataset.targetX)
   const y = Number(cursor?.dataset.targetY)
@@ -275,15 +276,4 @@ function observeHost(): void {
     }
   })
   observer.observe(document.documentElement, { childList: true })
-}
-
-function isPageStatus(value: unknown): value is PageStatus {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return false
-  }
-  const candidate = value as { readonly state?: unknown; readonly owner?: unknown; readonly message?: unknown; readonly handoffId?: unknown }
-  const validState = candidate.state === "attached" || candidate.state === "running" || candidate.state === "waiting"
-  const validOwner = candidate.owner === "session" || candidate.owner === "user"
-  const validHandoff = candidate.state !== "waiting" || (typeof candidate.message === "string" && typeof candidate.handoffId === "string")
-  return validState && validOwner && validHandoff
 }

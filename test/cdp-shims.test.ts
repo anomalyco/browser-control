@@ -101,7 +101,6 @@ describe("sendAttachedToChildTarget", () => {
   it("replays dedicated workers without synthesizing iframe navigation events", () => {
     const events: CdpEvent[] = []
     const client = socket(events)
-    const announcements = new Map([[client, createClientTargetAnnouncements()]])
     const registry = new TargetRegistry()
     registry.addChildTarget({
       ...child("worker-session", "worker-target"),

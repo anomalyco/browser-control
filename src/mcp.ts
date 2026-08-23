@@ -230,10 +230,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         if (explicitSession) {
           yield* ensureSessionExists(relay, sessionId)
         } else {
-          const sessions = yield* relay.sessions
-          if (!sessions.some((session) => session.id === sessionId)) {
-            yield* relay.sessionNew(sessionId)
-          }
+          yield* relay.sessionEnsure(sessionId)
           currentSession.established = true
         }
         yield* RelayLifecycle.ensureExtensionConnected({ relay, waitForReconnect: true })

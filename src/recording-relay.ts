@@ -395,22 +395,7 @@ export class RecordingRelay {
       await recording.promise?.catch(() => {})
     }))
     await Promise.all(active.map(async (recording) => {
-      if (recording.mode === "tab-capture" && recording.finalizePromise) {
-        await recording.finalizePromise
-        return
-      }
-      if (recording.resolveStop) {
-        recording.resolveStop({ success: false, error: reason })
-      }
-      if (recording.mode === "cdp") {
-        if (recording.stopPromise) {
-          await recording.stopPromise.catch(() => {})
-          return
-        }
-        await this.cancelCdpRecording(recording)
-        return
-      }
-      await this.cleanupRecording(recording.tabId)
+      await this.abortActiveRecording(recording, reason)
     }))
   }
 
@@ -425,11 +410,15 @@ export class RecordingRelay {
     if (!recording) {
       return
     }
+    await this.abortActiveRecording(recording, options.reason)
+  }
+
+  private async abortActiveRecording(recording: ActiveRecording, reason: string): Promise<void> {
     if (recording.mode === "tab-capture" && recording.finalizePromise) {
       await recording.finalizePromise
       return
     }
-    recording.resolveStop?.({ success: false, error: options.reason })
+    recording.resolveStop?.({ success: false, error: reason })
     if (recording.mode === "cdp") {
       if (recording.stopPromise) {
         await recording.stopPromise.catch(() => {})

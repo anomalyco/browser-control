@@ -94,8 +94,8 @@ const recordingTarget = Effect.fnUntraced(function* (options: {
   readonly session: Option.Option<string>
   readonly tabId: Option.Option<number>
 }) {
-  const sessionId = optionString(options.session)
-  const tabId = optionNumber(options.tabId)
+  const sessionId = Option.getOrUndefined(options.session)
+  const tabId = Option.getOrUndefined(options.tabId)
   if (sessionId && tabId !== undefined) {
     return yield* Effect.fail(new Error("Use only one recording target selector: --session or --tab-id"))
   }
@@ -184,14 +184,6 @@ function errorJsonEnvelope(error: unknown): ExecuteJsonEnvelope {
   return { ok: false, isError: true, text: message, value: null, valueUnavailable: true, error: { _tag: tag, message }, logs: [], warnings: [] }
 }
 
-function optionString(value: Option.Option<string>): string | undefined {
-  return Option.isSome(value) ? value.value : undefined
-}
-
-function optionNumber(value: Option.Option<number>): number | undefined {
-  return Option.isSome(value) ? value.value : undefined
-}
-
 const serve = Command.make(
   "serve",
   {},
@@ -227,7 +219,7 @@ const execute = Command.make(
   Effect.fn("Cli.execute")(function* ({ code, file, session, targetUrl, targetIndex, json }) {
     const run = Effect.gen(function* () {
       const relay = yield* RelayClient.Service
-      const filePath = optionString(file)
+      const filePath = Option.getOrUndefined(file)
       if (code.length > 0 && filePath) {
         return yield* Effect.fail(new Error("Use either positional code or --file, not both"))
       }
@@ -236,9 +228,9 @@ const execute = Command.make(
       }
       const executeCode = filePath ? yield* readExecuteFile(filePath) : code.join(" ")
       yield* ensureCliRelayAndExtension()
-      const explicitSessionId = optionString(session) ?? Option.getOrUndefined(yield* sessionIdConfig)
-      const targetUrlValue = optionString(targetUrl) ?? Option.getOrUndefined(yield* targetUrlConfig)
-      const targetIndexValue = optionNumber(targetIndex) ?? Option.getOrUndefined(yield* targetIndexConfig)
+      const explicitSessionId = Option.getOrUndefined(session) ?? Option.getOrUndefined(yield* sessionIdConfig)
+      const targetUrlValue = Option.getOrUndefined(targetUrl) ?? Option.getOrUndefined(yield* targetUrlConfig)
+      const targetIndexValue = Option.getOrUndefined(targetIndex) ?? Option.getOrUndefined(yield* targetIndexConfig)
       if (targetIndexValue !== undefined && targetIndexValue < 0) {
         return yield* Effect.fail(new Error("Target index must be a non-negative integer"))
       }
@@ -316,7 +308,7 @@ const sessionNew = Command.make(
     const relay = yield* RelayClient.Service
     yield* ensureCliRelay()
     const store = yield* SessionStore.Service
-    const result = yield* relay.sessionNew(optionString(name), readOnly ? { readOnly: true } : {})
+    const result = yield* relay.sessionNew(Option.getOrUndefined(name), readOnly ? { readOnly: true } : {})
     yield* store.write(result.id)
     yield* Console.log(result.id)
   }),
@@ -383,8 +375,8 @@ const sessionReset = Command.make(
   Effect.fn("Cli.sessionReset")(function* ({ id, session }) {
     const relay = yield* RelayClient.Service
     const sessionId = yield* resolveExistingSessionId(resolveExplicitSessionSelector({
-      positional: optionString(id),
-      flag: optionString(session),
+      positional: Option.getOrUndefined(id),
+      flag: Option.getOrUndefined(session),
       environment: Option.getOrUndefined(yield* sessionIdConfig),
     }))
     const resetSession = yield* relay.sessionReset(sessionId)
@@ -402,9 +394,9 @@ const sessionAdopt = Command.make(
   Effect.fn("Cli.sessionAdopt")(function* ({ session, targetUrl, targetIndex }) {
     const relay = yield* RelayClient.Service
     yield* ensureCliRelayAndExtension()
-    const explicitSessionId = optionString(session) ?? Option.getOrUndefined(yield* sessionIdConfig)
-    const targetUrlValue = optionString(targetUrl)
-    const targetIndexValue = optionNumber(targetIndex)
+    const explicitSessionId = Option.getOrUndefined(session) ?? Option.getOrUndefined(yield* sessionIdConfig)
+    const targetUrlValue = Option.getOrUndefined(targetUrl)
+    const targetIndexValue = Option.getOrUndefined(targetIndex)
     if (!targetUrlValue && targetIndexValue === undefined) {
       return yield* Effect.fail(new Error("session adopt requires --target-url or --target-index"))
     }
@@ -439,8 +431,8 @@ const sessionDelete = Command.make(
     const relay = yield* RelayClient.Service
     const store = yield* SessionStore.Service
     const selectedSessionId = resolveExplicitSessionSelector({
-      positional: optionString(id),
-      flag: optionString(session),
+      positional: Option.getOrUndefined(id),
+      flag: Option.getOrUndefined(session),
       environment: Option.getOrUndefined(yield* sessionIdConfig),
     })
     const sessionId = selectedSessionId ?? (yield* store.read)
@@ -586,9 +578,9 @@ const recordingStart = Command.make(
     const relay = yield* RelayClient.Service
     yield* ensureCliRelayAndExtension()
     const target = yield* recordingTarget({ session, tabId })
-    const modeValue = yield* parseRecordingModeOption(optionString(mode))
-    const frameRateValue = optionNumber(frameRate)
-    const maxDurationMsValue = optionNumber(maxDurationMs)
+    const modeValue = yield* parseRecordingModeOption(Option.getOrUndefined(mode))
+    const frameRateValue = Option.getOrUndefined(frameRate)
+    const maxDurationMsValue = Option.getOrUndefined(maxDurationMs)
     const resolvedOutputPath = path.resolve(outputPath)
     const result = yield* relay.recordingStart({
       ...target,
@@ -673,11 +665,11 @@ const recording = Command.make("recording").pipe(
 )
 
 const networkSession = Effect.fnUntraced(function* (session: Option.Option<string>) {
-  return yield* resolveExistingSessionId(optionString(session) ?? Option.getOrUndefined(yield* sessionIdConfig))
+  return yield* resolveExistingSessionId(Option.getOrUndefined(session) ?? Option.getOrUndefined(yield* sessionIdConfig))
 })
 
 const parseNetworkContent = Effect.fnUntraced(function* (content: Option.Option<string>) {
-  const value = optionString(content)
+  const value = Option.getOrUndefined(content)
   if (value === undefined || value === "embed" || value === "omit") return value
   return yield* Effect.fail(new Error("Network content must be embed or omit"))
 })
@@ -710,10 +702,10 @@ const networkStart = Command.make(
     yield* ensureCliRelayAndExtension()
     const sessionId = yield* networkSession(session)
     const contentValue = yield* parseNetworkContent(content)
-    const urlFilterValue = optionString(urlFilter)
-    const maxBodyBytesValue = optionNumber(maxBodyBytes)
-    const maxTotalBodyBytesValue = optionNumber(maxTotalBodyBytes)
-    const maxEntriesValue = optionNumber(maxEntries)
+    const urlFilterValue = Option.getOrUndefined(urlFilter)
+    const maxBodyBytesValue = Option.getOrUndefined(maxBodyBytes)
+    const maxTotalBodyBytesValue = Option.getOrUndefined(maxTotalBodyBytes)
+    const maxEntriesValue = Option.getOrUndefined(maxEntries)
     const result = yield* relay.networkStart({
       sessionId,
       ...(urlFilterValue === undefined ? {} : { urlFilter: urlFilterValue }),
@@ -752,8 +744,8 @@ const networkStop = Command.make(
   Effect.fn("Cli.networkStop")(function* ({ session, output, secrets, json }) {
     const relay = yield* RelayClient.Service
     const sessionId = yield* networkSession(session)
-    const outputValue = optionString(output)
-    const secretsValue = optionString(secrets)
+    const outputValue = Option.getOrUndefined(output)
+    const secretsValue = Option.getOrUndefined(secrets)
     if (!outputValue && !secretsValue) {
       return yield* Effect.fail(new Error("network stop requires --output, --secrets, or both"))
     }
@@ -814,8 +806,8 @@ const secretsRefresh = Command.make(
     const relay = yield* RelayClient.Service
     yield* ensureCliRelayAndExtension()
     const sessionId = yield* networkSession(session)
-    const urlFilterValue = optionString(urlFilter)
-    const timeoutMsValue = optionNumber(timeoutMs)
+    const urlFilterValue = Option.getOrUndefined(urlFilter)
+    const timeoutMsValue = Option.getOrUndefined(timeoutMs)
     const result = yield* relay.authRefresh({
       sessionId,
       name,
@@ -839,8 +831,8 @@ const secretsRun = Command.make(
     yield* ensureCliRelay()
     const [executable, ...args] = decodeCliOperands(command)
     if (!executable) return yield* Effect.fail(new Error("secrets run requires a command after --"))
-    const cwdValue = optionString(cwd)
-    const timeoutMsValue = optionNumber(timeoutMs)
+    const cwdValue = Option.getOrUndefined(cwd)
+    const timeoutMsValue = Option.getOrUndefined(timeoutMs)
     const result = yield* relay.authRun({
       name,
       command: executable,
@@ -871,12 +863,12 @@ const journal = Command.make(
   },
   Effect.fn("Cli.journal")(function* ({ session, limit, json }) {
     const store = yield* SessionStore.Service
-    const sessionId = optionString(session) ?? Option.getOrUndefined(yield* sessionIdConfig) ?? (yield* store.read)
+    const sessionId = Option.getOrUndefined(session) ?? Option.getOrUndefined(yield* sessionIdConfig) ?? (yield* store.read)
     if (!sessionId) {
       return yield* Effect.fail(new Error("No session provided and no current Browser Control session exists"))
     }
     const entries = yield* Effect.tryPromise({
-      try: () => readJournalEntries({ baseDir: defaultJournalBaseDir(), sessionId, limit: optionNumber(limit) ?? 20 }),
+      try: () => readJournalEntries({ baseDir: defaultJournalBaseDir(), sessionId, limit: Option.getOrUndefined(limit) ?? 20 }),
       catch: (cause) => new Error(`read session journal for ${sessionId}`, { cause }),
     })
     if (json) {

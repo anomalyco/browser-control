@@ -1,5 +1,5 @@
 import { WebSocket } from "ws"
-import type { CdpEvent, JsonObject, TargetInfo } from "./protocol.ts"
+import type { JsonObject, TargetInfo } from "./protocol.ts"
 import { getObject, sendCdpEvent } from "./relay-helpers.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
 import { shouldExposeChildTarget, type TargetRegistry } from "./target-registry.ts"

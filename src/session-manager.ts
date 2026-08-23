@@ -336,15 +336,7 @@ export class BrowserControlSessions {
   }
 
   networkStart(id: string, options: NetworkCaptureOptions = {}): Effect.Effect<NetworkCaptureStatus, Error> {
-    const manager = this
-    const session = this.sessions.get(id)
-    if (!session) return Effect.fail(sessionError("not-found", `Session not found: ${id}`, id))
-    return this.withLifecyclePermit(session, "network start", Effect.gen(function* () {
-      if (manager.sessions.get(id) !== session) {
-        return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${id}`, id))
-      }
-      return yield* session.sandbox.networkStart(options)
-    }))
+    return this.withActiveSession(id, "network start", (session) => session.sandbox.networkStart(options))
   }
 
   networkStatus(id: string): Effect.Effect<NetworkCaptureStatus, Error> {
@@ -355,38 +347,30 @@ export class BrowserControlSessions {
   }
 
   networkStop(id: string, options: NetworkCaptureStopOptions = {}): Effect.Effect<NetworkCaptureResult, Error> {
-    const manager = this
-    const session = this.sessions.get(id)
-    if (!session) return Effect.fail(sessionError("not-found", `Session not found: ${id}`, id))
-    return this.withLifecyclePermit(session, "network stop", Effect.gen(function* () {
-      if (manager.sessions.get(id) !== session) {
-        return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${id}`, id))
-      }
-      return yield* session.sandbox.networkStop(options)
-    }))
+    return this.withActiveSession(id, "network stop", (session) => session.sandbox.networkStop(options))
   }
 
   networkCancel(id: string): Effect.Effect<{ readonly cancelled: boolean }, Error> {
-    const manager = this
-    const session = this.sessions.get(id)
-    if (!session) return Effect.fail(sessionError("not-found", `Session not found: ${id}`, id))
-    return this.withLifecyclePermit(session, "network cancel", Effect.gen(function* () {
-      if (manager.sessions.get(id) !== session) {
-        return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${id}`, id))
-      }
-      return yield* session.sandbox.networkCancel()
-    }))
+    return this.withActiveSession(id, "network cancel", (session) => session.sandbox.networkCancel())
   }
 
   authRefresh(id: string, options: { readonly name: string; readonly urlFilter?: string; readonly timeoutMs?: number }): Effect.Effect<NetworkCaptureResult, Error> {
+    return this.withActiveSession(id, "auth refresh", (session) => session.sandbox.authRefresh(options))
+  }
+
+  private withActiveSession<A>(
+    id: string,
+    operation: string,
+    run: (session: BrowserControlSession) => Effect.Effect<A, Error>,
+  ): Effect.Effect<A, Error> {
     const manager = this
     const session = this.sessions.get(id)
     if (!session) return Effect.fail(sessionError("not-found", `Session not found: ${id}`, id))
-    return this.withLifecyclePermit(session, "auth refresh", Effect.gen(function* () {
+    return this.withLifecyclePermit(session, operation, Effect.gen(function* () {
       if (manager.sessions.get(id) !== session) {
         return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${id}`, id))
       }
-      return yield* session.sandbox.authRefresh(options)
+      return yield* run(session)
     }))
   }
 

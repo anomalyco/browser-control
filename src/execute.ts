@@ -480,7 +480,7 @@ export class ExecuteSandbox {
       },
     }).pipe(
       Effect.uninterruptible,
-      Effect.ensuring(Effect.promise(() => this.networkCapture.settleForOutput())),
+      Effect.tapError(() => Effect.promise(() => this.networkCapture.settleForOutput())),
       Effect.match({
         onFailure: (error): ExecuteResult => {
           const logSummary = error instanceof ExecuteCodeError ? error.logSummary : emptyExecuteLogSummary()
@@ -558,82 +558,44 @@ export class ExecuteSandbox {
   }
 
   close(): Effect.Effect<void, Error> {
-    const sandbox = this
-    return Effect.gen(function* () {
-      const page = sandbox.page
-      const browser = sandbox.browser
-      const ownsOpenPage = page !== undefined && sandbox.ownsPage && !page.isClosed()
-      sandbox.browser = undefined
-      sandbox.page = undefined
-      sandbox.clearPageListeners()
-      sandbox.defaultPageTargetId = undefined
-      sandbox.ownsPage = false
-      sandbox.pageHealthCheckRequired = false
-      sandbox.pendingPageTarget = undefined
-      sandbox.notifyDefaultTargetChange()
-      yield* sandbox.networkCapture.cancel()
-
-      if (ownsOpenPage) {
-        yield* runPlaywrightOperation({
-          label: "Close sandbox page",
-          timeoutMs: playwrightCloseTimeoutMs,
-          run: () => page.close(),
-        }).pipe(Effect.ignore)
-      }
-      if (browser) {
-        yield* runPlaywrightOperation({
-          label: "Close sandbox browser connection",
-          timeoutMs: playwrightCloseTimeoutMs,
-          run: () => browser.close(),
-        }).pipe(Effect.ignore)
-      }
+    return this.teardown({
+      mode: "close",
+      pageLabel: "Close sandbox page",
+      browserLabel: "Close sandbox browser connection",
     })
   }
 
   disconnect(): Effect.Effect<void, Error> {
-    const sandbox = this
-    return Effect.gen(function* () {
-      const browser = sandbox.browser
-      sandbox.browser = undefined
-      sandbox.page = undefined
-      sandbox.clearPageListeners()
-      sandbox.pageHealthCheckRequired = false
-      if (sandbox.defaultPageTargetId) {
-        sandbox.pendingPageTarget = { targetId: sandbox.defaultPageTargetId, warnReplaced: false }
-      }
-      yield* sandbox.networkCapture.cancel()
-      if (browser) {
-        yield* runPlaywrightOperation({
-          label: "Disconnect sandbox browser during relay shutdown",
-          timeoutMs: playwrightCloseTimeoutMs,
-          run: () => browser.close(),
-        }).pipe(Effect.ignore)
-      }
+    return this.teardown({
+      mode: "disconnect",
+      browserLabel: "Disconnect sandbox browser during relay shutdown",
     })
   }
 
   disconnectSettled(): Effect.Effect<void, Error> {
-    const sandbox = this
-    return Effect.gen(function* () {
-      const browser = sandbox.browser
-      sandbox.browser = undefined
-      sandbox.page = undefined
-      sandbox.clearPageListeners()
-      sandbox.pageHealthCheckRequired = false
-      if (sandbox.defaultPageTargetId) {
-        sandbox.pendingPageTarget = { targetId: sandbox.defaultPageTargetId, warnReplaced: false }
-      }
-      yield* sandbox.networkCapture.cancel()
-      if (browser) {
-        yield* runSettledPlaywrightOperation({
-          label: "Disconnect sandbox browser after handoff cancellation",
-          run: () => browser.close(),
-        }).pipe(Effect.ignore)
-      }
+    return this.teardown({
+      mode: "disconnect",
+      settled: true,
+      browserLabel: "Disconnect sandbox browser after handoff cancellation",
     })
   }
 
   closeSettled(): Effect.Effect<void, Error> {
+    return this.teardown({
+      mode: "close",
+      settled: true,
+      pageLabel: "Close sandbox page after adoption",
+      browserLabel: "Close sandbox browser connection after adoption",
+    })
+  }
+
+  private teardown(options: {
+    readonly settled?: boolean
+    readonly browserLabel: string
+  } & (
+    | { readonly mode: "close"; readonly pageLabel: string }
+    | { readonly mode: "disconnect" }
+  )): Effect.Effect<void, Error> {
     const sandbox = this
     return Effect.gen(function* () {
       const page = sandbox.page
@@ -642,24 +604,26 @@ export class ExecuteSandbox {
       sandbox.browser = undefined
       sandbox.page = undefined
       sandbox.clearPageListeners()
-      sandbox.defaultPageTargetId = undefined
-      sandbox.ownsPage = false
       sandbox.pageHealthCheckRequired = false
-      sandbox.pendingPageTarget = undefined
-      sandbox.notifyDefaultTargetChange()
+      if (options.mode === "close") {
+        sandbox.defaultPageTargetId = undefined
+        sandbox.ownsPage = false
+        sandbox.pendingPageTarget = undefined
+        sandbox.notifyDefaultTargetChange()
+      } else if (sandbox.defaultPageTargetId) {
+        sandbox.pendingPageTarget = { targetId: sandbox.defaultPageTargetId, warnReplaced: false }
+      }
       yield* sandbox.networkCapture.cancel()
 
-      if (ownsOpenPage) {
-        yield* runSettledPlaywrightOperation({
-          label: "Close sandbox page after adoption",
-          run: () => page.close(),
-        }).pipe(Effect.ignore)
+      const run = <A>(label: string, operation: () => Promise<A>): Effect.Effect<A, Error> => options.settled
+        ? runSettledPlaywrightOperation({ label, run: operation })
+        : runPlaywrightOperation({ label, timeoutMs: playwrightCloseTimeoutMs, run: operation })
+
+      if (options.mode === "close" && ownsOpenPage) {
+        yield* run(options.pageLabel, () => page.close()).pipe(Effect.ignore)
       }
       if (browser) {
-        yield* runSettledPlaywrightOperation({
-          label: "Close sandbox browser connection after adoption",
-          run: () => browser.close(),
-        }).pipe(Effect.ignore)
+        yield* run(options.browserLabel, () => browser.close()).pipe(Effect.ignore)
       }
     })
   }

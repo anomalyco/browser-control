@@ -88,11 +88,9 @@ export const SessionEnsureRequest = Schema.Struct({
 
 export interface SessionEnsureRequest extends Schema.Schema.Type<typeof SessionEnsureRequest> {}
 
-export const SessionEnsureResponse = Schema.Struct({
-  session: SessionSummary,
-})
+export const SessionEnsureResponse = SessionContainer
 
-export interface SessionEnsureResponse extends Schema.Schema.Type<typeof SessionEnsureResponse> {}
+export type SessionEnsureResponse = SessionContainer
 
 export const SessionIdRequest = Schema.Struct({
   id: Schema.String,
