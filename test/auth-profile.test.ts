@@ -46,6 +46,23 @@ describe("AuthProfile", () => {
     expect(result).toMatchObject({ exitCode: 0, stdout: "${BC_SECRET_1}", stderr: "" })
   })
 
+  it("exposes a runtime error class and rejects unsafe worker bounds", async () => {
+    const baseDir = await temporaryDirectory()
+
+    await expect(Effect.runPromise(SecretProfile.run({
+      name: "uber",
+      baseDir,
+      command: process.execPath,
+      timeoutMs: 0,
+    }))).rejects.toBeInstanceOf(SecretProfile.Error)
+    await expect(Effect.runPromise(SecretProfile.run({
+      name: "uber",
+      baseDir,
+      command: process.execPath,
+      maxOutputBytes: -1,
+    }))).rejects.toMatchObject({ _tag: "AuthProfile.Error", reason: "run-failed" })
+  })
+
   it("does not leak a credential cut by the output budget", async () => {
     const baseDir = await temporaryDirectory()
     await Effect.runPromise(AuthProfile.write({

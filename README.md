@@ -196,8 +196,8 @@ process.stderr.write(result.stderr)
 process.exitCode = result.exitCode
 ```
 
-The child receives `BC_SECRET_N` variables. The parent never receives their raw
-values, and known values are redacted from bounded child output. `status()`
+The trusted child receives `BC_SECRET_N` variables. The parent never receives
+their raw values, and known values are redacted from bounded child output. `status()`
 returns metadata only; the public SDK intentionally does not expose raw profile
 reads.
 

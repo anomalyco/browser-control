@@ -319,8 +319,8 @@ const result = await Effect.runPromise(SecretProfile.run({
 }))
 ```
 
-The worker receives `BC_SECRET_N` variables and its bounded output is redacted.
-The public SDK exposes profile metadata but never raw profile values.
+The trusted worker receives `BC_SECRET_N` variables and its bounded output is
+redacted. The public SDK exposes profile metadata but never raw profile values.
 
 Refresh credentials normally renewed by a page reload with:
 
