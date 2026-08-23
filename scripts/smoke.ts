@@ -1025,7 +1025,7 @@ return { result: await page.locator('#class-result').textContent() }
             "execute",
             "--session",
             smokeSession,
-            `await handoff('Navigate and resume ${marker}', { timeoutMs: 30000 }); return { resumed: true, url: page.url() }`,
+            `await handoff('Navigate and resume ${marker}', { timeoutMs: 30000 }); return { resumed: true, url: page.url(), view: await snapshot({ maxItems: 20 }) }`,
           ]).pipe(Effect.forkChild)
           yield* Effect.sleep("500 millis")
           const ownerPage = yield* scopedOwnerCdpPage({ sessionId: smokeSession, urlIncludes: marker })
@@ -1042,7 +1042,7 @@ return { result: await page.locator('#class-result').textContent() }
 
           yield* ownerPage.evaluate(`document.querySelector('#__browser_control_page_status__')?.shadowRoot?.querySelector('button')?.click()`)
           const output = yield* Fiber.join(executeFiber)
-          if (!output.includes("resumed: true") || !output.includes(fixture.afterUrl)) {
+          if (!output.includes("resumed: true") || !output.includes(fixture.afterUrl) || !output.includes('button "Unrelated page button"')) {
             return yield* Effect.fail(new Error(`handoff did not resume on the navigated page: ${output}`))
           }
           return output.trim()

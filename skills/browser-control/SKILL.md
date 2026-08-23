@@ -158,6 +158,10 @@ await page.getByRole("heading", { name: /account|dashboard/i }).waitFor()
 return { authenticatedUrl: page.url(), title: await page.title() }
 ```
 
+After a resolved handoff, Browser Control waits through transient destination
+context replacement before returning, so this verification can remain in the
+same execute.
+
 Tell the user what action is waiting. Human acknowledgment is not verification:
 always assert the expected URL or stable element after `handoff`. If the action
 was already completed and only the human step remains, call `handoff(message)`

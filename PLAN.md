@@ -71,6 +71,13 @@ Verification:
 
 ## Recently Shipped
 
+### Handoffs return on a live destination context
+
+After a human completes a navigation-triggering handoff, Browser Control waits
+through transient execution-context replacement before returning to user code.
+The same execute can immediately inspect and verify the authenticated
+destination without repeating the human action.
+
 ### Browser restarts wake extension reconnection
 
 The extension registers a global `runtime.onStartup` listener so restarting the

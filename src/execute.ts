@@ -30,6 +30,7 @@ const playwrightCloseTimeoutMs = 2_000
 const playwrightConnectTimeoutMs = 15_000
 const sessionPageHealthCheckTimeoutMs = 3_000
 const sessionPageHealthRetryDelayMs = 100
+const handoffPageContextTimeoutMs = 15_000
 const timedOut = Symbol("timed-out")
 export const downloadCapabilityErrorMessage = "Downloads are unavailable in Browser Control extension-backed tabs: Chromium blocks Browser.setDownloadBehavior and Page.setDownloadBehavior through chrome.debugger, so Playwright cannot retain an artifact for download.saveAs(). Fetch the response in the page and write the returned bytes with fs when the site exposes them."
 const downloadGuardedPages = new WeakSet<Page>()
@@ -179,6 +180,30 @@ export function isSessionPageConnected(options: {
   readonly healthCheckRequired: boolean
 }): boolean {
   return options.browserConnected && options.pageUrl !== null && !options.healthCheckRequired
+}
+
+export async function finishHandoff(options: {
+  readonly outcome: HandoffOutcome
+  readonly message: string
+  readonly timeoutMs: number
+  readonly evaluate: () => Promise<void>
+  readonly contextTimeoutMs?: number
+  readonly retryDelayMs?: number
+  readonly delay?: (milliseconds: number) => Promise<void>
+}): Promise<void> {
+  if (options.outcome === "timeout") {
+    throw new Error(`Handoff timed out after ${options.timeoutMs}ms waiting for the user: ${options.message}`)
+  }
+  if (options.outcome !== "resolved") {
+    const targetEvent = options.outcome.reason === "target-crashed" ? "crashed" : "detached"
+    throw new Error(`Handoff cancelled because its target ${targetEvent}: ${options.message}`)
+  }
+  await waitForPageContext({
+    evaluate: options.evaluate,
+    timeoutMs: options.contextTimeoutMs ?? sessionPageHealthCheckTimeoutMs,
+    ...(options.retryDelayMs === undefined ? {} : { retryDelayMs: options.retryDelayMs }),
+    ...(options.delay === undefined ? {} : { delay: options.delay }),
+  })
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -790,13 +815,23 @@ export class ExecuteSandbox {
         ...(options?.start ? { start: options.start } : {}),
         ...(options?.start ? { cancelStart: () => Effect.runPromise(this.disconnectSettled()) } : {}),
       })
-      if (outcome === "timeout") {
-        throw new Error(`Handoff timed out after ${timeoutMs}ms waiting for the user: ${handoffMessage}`)
-      }
-      if (outcome !== "resolved") {
-        const targetEvent = outcome.reason === "target-crashed" ? "crashed" : "detached"
-        throw new Error(`Handoff cancelled because its target ${targetEvent}: ${handoffMessage}`)
-      }
+      await finishHandoff({
+        outcome,
+        message: handoffMessage,
+        timeoutMs,
+        contextTimeoutMs: handoffPageContextTimeoutMs,
+        evaluate: async () => {
+          try {
+            const currentPage = await this.getSessionPage({ context })
+            await currentPage.evaluate(() => true)
+          } catch (error) {
+            if (error instanceof SessionPageRecoveryError && error.reason === "target-unavailable") {
+              throw new Error("Execution context is not available while the handoff destination settles", { cause: error })
+            }
+            throw error
+          }
+        },
+      })
       handoffTracker.count += 1
     }
     return {
