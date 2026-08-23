@@ -35,7 +35,6 @@ describe("extension connection lifecycle", () => {
 
   it("wakes and reconnects when the browser profile starts", () => {
     let onStartup: (() => void) | undefined
-    let onInstalled: (() => void) | undefined
     const connect = vi.fn()
 
     startConnectionLifecycle({
@@ -44,15 +43,12 @@ describe("extension connection lifecycle", () => {
         get: vi.fn(async () => undefined),
       },
       addStartupListener: (listener) => { onStartup = listener },
-      addInstalledListener: (listener) => { onInstalled = listener },
       connect,
     })
 
     expect(connect).toHaveBeenCalledTimes(1)
     onStartup?.()
     expect(connect).toHaveBeenCalledTimes(2)
-    onInstalled?.()
-    expect(connect).toHaveBeenCalledTimes(3)
   })
 
   it("runs a heartbeat every 20 seconds and stops cleanly", () => {

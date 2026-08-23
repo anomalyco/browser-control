@@ -37,7 +37,6 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 startConnectionLifecycle({
   alarms: chrome.alarms,
   addStartupListener: (listener) => chrome.runtime.onStartup.addListener(listener),
-  addInstalledListener: (listener) => chrome.runtime.onInstalled.addListener(listener),
   connect,
 })
 
