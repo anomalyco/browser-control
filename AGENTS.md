@@ -130,8 +130,11 @@ local Node relay.
   are explicit, require a compatible prior baseline, invalidate earlier refs,
   and expose refs only for added or changed current lines. `ariaSnapshot()` also
   omits text-control values while preserving the surrounding accessibility
-  tree. It temporarily masks those values in Playwright's isolated world, so do
-  not run it concurrently with other operations on the same page. Keep raw
+  tree. Register its unique selector engine for each connected Playwright
+  context before any page or locator work; pre-connect registration does not
+  reach the default context returned by `connectOverCDP`. It temporarily masks
+  those values in Playwright's isolated world, so do not run it concurrently
+  with other operations on the same page. Keep raw
   Playwright as a deeper inspection layer; do not replace the code-first execute
   interface with many action commands.
 - Authenticated network capture is owned by the persistent Execute Sandbox and

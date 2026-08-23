@@ -1,6 +1,5 @@
-import { selectors, type Locator, type Page } from "playwright-core"
+import { selectors, type BrowserContext, type Locator, type Page } from "playwright-core"
 
-const redactionSelectorName = "bcariaredact"
 const redactionCleanupErrorMessage = "Browser Control could not confirm ARIA snapshot value-redaction cleanup"
 // Keep the engine as source text so bundlers cannot inject Node-only helpers into the browser function.
 const redactionSelectorSource = `({
@@ -90,13 +89,9 @@ const redactionSelectorSource = `({
   },
 })`
 
-await selectors.register(
-  redactionSelectorName,
-  { content: redactionSelectorSource },
-  { contentScript: true },
-)
-
+let nextRedactionSelector = 0
 let nextRedactionToken = 0
+const contextSelectors = new WeakMap<BrowserContext, Promise<string>>()
 const pageCleanup = new WeakMap<Page, {
   readonly pendingTokens: Set<string>
   queue: Promise<void>
@@ -106,6 +101,8 @@ export async function ariaSnapshotWithoutTextControlValues(
   locator: Locator,
   options: { readonly timeout: number },
 ): Promise<string> {
+  const page = locator.page()
+  const redactionSelectorName = await selectorForContext(page.context())
   const token = String(++nextRedactionToken)
   let snapshot: string | undefined
   let captureFailed = false
@@ -120,7 +117,7 @@ export async function ariaSnapshotWithoutTextControlValues(
   }
 
   try {
-    await cleanupRedaction(locator.page(), token)
+    await cleanupRedaction(page, redactionSelectorName, token)
   } catch (cleanupError) {
     if (captureFailed) {
       const cleanupReasons = cleanupError instanceof AggregateError ? cleanupError.errors : [cleanupError]
@@ -133,7 +130,28 @@ export async function ariaSnapshotWithoutTextControlValues(
   return snapshot!
 }
 
-async function cleanupRedaction(page: Page, token: string): Promise<void> {
+export async function registerAriaSnapshotSelector(context: BrowserContext): Promise<void> {
+  await selectorForContext(context)
+}
+
+async function selectorForContext(context: BrowserContext): Promise<string> {
+  const existing = contextSelectors.get(context)
+  if (existing) return existing
+
+  const name = `bcariaredact${++nextRedactionSelector}`
+  const registration = selectors.register(
+    name,
+    { content: redactionSelectorSource },
+    { contentScript: true },
+  ).then(() => name, (error) => {
+    contextSelectors.delete(context)
+    throw error
+  })
+  contextSelectors.set(context, registration)
+  return registration
+}
+
+async function cleanupRedaction(page: Page, redactionSelectorName: string, token: string): Promise<void> {
   let state = pageCleanup.get(page)
   if (!state) {
     state = { pendingTokens: new Set(), queue: Promise.resolve() }

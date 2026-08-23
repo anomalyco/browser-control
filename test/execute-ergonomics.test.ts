@@ -270,7 +270,8 @@ function ariaSnapshotFixture(options: {
     ? vi.fn().mockRejectedValue(options.cleanupError)
     : vi.fn().mockResolvedValue(undefined)
   const frame = { locator: vi.fn(() => ({ waitFor })) }
-  const ownerPage = { frames: () => [frame] }
+  const context = {}
+  const ownerPage = { context: () => context, frames: () => [frame] }
   const locator = {
     locator: vi.fn(() => ({ ariaSnapshot })),
     page: vi.fn(() => ownerPage),
@@ -287,10 +288,25 @@ describe("ariaSnapshot helper", () => {
     expect(fixture.page.locator).toHaveBeenCalledWith("body")
     expect(fixture.ariaSnapshot).toHaveBeenCalledWith({ timeout: defaultAriaSnapshotTimeoutMs })
     const activation = vi.mocked(fixture.locator.locator).mock.calls[0]?.[0]
-    expect(activation).toMatch(/^bcariaredact=on_\d+$/)
+    expect(activation).toMatch(/^bcariaredact\d+=on_\d+$/)
     if (typeof activation !== "string") throw new Error("Expected redaction selector activation")
     expect(fixture.frame.locator).toHaveBeenCalledWith(activation.replace("=on_", "=off_"))
     expect(fixture.waitFor).toHaveBeenCalledWith({ state: "attached", timeout: 1_000 })
+  })
+
+  it("reuses the selector engine for the same browser context", async () => {
+    const fixture = ariaSnapshotFixture()
+    const helper = createAriaSnapshotHelper(fixture.page)
+
+    await helper()
+    await helper()
+
+    const activations = vi.mocked(fixture.locator.locator).mock.calls.map(([selector]) => selector)
+    expect(activations).toHaveLength(2)
+    const [first, second] = activations
+    if (typeof first !== "string" || typeof second !== "string") throw new Error("Expected redaction selector activations")
+    expect(first.split("=")[0]).toBe(second.split("=")[0])
+    expect(first).not.toBe(second)
   })
 
   it("preserves selector and locator targets and accepts a short timeout", async () => {

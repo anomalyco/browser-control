@@ -10,6 +10,7 @@ import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import util from "node:util"
+import { registerAriaSnapshotSelector } from "../src/aria-snapshot.ts"
 import { createAriaSnapshotHelper } from "../src/execute.ts"
 import { getObject } from "../src/relay-helpers.ts"
 import { browserControlBuildId } from "../src/version.ts"
@@ -1590,6 +1591,7 @@ const withPage = Effect.fnUntraced(function* <A>(run: (page: Page) => Effect.Eff
     Effect.gen(function* () {
       const browser = yield* scopedBrowser()
       const context = yield* playwright("get browser context", () => getBrowserContext(browser))
+      yield* playwright("register ARIA snapshot selector", () => registerAriaSnapshotSelector(context))
       const page = yield* playwright("create page", () => context.newPage())
       return yield* run(page).pipe(Effect.ensuring(boundedCleanup("close smoke page", () => page.close())))
     }),
