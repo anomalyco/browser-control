@@ -15,7 +15,7 @@ the result, logs, warnings, and a summary of what changed.
 
 ## Quick Start
 
-Browser Control requires Node.js 20 or newer and a Chromium-family browser such
+Browser Control requires Node.js 22.19 or newer and a Chromium-family browser such
 as Chrome, Brave, Edge, Arc, or Chromium.
 
 Setup has three parts: install the npm package, install the agent skill, and

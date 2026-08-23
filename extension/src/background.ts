@@ -640,12 +640,9 @@ function sendMessage(message: JsonObject): void {
 }
 
 async function sendMessageAfterConnection(message: JsonObject): Promise<void> {
-  if (socket?.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify(message))
-    return
-  }
-  await ensureConnection()
-  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
+  if (socket?.readyState !== WebSocket.OPEN) await ensureConnection()
+  const currentSocket = socket
+  if (currentSocket?.readyState === WebSocket.OPEN) currentSocket.send(JSON.stringify(message))
 }
 
 async function sendBinaryAfterConnection(data: Uint8Array): Promise<void> {
@@ -660,7 +657,8 @@ async function sendBinaryAfterConnection(data: Uint8Array): Promise<void> {
     }
     if (Date.now() >= deadline) throw new Error("Timed out sending recording data to the Browser Control relay")
   }
-  currentSocket.send(data.buffer)
+  const buffer = data.buffer
+  currentSocket.send(buffer instanceof ArrayBuffer ? buffer : new Uint8Array(data).buffer)
 }
 
 function decodeBase64(value: string): Uint8Array {

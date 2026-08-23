@@ -222,6 +222,8 @@ require a new extension capture protocol and permission model.
 - The package is published publicly on npm. Normal setup installs the npm
   artifact; source development uses `pnpm install`, `pnpm build`, and `bun
   link`.
+- The CLI, MCP server, and source toolchain require Node.js 22.19 or newer,
+  matching the minimum runtime supported by the pinned Effect Platform stack.
 - Until the first Store review completes, the browser extension is loaded
   unpacked from the npm package's `extension/dist` directory or a source build.
   Its current shim version is `0.0.24`. A manifest public key gives unpacked

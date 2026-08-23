@@ -26,7 +26,7 @@ describe("extension connection lifecycle", () => {
 
   it("preserves an existing reconnect alarm", async () => {
     const create = vi.fn(async () => {})
-    const get = vi.fn(async () => ({ name: reconnectAlarmName, scheduledTime: Date.now() }))
+    const get = vi.fn(async () => ({ name: reconnectAlarmName, scheduledTime: Date.now(), persistAcrossSessions: true }))
 
     await ensureReconnectAlarm({ create, get })
 

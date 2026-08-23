@@ -348,6 +348,3 @@ function clientError(reason: ClientError["reason"], error: unknown): ClientError
     reason,
   })
 }
-
-export * as BrowserControlClient from "./browser-control-client.ts"
-export * as AuthenticatedOrigin from "./browser-control-client.ts"
