@@ -259,16 +259,34 @@ const cases: SmokeCase[] = [
       results.push({ challenge: "shadow-dom", generated: yield* inputValue(page.locator("#editField"), "shadow generated value") })
 
       yield* playwright("set ARIA redaction fixture", () =>
-        page.setContent(`<main><h2>Amount <input type="number" value="aria-number-value"></h2><input role="heading" value="aria-role-value"><textarea role="combobox">aria-textarea-value</textarea><div contenteditable>aria-editor-value</div><input type="button" value="Keep label"></main>`),
+        page.setContent(`<main><h2>Amount <input type="number" value="aria-secret-number"></h2><input role="heading" value="aria-secret-role"><textarea role="combobox">aria-secret-textarea</textarea><h3>Volume <div role="slider" aria-label="Volume" aria-valuenow="73" aria-valuetext="aria-secret-slider"></div></h3><h3>Quantity <div role="spinbutton" aria-label="Quantity" aria-valuenow="4" aria-valuetext="aria-secret-spin"></div></h3><div contenteditable aria-label="Editor"><svg><title>aria-secret-svg-title</title><text>aria-secret-svg-text</text></svg><img alt="aria-secret-alt" title="aria-secret-title"><span aria-label="aria-secret-label">aria-secret-editor</span><div id="aria-shadow-host"></div></div><input type="button" value="Keep label"><select aria-label="Keep select"><option selected>Keep option</option></select><iframe id="aria-editor-frame" srcdoc="<div contenteditable>aria-secret-frame</div>"></iframe></main>`),
       )
-      const safeAria = yield* playwright("capture redacted ARIA snapshot", () => createAriaSnapshotHelper(page)("main"))
-      if (safeAria.includes("aria-")) throw new Error("ARIA snapshot exposed a fixture form value")
+      yield* playwright("attach editable shadow fixture", () =>
+        page.locator("#aria-shadow-host").evaluate((host) => {
+          host.attachShadow({ mode: "open" }).innerHTML = `<span aria-label="aria-secret-shadow-label">aria-secret-shadow-text</span>`
+        }),
+      )
+      const ariaSnapshot = createAriaSnapshotHelper(page)
+      const [safeAria, safeFrameAria] = yield* playwright("capture concurrent redacted ARIA snapshots", () =>
+        Promise.all([
+          ariaSnapshot("main"),
+          ariaSnapshot(page.frameLocator("#aria-editor-frame").locator("body")),
+        ]),
+      )
+      if (`${safeAria}\n${safeFrameAria}`.includes("aria-secret-")) throw new Error("ARIA snapshot exposed a fixture form value")
       if (!safeAria.includes('button "Keep label"')) throw new Error("ARIA snapshot removed a native button label")
-      const restoredAria = yield* playwright("verify ARIA snapshot cleanup", () => page.locator("main").ariaSnapshot())
-      if (!restoredAria.includes("aria-role-value") || !restoredAria.includes("aria-textarea-value")) {
-        throw new Error("ARIA snapshot value access was not restored")
+      if (!safeAria.includes('combobox "Keep select"') || !safeAria.includes("Keep option")) throw new Error("ARIA snapshot removed a select value")
+      const [restoredAria, restoredFrameAria] = yield* playwright("verify ARIA snapshot cleanup", () =>
+        Promise.all([
+          page.locator("main").ariaSnapshot(),
+          page.frameLocator("#aria-editor-frame").locator("body").ariaSnapshot(),
+        ]),
+      )
+      const restored = `${restoredAria}\n${restoredFrameAria}`
+      for (const value of ["aria-secret-role", "aria-secret-textarea", "aria-secret-slider", "aria-secret-spin", "aria-secret-svg-text", "aria-secret-alt", "aria-secret-shadow-text", "aria-secret-frame"]) {
+        if (!restored.includes(value)) throw new Error(`ARIA snapshot value access was not restored for ${value}`)
       }
-      results.push({ challenge: "aria-redaction", snapshot: safeAria })
+      results.push({ challenge: "aria-redaction", snapshot: safeAria, frameSnapshot: safeFrameAria })
       return results
     }),
   },
