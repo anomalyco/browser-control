@@ -1,5 +1,17 @@
 # @opencode-ai/browser-control
 
+## 0.4.1
+
+### Patch Changes
+
+- 7874e37: Update Effect and the Node platform package from `4.0.0-beta.97` to `4.0.0-rc.111`, including current tagged errors and explicit MCP protocol adapters.
+- 8d6897d: Keep the unauthenticated HTTP and CDP relay bound to loopback while allowing explicitly configured extension origins for same-host unpacked installs.
+- f625957: Register ARIA snapshot redaction selectors on each connected Playwright context so `ariaSnapshot()` works through `connectOverCDP`.
+- ba7f5b5: Keep extension readiness independent from browser tab-group APIs that can remain pending indefinitely in Arc, and give unpacked builds a stable extension id with platform-correct migration support for existing Windows installs.
+- f12441c: Route Playwright browser-context permission and cookie commands through the correct session-owned tab.
+- 045805c: Omit text-control values from detailed ARIA snapshots so sensitive form contents do not enter agent output.
+- 4761e61: Harden `ariaSnapshot()` redaction for custom ARIA value controls, rich editable content, concurrent callers, and frame lifecycle changes.
+
 ## 0.4.0
 
 ### Minor Changes
