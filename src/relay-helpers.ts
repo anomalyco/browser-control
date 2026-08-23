@@ -56,7 +56,7 @@ export function parseAdditionalExtensionOrigins(raw: string | undefined): string
 
 const maxCliBodyBytes = 1_000_000
 
-export class HttpRouteError extends Schema.TaggedErrorClass<HttpRouteError>()(
+export class HttpRouteError extends Schema.TaggedError<HttpRouteError>()(
   "HttpApi.HttpRouteError",
   { message: Schema.String, status: Schema.Number, code: RelayErrorCode },
 ) {}

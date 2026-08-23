@@ -51,7 +51,7 @@ export type AuthRunResult = {
   readonly durationMs: number
 }
 
-export class AuthProfileError extends Schema.TaggedErrorClass<AuthProfileError>()(
+export class AuthProfileError extends Schema.TaggedError<AuthProfileError>()(
   "AuthProfile.Error",
   {
     message: Schema.String,

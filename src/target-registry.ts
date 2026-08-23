@@ -25,7 +25,7 @@ export interface TargetOwnership {
   releaseTargetOwnership(targetId: string, sessionId: string): TargetOwnershipChange
 }
 
-export class TargetOwnershipError extends Schema.TaggedErrorClass<TargetOwnershipError>()(
+export class TargetOwnershipError extends Schema.TaggedError<TargetOwnershipError>()(
   "TargetRegistry.TargetOwnershipError",
   {
     message: Schema.String,

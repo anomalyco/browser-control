@@ -38,7 +38,7 @@ export type SessionHooks = {
   readonly onSessionsChanged?: (sessions: readonly PersistedSession[]) => unknown | Promise<unknown>
 }
 
-export class SessionError extends Schema.TaggedErrorClass<SessionError>()(
+export class SessionError extends Schema.TaggedError<SessionError>()(
   "BrowserControlSessions.SessionError",
   {
     message: Schema.String,

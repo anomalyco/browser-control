@@ -371,8 +371,8 @@ reconciles existing client announcements, browser grouping, and page status.
 
 ### The relay owns orchestration
 
-- Node-side code uses Effect v4, with
-  a local `effect-smol` checkout as the API and pattern reference.
+- Node-side code uses Effect v4, with a local `Effect-TS/effect` checkout as the
+  current API and pattern reference.
 - Effect-returning functions prefer `Effect.fn` or `Effect.fnUntraced`.
 - Playwright and relay resources use scoped lifecycles.
 - Application configuration uses Effect `Config`; direct environment access is

@@ -12,7 +12,7 @@ import { endpointForPort, portConfig } from "./relay-client.ts"
  * endpoint and migrated on the next write.
  */
 
-export class SessionStoreError extends Schema.TaggedErrorClass<SessionStoreError>()(
+export class SessionStoreError extends Schema.TaggedError<SessionStoreError>()(
   "SessionStore.SessionStoreError",
   {
     message: Schema.String,

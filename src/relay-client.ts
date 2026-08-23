@@ -56,7 +56,7 @@ export const extensionOriginsConfig = Config.string("BROWSER_CONTROL_EXTENSION_O
 
 export const endpointForPort = (port: number): string => `http://127.0.0.1:${port}`
 
-export class RelayUnreachable extends Schema.TaggedErrorClass<RelayUnreachable>()(
+export class RelayUnreachable extends Schema.TaggedError<RelayUnreachable>()(
   "RelayClient.RelayUnreachable",
   {
     message: Schema.String,
@@ -66,7 +66,7 @@ export class RelayUnreachable extends Schema.TaggedErrorClass<RelayUnreachable>(
   },
 ) {}
 
-export class RelayRejected extends Schema.TaggedErrorClass<RelayRejected>()(
+export class RelayRejected extends Schema.TaggedError<RelayRejected>()(
   "RelayClient.RelayRejected",
   {
     message: Schema.String,
@@ -76,7 +76,7 @@ export class RelayRejected extends Schema.TaggedErrorClass<RelayRejected>()(
   },
 ) {}
 
-export class RelayDecodeFailed extends Schema.TaggedErrorClass<RelayDecodeFailed>()(
+export class RelayDecodeFailed extends Schema.TaggedError<RelayDecodeFailed>()(
   "RelayClient.RelayDecodeFailed",
   {
     message: Schema.String,
@@ -85,7 +85,7 @@ export class RelayDecodeFailed extends Schema.TaggedErrorClass<RelayDecodeFailed
   },
 ) {}
 
-export class RelayEncodeFailed extends Schema.TaggedErrorClass<RelayEncodeFailed>()(
+export class RelayEncodeFailed extends Schema.TaggedError<RelayEncodeFailed>()(
   "RelayClient.RelayEncodeFailed",
   {
     message: Schema.String,
@@ -94,7 +94,7 @@ export class RelayEncodeFailed extends Schema.TaggedErrorClass<RelayEncodeFailed
   },
 ) {}
 
-export class RelayConfigInvalid extends Schema.TaggedErrorClass<RelayConfigInvalid>()(
+export class RelayConfigInvalid extends Schema.TaggedError<RelayConfigInvalid>()(
   "RelayClient.RelayConfigInvalid",
   {
     message: Schema.String,
