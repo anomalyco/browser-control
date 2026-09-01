@@ -2,9 +2,9 @@ export const tabGroupVisibleTitle = "control"
 // Keep the visible label generic without treating a user's own `control` group
 // as extension-owned. Chrome renders U+2063 without visible width.
 export const tabGroupTitle = `${tabGroupVisibleTitle}\u2063`
-export const legacyTabGroupTitle = "browser-control"
-export const sessionTabGroupTitlePrefix = "bc:"
-export const compactSessionTabGroupTitlePrefix = "bc · "
+const legacyTabGroupTitle = "browser-control"
+const sessionTabGroupTitlePrefix = "bc:"
+const compactSessionTabGroupTitlePrefix = "bc · "
 export const tabGroupColor = "purple" as const
 
 export function isCurrentBrowserControlGroupTitle(title: string | undefined): boolean {

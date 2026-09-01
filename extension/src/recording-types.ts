@@ -39,7 +39,7 @@ export type OffscreenCancelRecordingMessage = {
   readonly tabId: number
 }
 
-export type OffscreenCancelAllRecordingsMessage = {
+type OffscreenCancelAllRecordingsMessage = {
   readonly action: "recording.cancelAll"
 }
 
@@ -100,7 +100,7 @@ export type OffscreenResult =
   | OffscreenCancelRecordingResult
   | OffscreenCancelAllRecordingsResult
 
-export type OffscreenRecordingChunkMessage =
+type OffscreenRecordingChunkMessage =
   | {
     readonly action: "recording.chunk"
     readonly tabId: number
@@ -115,7 +115,7 @@ export type OffscreenRecordingChunkMessage =
     readonly final: true
   }
 
-export type OffscreenRecordingCancelledMessage = {
+type OffscreenRecordingCancelledMessage = {
   readonly action: "recording.cancelled"
   readonly tabId: number
 }

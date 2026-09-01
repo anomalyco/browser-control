@@ -36,7 +36,7 @@ type PackageInfo = {
   }
 }
 
-export type DoctorArtifact = {
+type DoctorArtifact = {
   readonly path: string
   readonly exists: boolean
   readonly version?: string

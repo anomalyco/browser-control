@@ -1,5 +1,5 @@
 import http from "node:http"
-import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest"
 import { Effect, Schema } from "effect"
 import * as BrowserControlClient from "../src/browser-control-client.ts"
 import { browserControlBuildId, browserControlVersion } from "../src/version.ts"
@@ -7,6 +7,8 @@ import { browserControlBuildId, browserControlVersion } from "../src/version.ts"
 let server: http.Server
 let endpoint: string
 let authenticatedOutcome: unknown
+let extensionFailuresRemaining = 0
+let extensionChecks = 0
 
 const session = {
   id: "x-live-chat-auth",
@@ -26,7 +28,10 @@ beforeAll(async () => {
       return
     }
     if (path === "/extension/status") {
-      response.end(JSON.stringify({ connected: true, version: "test", activeTargets: 1 }))
+      extensionChecks += 1
+      const connected = extensionFailuresRemaining === 0
+      extensionFailuresRemaining = Math.max(0, extensionFailuresRemaining - 1)
+      response.end(JSON.stringify({ connected, version: "test", activeTargets: connected ? 1 : 0 }))
       return
     }
     const chunks: Buffer[] = []
@@ -58,6 +63,11 @@ afterAll(async () => {
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
 })
 
+beforeEach(() => {
+  extensionFailuresRemaining = 0
+  extensionChecks = 0
+})
+
 const makeOrigin = Effect.gen(function* () {
   const client = yield* BrowserControlClient.make({ endpoint })
   const liveSession = yield* client.ensureSession({ id: session.id })
@@ -68,6 +78,12 @@ const makeOrigin = Effect.gen(function* () {
 })
 
 describe("BrowserControlClient", () => {
+  it("waits through a transient extension reconnect on an existing relay", async () => {
+    extensionFailuresRemaining = 2
+    await Effect.runPromise(BrowserControlClient.make({ endpoint }))
+    expect(extensionChecks).toBe(3)
+  })
+
   it("resets a named session", async () => {
     const result = await Effect.runPromise(Effect.gen(function* () {
       const client = yield* BrowserControlClient.make({ endpoint })

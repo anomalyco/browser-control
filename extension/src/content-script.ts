@@ -188,7 +188,7 @@ function renderStatus(): void {
     const vignette = document.createElement("div")
     vignette.id = "vignette"
     host.shadowRoot?.insertBefore(vignette, statusElement)
-    positionWaitingStatus(host, statusElement)
+    positionWaitingStatus(host)
   }
   if (!host.isConnected) {
     document.documentElement.append(host)
@@ -196,7 +196,7 @@ function renderStatus(): void {
   observeHost()
 }
 
-function positionWaitingStatus(host: HTMLElement, statusElement: HTMLElement): void {
+function positionWaitingStatus(host: HTMLElement): void {
   const cursor = document.getElementById("__browser_control_ghost_cursor__")
   const x = Number(cursor?.dataset.targetX)
   const y = Number(cursor?.dataset.targetY)

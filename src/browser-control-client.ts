@@ -12,7 +12,7 @@ import type {
 
 export type Json = Schema.Schema.Type<typeof Schema.Json>
 
-export class ClientError extends Schema.TaggedErrorClass<ClientError>()(
+export class ClientError extends Schema.TaggedError<ClientError>()(
   "BrowserControlClient.Error",
   {
     message: Schema.String,
@@ -22,7 +22,7 @@ export class ClientError extends Schema.TaggedErrorClass<ClientError>()(
   },
 ) {}
 
-export class OriginMismatch extends Schema.TaggedErrorClass<OriginMismatch>()(
+export class OriginMismatch extends Schema.TaggedError<OriginMismatch>()(
   "AuthenticatedOrigin.OriginMismatch",
   {
     expectedOrigin: Schema.String,
@@ -31,7 +31,7 @@ export class OriginMismatch extends Schema.TaggedErrorClass<OriginMismatch>()(
   },
 ) {}
 
-export class HttpError extends Schema.TaggedErrorClass<HttpError>()(
+export class HttpError extends Schema.TaggedError<HttpError>()(
   "AuthenticatedOrigin.HttpError",
   {
     status: Schema.Number,
@@ -40,7 +40,7 @@ export class HttpError extends Schema.TaggedErrorClass<HttpError>()(
   },
 ) {}
 
-export class RequestFailed extends Schema.TaggedErrorClass<RequestFailed>()(
+export class RequestFailed extends Schema.TaggedError<RequestFailed>()(
   "AuthenticatedOrigin.RequestFailed",
   {
     method: Schema.String,
@@ -48,7 +48,7 @@ export class RequestFailed extends Schema.TaggedErrorClass<RequestFailed>()(
   },
 ) {}
 
-export class RequestOutcomeUnknown extends Schema.TaggedErrorClass<RequestOutcomeUnknown>()(
+export class RequestOutcomeUnknown extends Schema.TaggedError<RequestOutcomeUnknown>()(
   "AuthenticatedOrigin.RequestOutcomeUnknown",
   {
     method: Schema.String,
@@ -56,7 +56,7 @@ export class RequestOutcomeUnknown extends Schema.TaggedErrorClass<RequestOutcom
   },
 ) {}
 
-export class InvalidResponse extends Schema.TaggedErrorClass<InvalidResponse>()(
+export class InvalidResponse extends Schema.TaggedError<InvalidResponse>()(
   "AuthenticatedOrigin.InvalidResponse",
   {
     reason: Schema.Literals(["invalid-json", "too-large"]),
@@ -66,14 +66,14 @@ export class InvalidResponse extends Schema.TaggedErrorClass<InvalidResponse>()(
   },
 ) {}
 
-export class ResponseDecodeFailed extends Schema.TaggedErrorClass<ResponseDecodeFailed>()(
+export class ResponseDecodeFailed extends Schema.TaggedError<ResponseDecodeFailed>()(
   "AuthenticatedOrigin.ResponseDecodeFailed",
   {
     message: Schema.String,
   },
 ) {}
 
-export class SensitiveCaptureActive extends Schema.TaggedErrorClass<SensitiveCaptureActive>()(
+export class SensitiveCaptureActive extends Schema.TaggedError<SensitiveCaptureActive>()(
   "AuthenticatedOrigin.SensitiveCaptureActive",
   {
     message: Schema.String,
@@ -100,7 +100,7 @@ export interface JsonOptions<S extends Schema.Top> {
   readonly maxResponseBytes?: number
 }
 
-export interface AuthenticatedOrigin {
+export interface AuthenticatedOriginCapability {
   readonly origin: string
   readonly json: {
     <S extends Schema.Top>(
@@ -111,6 +111,8 @@ export interface AuthenticatedOrigin {
     ): Effect.Effect<S["Type"], Error, S["DecodingServices"]>
   }
 }
+
+export type AuthenticatedOrigin = AuthenticatedOriginCapability
 
 /** Reveal a sensitive response using Browser Control's Effect runtime. */
 export const reveal = <A>(value: Redacted.Redacted<A>): A => Redacted.value(value)
@@ -126,7 +128,7 @@ export interface Session {
   readonly summary: SessionSummary
   readonly authenticatedOrigin: (
     options: AuthenticatedOriginOptions,
-  ) => Effect.Effect<AuthenticatedOrigin, ClientError>
+  ) => Effect.Effect<AuthenticatedOriginCapability, ClientError>
 }
 
 export interface EnsureSessionOptions {
@@ -167,7 +169,7 @@ export const make = Effect.fn("BrowserControlClient.make")(function* (options: M
   }
   yield* RelayLifecycle.ensureExtensionConnected({
     relay,
-    waitForReconnect: readiness.started,
+    waitForReconnect: true,
   }).pipe(Effect.mapError((error) => clientError("connect", error)))
 
   const ensureSession = Effect.fn("BrowserControlClient.ensureSession")(function* (

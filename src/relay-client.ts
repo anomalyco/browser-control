@@ -25,6 +25,7 @@ import {
   RecordingStopResponse,
   type RecordingTargetRequest,
   RelayErrorCode,
+  type RelayShutdownRequest,
   RelayShutdownResponse,
   RelayVersion,
   SessionAdoptResponse,
@@ -57,7 +58,7 @@ export const extensionOriginsConfig = Config.string("BROWSER_CONTROL_EXTENSION_O
 
 export const endpointForPort = (port: number): string => `http://127.0.0.1:${port}`
 
-export class RelayUnreachable extends Schema.TaggedErrorClass<RelayUnreachable>()(
+export class RelayUnreachable extends Schema.TaggedError<RelayUnreachable>()(
   "RelayClient.RelayUnreachable",
   {
     message: Schema.String,
@@ -67,7 +68,7 @@ export class RelayUnreachable extends Schema.TaggedErrorClass<RelayUnreachable>(
   },
 ) {}
 
-export class RelayRejected extends Schema.TaggedErrorClass<RelayRejected>()(
+export class RelayRejected extends Schema.TaggedError<RelayRejected>()(
   "RelayClient.RelayRejected",
   {
     message: Schema.String,
@@ -77,7 +78,7 @@ export class RelayRejected extends Schema.TaggedErrorClass<RelayRejected>()(
   },
 ) {}
 
-export class RelayDecodeFailed extends Schema.TaggedErrorClass<RelayDecodeFailed>()(
+export class RelayDecodeFailed extends Schema.TaggedError<RelayDecodeFailed>()(
   "RelayClient.RelayDecodeFailed",
   {
     message: Schema.String,
@@ -86,7 +87,7 @@ export class RelayDecodeFailed extends Schema.TaggedErrorClass<RelayDecodeFailed
   },
 ) {}
 
-export class RelayEncodeFailed extends Schema.TaggedErrorClass<RelayEncodeFailed>()(
+class RelayEncodeFailed extends Schema.TaggedError<RelayEncodeFailed>()(
   "RelayClient.RelayEncodeFailed",
   {
     message: Schema.String,
@@ -95,7 +96,7 @@ export class RelayEncodeFailed extends Schema.TaggedErrorClass<RelayEncodeFailed
   },
 ) {}
 
-export class RelayConfigInvalid extends Schema.TaggedErrorClass<RelayConfigInvalid>()(
+export class RelayConfigInvalid extends Schema.TaggedError<RelayConfigInvalid>()(
   "RelayClient.RelayConfigInvalid",
   {
     message: Schema.String,
@@ -108,7 +109,7 @@ export type RelayClientError = RelayUnreachable | RelayRejected | RelayDecodeFai
 export interface Interface {
   readonly endpoint: string
   readonly version: Effect.Effect<RelayVersion, RelayClientError>
-  readonly shutdown: (instanceId: string) => Effect.Effect<RelayShutdownResponse, RelayClientError>
+  readonly shutdown: (request: RelayShutdownRequest) => Effect.Effect<RelayShutdownResponse, RelayClientError>
   readonly extensionStatus: Effect.Effect<ExtensionStatus, RelayClientError>
   readonly targets: Effect.Effect<readonly TargetSummary[], RelayClientError>
   readonly sessions: Effect.Effect<readonly SessionSummary[], RelayClientError>
@@ -243,7 +244,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
   return Service.of({
     endpoint,
     version: getJson("/version", RelayVersion),
-    shutdown: (instanceId) => postJson("/shutdown", { instanceId }, RelayShutdownResponse),
+    shutdown: (request) => postJson("/shutdown", { ...request }, RelayShutdownResponse),
     extensionStatus: getJson("/extension/status", ExtensionStatus),
     targets: getJson("/json/list", TargetSummaries),
     sessions: getJson("/cli/sessions", SessionsContainer).pipe(Effect.map((container) => container.sessions)),
@@ -298,7 +299,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
   })
 })
 
-export const layer: Layer.Layer<Service, RelayConfigInvalid, HttpClient.HttpClient> = Layer.effect(Service, make())
+const layer: Layer.Layer<Service, RelayConfigInvalid, HttpClient.HttpClient> = Layer.effect(Service, make())
 
 /** RelayClient backed by the global `fetch`, for standalone CLI/MCP wiring. */
 export const layerFetch: Layer.Layer<Service, RelayConfigInvalid> = layer.pipe(Layer.provide(FetchHttpClient.layer))

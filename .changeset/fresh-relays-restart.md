@@ -2,4 +2,4 @@
 "@opencode-ai/browser-control": patch
 ---
 
-Automatically replace a stale detached relay with the current CLI build before running operational commands.
+Check the relay build before operational commands and provide explicit restart guidance on a mismatch, rather than silently replacing a shared relay.

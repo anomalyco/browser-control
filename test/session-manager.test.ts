@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest"
-import { Deferred, Effect, Fiber } from "effect"
+import { Deferred, Effect, Fiber, Latch } from "effect"
+import { TestClock } from "effect/testing"
 import { adoptionTipForUrl, BrowserControlSessions, shouldAppendAdoptionTip } from "../src/session-manager.ts"
-import type { ExecuteSandboxLike } from "../src/relay-types.ts"
+import type { ExecuteSandboxLike, SessionTarget } from "../src/relay-types.ts"
 import type { PersistedSession } from "../src/session-catalog.ts"
 import { TargetRegistry } from "../src/target-registry.ts"
 
@@ -12,6 +13,7 @@ type FakeSandbox = ExecuteSandboxLike & {
   readonly detachedTargets: () => string[]
   readonly replacedTargets: () => Array<readonly [string, string]>
   readonly restoredTarget: () => PersistedSession["target"]
+  readonly setDefaultTarget: (target: SessionTarget | undefined) => void
 }
 
 const makeFakeSandbox = (options?: {
@@ -22,6 +24,7 @@ const makeFakeSandbox = (options?: {
   readonly onAdopt?: ExecuteSandboxLike["adoptPage"]
   readonly onClose?: Effect.Effect<void>
   readonly defaultTargetId?: string
+  readonly onDefaultTargetChange?: (target: SessionTarget | undefined) => void
   readonly redactText?: (text: string) => string
 }): FakeSandbox => {
   let closes = 0
@@ -32,9 +35,13 @@ const makeFakeSandbox = (options?: {
   let persistenceTarget: PersistedSession["target"] = options?.defaultTargetId
     ? { id: options.defaultTargetId, owner: "relay" }
     : undefined
+  const setDefaultTarget = (target: SessionTarget | undefined) => {
+    persistenceTarget = target
+    options?.onDefaultTargetChange?.(target)
+  }
   const close = () => Effect.sync(() => {
     closes += 1
-    persistenceTarget = undefined
+    setDefaultTarget(undefined)
   }).pipe(Effect.andThen(options?.onClose ?? Effect.void))
   const disconnect = () => Effect.sync(() => {
     closes += 1
@@ -42,6 +49,9 @@ const makeFakeSandbox = (options?: {
   return {
     execute: () =>
       (options?.onExecute ?? Effect.void).pipe(
+        Effect.tap(() => Effect.sync(() => {
+          if (!options?.setupFailure && persistenceTarget) options?.onDefaultTargetChange?.(persistenceTarget)
+        })),
         Effect.as(options?.setupFailure
           ? {
               text: options.setupFailure.message,
@@ -66,8 +76,6 @@ const makeFakeSandbox = (options?: {
           status: 200,
           value: { ok: true },
         }),
-    close,
-    disconnect,
     disconnectSettled: disconnect,
     closeSettled: close,
     networkStart: () => Effect.succeed({ active: true, entryCount: 0, responseCount: 0, failureCount: 0, capturedBodyBytes: 0, truncatedBodyCount: 0, droppedEntryCount: 0 }),
@@ -112,6 +120,7 @@ const makeFakeSandbox = (options?: {
     detachedTargets: () => detachedTargets,
     replacedTargets: () => replacedTargets,
     restoredTarget: () => persistenceTarget,
+    setDefaultTarget,
   }
 }
 
@@ -167,18 +176,17 @@ describe("BrowserControlSessions", () => {
     const persisted: PersistedSession[][] = []
     const sessions = new BrowserControlSessions(
       "http://127.0.0.1:0",
-      () => makeFakeSandbox({ defaultTargetId: "target-1" }),
+      (_id, onDefaultTargetChange) => makeFakeSandbox({ defaultTargetId: "target-1", onDefaultTargetChange }),
       { onSessionsChanged: (entries) => persisted.push([...entries]) },
     )
     sessions.createNew("alpha", { readOnly: true })
-    sessions.updateTarget("alpha", { id: "target-1", owner: "relay" })
-    await Effect.runPromise(sessions.persist())
+    await Effect.runPromise(sessions.execute({ sessionId: "alpha", code: "noop", createIfMissing: false }))
     const descriptor = persisted.at(-1)?.[0]
     expect(descriptor).toMatchObject({ id: "alpha", readOnly: true, target: { id: "target-1", owner: "relay" } })
 
     const restoredSandboxes: FakeSandbox[] = []
-    const restored = new BrowserControlSessions("http://127.0.0.1:0", () => {
-      const sandbox = makeFakeSandbox()
+    const restored = new BrowserControlSessions("http://127.0.0.1:0", (_id, onDefaultTargetChange) => {
+      const sandbox = makeFakeSandbox({ onDefaultTargetChange })
       restoredSandboxes.push(sandbox)
       return sandbox
     })
@@ -187,6 +195,91 @@ describe("BrowserControlSessions", () => {
     expect(restored.listSummaries()).toMatchObject([{ id: "alpha", readOnly: true, stateKeys: [] }])
     expect(restored.persistedTargetOwner("target-1")).toEqual({ sessionId: "alpha", owner: "relay" })
     expect(restoredSandboxes[0]?.restoredTarget()).toEqual({ id: "target-1", owner: "relay" })
+  })
+
+  it("persists acquired and cleared default targets through the sandbox callback", async () => {
+    const persisted: PersistedSession[][] = []
+    const sandboxes: FakeSandbox[] = []
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", (id, onDefaultTargetChange) => {
+      const sandbox = makeFakeSandbox({ defaultTargetId: `target-${id}`, onDefaultTargetChange })
+      sandboxes.push(sandbox)
+      return sandbox
+    }, { onSessionsChanged: (entries) => persisted.push([...entries]) })
+
+    await Effect.runPromise(sessions.execute({ sessionId: "alpha", code: "noop", createIfMissing: true }))
+    expect(persisted.at(-1)?.[0]?.target).toEqual({ id: "target-alpha", owner: "relay" })
+    expect(sessions.persistedTargetOwner("target-alpha")).toEqual({ sessionId: "alpha", owner: "relay" })
+    const writes = persisted.length
+
+    sandboxes[0]?.setDefaultTarget({ id: "target-alpha", owner: "relay" })
+    await Effect.runPromise(sessions.persist())
+    expect(persisted).toHaveLength(writes)
+
+    sandboxes[0]?.setDefaultTarget(undefined)
+    await Effect.runPromise(sessions.persist())
+    expect(persisted).toHaveLength(writes + 1)
+    expect(persisted.at(-1)?.[0]).not.toHaveProperty("target")
+    expect(sessions.persistedTargetOwner("target-alpha")).toBeUndefined()
+  })
+
+  it.each(["reset", "delete and recreate", "failed adoption"] as const)("ignores retired sandbox callbacks after %s", async (operation) => {
+    const persisted: PersistedSession[][] = []
+    const sandboxes: FakeSandbox[] = []
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", (_id, onDefaultTargetChange) => {
+      const sandbox = makeFakeSandbox({ onDefaultTargetChange, adoptFailure: new Error("target detached") })
+      sandboxes.push(sandbox)
+      return sandbox
+    }, { onSessionsChanged: (entries) => persisted.push([...entries]) })
+    sessions.createNew("alpha")
+    sandboxes[0]?.setDefaultTarget({ id: "target-old", owner: "relay" })
+
+    if (operation === "reset") await Effect.runPromise(sessions.reset("alpha"))
+    else if (operation === "delete and recreate") {
+      await Effect.runPromise(sessions.delete("alpha"))
+      sessions.createNew("alpha")
+    } else {
+      await expect(Effect.runPromise(sessions.adopt({
+        sessionId: "alpha",
+        createIfMissing: false,
+        targetId: "target-adopted",
+        targetUrl: "https://example.com/adopted",
+      }))).rejects.toThrow("target detached")
+    }
+    expect(sandboxes).toHaveLength(2)
+    sandboxes[1]?.setDefaultTarget({ id: "target-new", owner: "relay" })
+    await Effect.runPromise(sessions.persist())
+    const writes = persisted.length
+    const summary = sessions.summary("alpha")
+
+    sandboxes[0]?.setDefaultTarget(undefined)
+    sandboxes[0]?.setDefaultTarget({ id: "target-stale", owner: "user" })
+    await Effect.runPromise(sessions.persist())
+
+    expect(persisted).toHaveLength(writes)
+    expect(persisted.at(-1)?.[0]?.target).toEqual({ id: "target-new", owner: "relay" })
+    expect(sessions.persistedTargetOwner("target-new")).toEqual({ sessionId: "alpha", owner: "relay" })
+    expect(sessions.persistedTargetOwner("target-stale")).toBeUndefined()
+    expect(sessions.summary("alpha")).toEqual(summary)
+  })
+
+  it("wires target changes into the default sandbox factory", async () => {
+    const persisted: PersistedSession[][] = []
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", undefined, {
+      onSessionsChanged: (entries) => persisted.push([...entries]),
+    })
+    sessions.restore([{
+      id: "alpha",
+      createdAt: "2026-07-19T00:00:00.000Z",
+      updatedAt: "2026-07-19T00:01:00.000Z",
+      readOnly: false,
+      target: { id: "target-1", owner: "relay" },
+    }])
+
+    await Effect.runPromise(sessions.getOrCreate("alpha").session.sandbox.closeSettled())
+    await Effect.runPromise(sessions.persist())
+
+    expect(sessions.persistedTargetOwner("target-1")).toBeUndefined()
+    expect(persisted.at(-1)?.[0]).not.toHaveProperty("target")
   })
 
   it("rejects duplicate target ownership in a persisted catalog", () => {
@@ -204,16 +297,25 @@ describe("BrowserControlSessions", () => {
 
   it("persists target identity while disconnecting sessions for relay shutdown", async () => {
     const persisted: PersistedSession[][] = []
+    const sandboxes: FakeSandbox[] = []
     const sessions = new BrowserControlSessions(
       "http://127.0.0.1:0",
-      () => makeFakeSandbox({ defaultTargetId: "target-1" }),
+      (_id, onDefaultTargetChange) => {
+        const sandbox = makeFakeSandbox({ defaultTargetId: "target-1", onDefaultTargetChange })
+        sandboxes.push(sandbox)
+        return sandbox
+      },
       { onSessionsChanged: (entries) => persisted.push([...entries]) },
     )
     sessions.createNew("alpha")
-    sessions.updateTarget("alpha", { id: "target-1", owner: "relay" })
+    await Effect.runPromise(sessions.execute({ sessionId: "alpha", code: "noop", createIfMissing: false }))
 
     await Effect.runPromise(sessions.closeAll())
+    const writes = persisted.length
+    sandboxes[0]?.setDefaultTarget(undefined)
+    await Effect.runPromise(sessions.persist())
 
+    expect(persisted).toHaveLength(writes)
     expect(persisted.at(-1)).toMatchObject([{
       id: "alpha",
       target: { id: "target-1", owner: "relay" },
@@ -263,7 +365,12 @@ describe("BrowserControlSessions", () => {
     })
     let blockWrites = false
     const committed: PersistedSession[][] = []
-    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox(), {
+    const sandboxes = new Map<string, FakeSandbox>()
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", (id, onDefaultTargetChange) => {
+      const sandbox = makeFakeSandbox({ onDefaultTargetChange })
+      sandboxes.set(id, sandbox)
+      return sandbox
+    }, {
       onSessionsChanged: async (entries) => {
         if (blockWrites) {
           markCommitStarted?.()
@@ -279,7 +386,8 @@ describe("BrowserControlSessions", () => {
 
     const deletion = Effect.runPromise(sessions.delete("alpha"))
     await commitStarted
-    sessions.updateTarget("beta", { id: "target-beta", owner: "relay" })
+    sandboxes.get("alpha")?.setDefaultTarget({ id: "target-stale", owner: "relay" })
+    sandboxes.get("beta")?.setDefaultTarget({ id: "target-beta", owner: "relay" })
     releaseCommit?.()
     await expect(deletion).resolves.toBe(true)
     await Effect.runPromise(sessions.persist())
@@ -304,6 +412,39 @@ describe("BrowserControlSessions", () => {
       expect(sessions.summary("alpha")).toBeDefined()
       await expect(Effect.runPromise(sessions.create("beta"))).rejects.toThrow("catalog unavailable")
       expect(sessions.summary("beta")).toBeUndefined()
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
+  it.each([false, true])("ensure rolls back its initial persistence failure (corrective write fails: %s)", async (failCorrection) => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      await Effect.runPromise(Effect.gen(function* () {
+        const correctionStarted = yield* Latch.make()
+        const releaseCorrection = yield* Latch.make()
+        const initialError = new Error("initial catalog unavailable")
+        const snapshots: PersistedSession[][] = []
+        const sandbox = makeFakeSandbox()
+        const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox, {
+          onSessionsChanged: async (entries) => {
+            snapshots.push([...entries])
+            if (snapshots.length === 1) throw initialError
+            correctionStarted.openUnsafe()
+            await Effect.runPromise(releaseCorrection.await)
+            if (failCorrection) throw new Error("corrective catalog unavailable")
+          },
+        })
+        const request = yield* Effect.forkChild(sessions.ensure("alpha", { readOnly: true }).pipe(Effect.flip))
+        yield* correctionStarted.await
+        expect(snapshots).toEqual([[expect.objectContaining({ id: "alpha", readOnly: true })], []])
+        expect(sessions.summary("alpha")).toBeUndefined()
+        expect(sandbox.closes()).toBe(1)
+        expect(request.pollUnsafe()).toBeUndefined()
+        yield* releaseCorrection.open
+        expect(yield* Fiber.join(request)).toBe(initialError)
+        expect(sessions.hasPendingWork("alpha")).toBe(false)
+      }))
     } finally {
       consoleError.mockRestore()
     }
@@ -489,29 +630,496 @@ describe("BrowserControlSessions", () => {
     )
   })
 
-  it("closeAll preserves a session when its execute permit times out", async () => {
+  it("rejects every new mutation during drain while keeping reads and resume available", async () => {
+    const sandbox = makeFakeSandbox()
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox)
+    const session = await Effect.runPromise(sessions.create("alpha"))
+    // Constructing an Effect is not admission; running it is.
+    const mutations: Array<Effect.Effect<unknown, Error>> = [
+      sessions.create("beta"),
+      sessions.ensure("alpha"),
+      sessions.reset("alpha"),
+      sessions.delete("alpha"),
+      sessions.execute({ sessionId: "alpha", code: "noop", createIfMissing: false }),
+      sessions.adopt({ sessionId: "alpha", createIfMissing: false, targetId: "target-1", targetUrl: "https://example.com" }),
+      sessions.networkStart("alpha"),
+      sessions.networkStop("alpha"),
+      sessions.networkCancel("alpha"),
+      sessions.authRefresh("alpha", { name: "example" }),
+      sessions.authenticatedJson({ sessionId: "alpha", origin: "https://example.com", method: "GET", path: "/api" }),
+    ]
+
+    await Effect.runPromise(sessions.beginDrain())
+    for (const mutation of mutations) {
+      expect(await Effect.runPromise(Effect.flip(mutation))).toMatchObject({ reason: "inactive", message: "Browser Control sessions are draining" })
+    }
+    expect(() => sessions.createNew("beta")).toThrow("draining")
+    expect(() => sessions.getOrCreate("alpha")).toThrow("draining")
+    expect(() => sessions.restore([])).toThrow("draining")
+    expect(sessions.summary("alpha")?.id).toBe("alpha")
+    expect(sessions.listSummaries()).toHaveLength(1)
+    expect(sessions.isReadOnly("alpha")).toBe(false)
+    expect(sessions.isExecuting("alpha")).toBe(false)
+    expect(sessions.hasPendingWork("alpha")).toBe(false)
+    expect(sessions.hasActiveNetworkCapture()).toBe(false)
+    expect(await Effect.runPromise(sessions.networkStatus("alpha"))).toMatchObject({ active: false })
+    await Effect.runPromise(sessions.persist())
+    expect(sessions.sessions.get("alpha")).toBe(session)
+    expect(sandbox.closes()).toBe(0)
+
+    sessions.resume()
+    await Effect.runPromise(sessions.execute({ sessionId: "alpha", code: "resumed", createIfMissing: false }))
+    await Effect.runPromise(sessions.closeAll())
+    sessions.resume()
+    expect(() => sessions.createNew("beta")).toThrow("closing")
+  })
+
+  it.each(["interrupt", "timeout"] as const)("a drain %s and resume never release a running permit or eventually disconnect", async (cancel) => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const started = yield* Latch.make()
+      const release = yield* Latch.make()
+      let executions = 0
+      const sandbox = makeFakeSandbox({
+        onExecute: Effect.gen(function* () {
+          executions += 1
+          yield* started.open
+          yield* release.await
+        }),
+      })
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox)
+      const session = sessions.createNew("alpha")
+      const execute = yield* Effect.forkChild(sessions.execute({ sessionId: "alpha", code: "first", createIfMissing: false }))
+      yield* started.await
+      yield* Fiber.interrupt(execute)
+      expect(sessions.hasPendingWork("alpha")).toBe(true)
+      expect(sessions.hasPendingWork("other")).toBe(false)
+      const drain = yield* Effect.forkChild(sessions.beginDrain().pipe(Effect.timeoutOption("1 second")), { startImmediately: true })
+      expect(drain.pollUnsafe()).toBeUndefined()
+      expect(yield* sessions.ensure("beta").pipe(Effect.flip)).toMatchObject({ reason: "inactive" })
+      if (cancel === "interrupt") yield* Fiber.interrupt(drain)
+      else {
+        yield* TestClock.adjust("1 second")
+        expect((yield* Fiber.join(drain))._tag).toBe("None")
+      }
+      sessions.resume()
+
+      const next = yield* Effect.forkChild(sessions.execute({ sessionId: "alpha", code: "next", createIfMissing: false }), { startImmediately: true })
+      expect(executions).toBe(1)
+      expect((yield* session.executeSemaphore.withPermitsIfAvailable(1)(Effect.void))._tag).toBe("None")
+      expect(sandbox.closes()).toBe(0)
+      expect(sessions.hasPendingWork("alpha")).toBe(true)
+      yield* release.open
+      yield* Fiber.join(next)
+      yield* sessions.beginDrain()
+      expect(sessions.hasPendingWork("alpha")).toBe(false)
+      expect(executions).toBe(2)
+      expect(sessions.sessions.get("alpha")).toBe(session)
+      expect(sandbox.closes()).toBe(0)
+    }).pipe(Effect.provide(TestClock.layer())))
+  })
+
+  it("drains timed-out adoption through worker settlement, cleanup, and the replacement catalog", async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const adopted = yield* Latch.make()
+      const releaseAdopt = yield* Latch.make()
+      const closing = yield* Latch.make()
+      const releaseClose = yield* Latch.make()
+      const committing = yield* Latch.make()
+      const releaseCommit = yield* Latch.make()
+      const sandboxes: FakeSandbox[] = []
+      let blockWrites = false
+      const committed: PersistedSession[][] = []
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => {
+        const sandbox = makeFakeSandbox(sandboxes.length === 0 ? {
+          onAdopt: () => adopted.open.pipe(Effect.andThen(releaseAdopt.await), Effect.as("https://example.com")),
+          onClose: closing.open.pipe(Effect.andThen(releaseClose.await)),
+        } : undefined)
+        sandboxes.push(sandbox)
+        return sandbox
+      }, {
+        lifecycleTimeoutMs: 1_000,
+        onSessionsChanged: async (entries) => {
+          if (blockWrites) {
+            committing.openUnsafe()
+            await Effect.runPromise(releaseCommit.await)
+          }
+          committed.push([...entries])
+        },
+      })
+      yield* sessions.create("alpha")
+      blockWrites = true
+      const adoption = yield* Effect.forkChild(sessions.adopt({
+        sessionId: "alpha", createIfMissing: false, targetId: "target-1", targetUrl: "https://example.com",
+      }).pipe(Effect.flip))
+      yield* adopted.await
+      yield* TestClock.adjust("1 second")
+      expect((yield* Fiber.join(adoption)).message).toContain("timed out")
+      expect(sessions.hasPendingWork("alpha")).toBe(true)
+      const drain = yield* Effect.forkChild(sessions.beginDrain(), { startImmediately: true })
+      expect(drain.pollUnsafe()).toBeUndefined()
+      expect(sandboxes[0]?.closes()).toBe(0)
+      expect(committed).toHaveLength(1)
+
+      yield* releaseAdopt.open
+      yield* closing.await
+      expect(drain.pollUnsafe()).toBeUndefined()
+      expect(committed).toHaveLength(1)
+      yield* releaseClose.open
+      yield* committing.await
+      expect(drain.pollUnsafe()).toBeUndefined()
+      expect(committed).toHaveLength(1)
+      expect(sandboxes).toHaveLength(2)
+      expect(sandboxes[1]?.closes()).toBe(0)
+      yield* releaseCommit.open
+      yield* Fiber.join(drain)
+      expect(committed).toHaveLength(2)
+      expect(sessions.hasPendingWork("alpha")).toBe(false)
+      expect(sessions.summary("alpha")).toBeDefined()
+      expect(sandboxes[1]?.closes()).toBe(0)
+    }).pipe(Effect.provide(TestClock.layer())))
+  })
+
+  it("drains the actual journal promise after its best-effort caller timeout", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      await Effect.runPromise(Effect.gen(function* () {
+        const started = yield* Latch.make()
+        const release = yield* Latch.make()
+        const sandbox = makeFakeSandbox()
+        const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox, {
+          journalTimeoutMs: 1_000,
+          onExecuteRecord: () => {
+            started.openUnsafe()
+            return Effect.runPromise(release.await)
+          },
+        })
+        const session = sessions.createNew("alpha")
+        const execute = yield* Effect.forkChild(sessions.execute({ sessionId: "alpha", code: "noop", createIfMissing: false }))
+        yield* started.await
+        yield* TestClock.adjust("1 second")
+        yield* Fiber.join(execute)
+        expect(sessions.hasPendingWork("alpha")).toBe(true)
+        expect((yield* session.executeSemaphore.withPermitsIfAvailable(1)(Effect.void))._tag).toBe("Some")
+        const drain = yield* Effect.forkChild(sessions.beginDrain(), { startImmediately: true })
+        expect(drain.pollUnsafe()).toBeUndefined()
+        expect(sandbox.closes()).toBe(0)
+        yield* release.open
+        yield* Fiber.join(drain)
+        expect(sessions.hasPendingWork("alpha")).toBe(false)
+        expect(sandbox.closes()).toBe(0)
+      }).pipe(Effect.provide(TestClock.layer())))
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
+  it("drains retired sandbox cleanup after its bounded caller wait", async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const closing = yield* Latch.make()
+      const releaseClose = yield* Latch.make()
+      const sandbox = makeFakeSandbox({ onClose: closing.open.pipe(Effect.andThen(releaseClose.await)) })
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox, { lifecycleTimeoutMs: 1_000 })
+      sessions.createNew("alpha")
+      const deletion = yield* Effect.forkChild(sessions.delete("alpha"))
+      yield* closing.await
+      yield* TestClock.adjust("1 second")
+      expect(yield* Fiber.join(deletion)).toBe(true)
+      expect(sessions.listSummaries()).toEqual([])
+      const drain = yield* Effect.forkChild(sessions.beginDrain(), { startImmediately: true })
+      expect(drain.pollUnsafe()).toBeUndefined()
+      yield* releaseClose.open
+      yield* Fiber.join(drain)
+      expect(sandbox.closes()).toBe(1)
+    }).pipe(Effect.provide(TestClock.layer())))
+  })
+
+  it.each(["create", "ensure"] as const)("drains accepted %s through an interrupted catalog commit", async (operation) => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const committing = yield* Latch.make()
+      const releaseCommit = yield* Latch.make()
+      const sandbox = makeFakeSandbox()
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox, {
+        onSessionsChanged: () => {
+          committing.openUnsafe()
+          return Effect.runPromise(releaseCommit.await)
+        },
+      })
+      const request = yield* Effect.forkChild(operation === "create"
+        ? sessions.create("alpha").pipe(Effect.asVoid)
+        : sessions.ensure("alpha").pipe(Effect.asVoid))
+      yield* committing.await
+      const interruption = yield* Effect.forkChild(Fiber.interrupt(request), { startImmediately: true })
+      const drain = yield* Effect.forkChild(sessions.beginDrain(), { startImmediately: true })
+      expect(drain.pollUnsafe()).toBeUndefined()
+      expect(interruption.pollUnsafe()).toBeUndefined()
+      expect(sandbox.closes()).toBe(0)
+      yield* releaseCommit.open
+      yield* Fiber.join(interruption)
+      yield* Fiber.join(drain)
+      expect(sessions.summary("alpha")).toBeDefined()
+      expect(sandbox.closes()).toBe(0)
+    }))
+  })
+
+  it("a failed drain catalog commit can resume without closing sessions", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    let failWrites = true
+    const sandbox = makeFakeSandbox()
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox, {
+      onSessionsChanged: () => failWrites ? Promise.reject(new Error("catalog unavailable")) : undefined,
+    })
+    sessions.createNew("alpha")
+    try {
+      await expect(Effect.runPromise(sessions.beginDrain())).rejects.toThrow("catalog unavailable")
+      expect(sandbox.closes()).toBe(0)
+      expect(sessions.summary("alpha")).toBeDefined()
+      sessions.resume()
+      failWrites = false
+      await Effect.runPromise(sessions.execute({ sessionId: "alpha", code: "retry", createIfMissing: false }))
+      await Effect.runPromise(sessions.beginDrain())
+      expect(sandbox.closes()).toBe(0)
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
+  it.each(["success", "failure"] as const)("invalidates a verified drain when a late catalog write ends in %s", async (outcome) => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      await Effect.runPromise(Effect.gen(function* () {
+        const committing = yield* Latch.make()
+        const releaseCommit = yield* Latch.make()
+        let blockWrites = false
+        let failWrites = outcome === "failure"
+        let sandbox: FakeSandbox | undefined
+        const sessions = new BrowserControlSessions("http://127.0.0.1:0", (_id, onDefaultTargetChange) => {
+          sandbox = makeFakeSandbox({ onDefaultTargetChange })
+          return sandbox
+        }, {
+          onSessionsChanged: async () => {
+            if (!blockWrites) return
+            committing.openUnsafe()
+            await Effect.runPromise(releaseCommit.await)
+            if (failWrites) throw new Error("late catalog unavailable")
+          },
+        })
+        yield* sessions.create("alpha")
+        expect(sessions.isDrained()).toBe(false)
+        yield* sessions.beginDrain()
+        expect(sessions.isDrained()).toBe(true)
+
+        blockWrites = true
+        sandbox?.setDefaultTarget({ id: "late-target", owner: "relay" })
+        expect(sessions.isDrained()).toBe(false)
+        yield* committing.await
+        expect(sessions.isDrained()).toBe(false)
+        yield* releaseCommit.open
+        const committed = yield* sessions.persist().pipe(Effect.result)
+        expect(committed._tag).toBe(outcome === "failure" ? "Failure" : "Success")
+        expect(sessions.hasPendingWork("alpha")).toBe(false)
+        // Even a settled write is not the tail verified by the earlier drain.
+        expect(sessions.isDrained()).toBe(false)
+        if (outcome === "failure") {
+          expect(yield* sessions.beginDrain().pipe(Effect.flip)).toMatchObject({ message: "late catalog unavailable" })
+          expect(sessions.isDrained()).toBe(false)
+          failWrites = false
+          sandbox?.setDefaultTarget({ id: "retry-target", owner: "relay" })
+        }
+        yield* sessions.beginDrain()
+        expect(sessions.isDrained()).toBe(true)
+        expect(sandbox?.closes()).toBe(0)
+        sessions.resume()
+        expect(sessions.isDrained()).toBe(false)
+      }))
+    } finally {
+      consoleError.mockRestore()
+    }
+  })
+
+  it.each(["network start", "network stop", "network cancel", "auth refresh", "authenticated request"] as const)("drains queued %s through actual settlement after caller interruption", async (operation) => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const started = yield* Latch.make()
+      const release = yield* Latch.make()
+      const blocked = started.open.pipe(Effect.andThen(release.await))
+      const sandbox = makeFakeSandbox()
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => ({
+        ...sandbox,
+        networkStart: (options) => blocked.pipe(Effect.andThen(sandbox.networkStart(options))),
+        networkStop: (options) => blocked.pipe(Effect.andThen(sandbox.networkStop(options))),
+        networkCancel: () => blocked.pipe(Effect.andThen(sandbox.networkCancel())),
+        authRefresh: (options) => blocked.pipe(Effect.andThen(sandbox.authRefresh(options))),
+        authenticatedJson: (options) => blocked.pipe(Effect.andThen(sandbox.authenticatedJson(options))),
+      }))
+      const session = sessions.createNew("alpha")
+      yield* session.executeSemaphore.take(1)
+      const operations: Record<typeof operation, Effect.Effect<unknown, Error>> = {
+        "network start": sessions.networkStart("alpha"),
+        "network stop": sessions.networkStop("alpha"),
+        "network cancel": sessions.networkCancel("alpha"),
+        "auth refresh": sessions.authRefresh("alpha", { name: "example" }),
+        "authenticated request": sessions.authenticatedJson({ sessionId: "alpha", origin: "https://example.com", method: "GET", path: "/api" }),
+      }
+      const request = yield* Effect.forkChild(operations[operation], { startImmediately: true })
+      const drain = yield* Effect.forkChild(sessions.beginDrain(), { startImmediately: true })
+      expect(sessions.hasPendingWork("alpha")).toBe(true)
+      expect(sessions.isExecuting("alpha")).toBe(false)
+      expect(started.isOpen()).toBe(false)
+      expect(drain.pollUnsafe()).toBeUndefined()
+
+      yield* session.executeSemaphore.release(1)
+      yield* started.await
+      const interruption = yield* Effect.forkChild(Fiber.interrupt(request), { startImmediately: true })
+      expect(interruption.pollUnsafe()).toBeUndefined()
+      expect(drain.pollUnsafe()).toBeUndefined()
+      expect((yield* session.executeSemaphore.withPermitsIfAvailable(1)(Effect.void))._tag).toBe("None")
+      yield* release.open
+      yield* Fiber.join(interruption)
+      yield* Fiber.join(drain)
+      expect(sessions.hasPendingWork("alpha")).toBe(false)
+      expect(sandbox.closes()).toBe(0)
+    }))
+  })
+
+  it.each(["networkStart", "networkStop", "networkCancel", "authRefresh"] as const)("rejects queued %s when reset replaces its session", async (operation) => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox())
+      const session = sessions.createNew("alpha")
+      const call = vi.spyOn(session.sandbox, operation)
+      yield* session.executeSemaphore.take(1)
+      const reset = yield* Effect.forkChild(sessions.reset("alpha"), { startImmediately: true })
+      const operations: Record<typeof operation, Effect.Effect<unknown, Error>> = {
+        networkStart: sessions.networkStart("alpha"),
+        networkStop: sessions.networkStop("alpha"),
+        networkCancel: sessions.networkCancel("alpha"),
+        authRefresh: sessions.authRefresh("alpha", { name: "example" }),
+      }
+      const request = yield* Effect.forkChild(operations[operation].pipe(Effect.flip), { startImmediately: true })
+      expect(request.pollUnsafe()).toBeUndefined()
+      expect(call).not.toHaveBeenCalled()
+      yield* session.executeSemaphore.release(1)
+      yield* Fiber.join(reset)
+      expect(yield* Fiber.join(request)).toMatchObject({ reason: "inactive", message: "Session is no longer active: alpha", sessionId: "alpha" })
+      expect(sessions.sessions.get("alpha")).not.toBe(session)
+      expect(call).not.toHaveBeenCalled()
+      expect(sessions.hasPendingWork("alpha")).toBe(false)
+      expect((yield* session.executeSemaphore.withPermitsIfAvailable(1)(Effect.void))._tag).toBe("Some")
+    }))
+  })
+
+  it("reports active network capture independently of pending manager work", async () => {
+    let active = true
+    const sandbox = makeFakeSandbox()
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => ({
+      ...sandbox,
+      networkStatus: () => ({ ...sandbox.networkStatus(), active }),
+    }))
+    sessions.createNew("alpha")
+    await Effect.runPromise(sessions.beginDrain())
+    expect(sessions.hasPendingWork("alpha")).toBe(false)
+    expect(sessions.hasActiveNetworkCapture()).toBe(true)
+    active = false
+    expect(sessions.hasActiveNetworkCapture()).toBe(false)
+    expect(sandbox.closes()).toBe(0)
+  })
+
+  it("cancels a queued lifecycle operation without stranding its admission or a permit", async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const sandbox = makeFakeSandbox()
+      const start = vi.spyOn(sandbox, "networkStart")
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox)
+      const session = sessions.createNew("alpha")
+      yield* session.executeSemaphore.take(1)
+      const request = yield* Effect.forkChild(sessions.networkStart("alpha"), { startImmediately: true })
+      const drain = yield* Effect.forkChild(sessions.beginDrain(), { startImmediately: true })
+      expect(sessions.hasPendingWork("alpha")).toBe(true)
+      yield* Fiber.interrupt(request)
+      yield* Fiber.join(drain)
+      expect(start).not.toHaveBeenCalled()
+      expect(sessions.hasPendingWork("alpha")).toBe(false)
+      yield* session.executeSemaphore.release(1)
+      sessions.resume()
+      yield* sessions.networkStart("alpha")
+      expect(start).toHaveBeenCalledTimes(1)
+      expect((yield* session.executeSemaphore.withPermitsIfAvailable(1)(Effect.void))._tag).toBe("Some")
+    }))
+  })
+
+  it("keeps implicit-session worker leases after the request is interrupted", async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const started = yield* Latch.make()
+      const release = yield* Latch.make()
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox({
+        onExecute: started.open.pipe(Effect.andThen(release.await)),
+      }))
+      const request = yield* Effect.forkChild(sessions.execute({ code: "noop", createIfMissing: true }))
+      yield* started.await
+      const id = sessions.listSummaries()[0]?.id
+      if (!id) throw new Error("Expected an implicit session")
+      yield* Fiber.interrupt(request)
+      expect(sessions.hasPendingWork(id)).toBe(true)
+      const drain = yield* Effect.forkChild(sessions.beginDrain(), { startImmediately: true })
+      expect(drain.pollUnsafe()).toBeUndefined()
+      yield* release.open
+      yield* Fiber.join(drain)
+      expect(sessions.hasPendingWork(id)).toBe(false)
+      expect(sessions.summary(id)).toBeDefined()
+    }))
+  })
+
+  it("serializes permanent close calls and retains keyed work through disconnect", async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const closing = yield* Latch.make()
+      const release = yield* Latch.make()
+      const sandbox = makeFakeSandbox({ onClose: closing.open.pipe(Effect.andThen(release.await)) })
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox)
+      sessions.createNew("alpha")
+      const first = yield* Effect.forkChild(sessions.closeAll(), { startImmediately: true })
+      const second = yield* Effect.forkChild(sessions.closeAll(), { startImmediately: true })
+      yield* closing.await
+      expect(sessions.hasPendingWork("alpha")).toBe(true)
+      expect(sandbox.closes()).toBe(1)
+      expect(first.pollUnsafe()).toBeUndefined()
+      expect(second.pollUnsafe()).toBeUndefined()
+      sessions.resume()
+      expect(() => sessions.createNew("beta")).toThrow("closing")
+      yield* release.open
+      yield* Fiber.join(first)
+      yield* Fiber.join(second)
+      expect(sessions.hasPendingWork("alpha")).toBe(false)
+      expect(sandbox.closes()).toBe(1)
+    }))
+  })
+
+  it("closeAll drains a running execute without the lifecycle timeout", async () => {
     await Effect.runPromise(
       Effect.gen(function* () {
         const started = yield* Deferred.make<void>()
-        const never = yield* Deferred.make<void>()
+        const release = yield* Deferred.make<void>()
         const sandbox = makeFakeSandbox({
           onExecute: Deferred.succeed(started, undefined).pipe(
-            Effect.andThen(Deferred.await(never)),
+            Effect.andThen(Deferred.await(release)),
           ),
         })
         const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox, {
-          lifecycleTimeoutMs: 20,
+          lifecycleTimeoutMs: 0,
         })
         sessions.createNew("alpha")
-        yield* Effect.forkChild(
-          sessions.execute({ sessionId: "alpha", code: "wedged", createIfMissing: false }),
+        const executeFiber = yield* Effect.forkChild(
+          sessions.execute({ sessionId: "alpha", code: "long-running", createIfMissing: false }),
         )
         yield* Deferred.await(started)
+        const closeFiber = yield* Effect.forkChild(sessions.closeAll())
+        for (let i = 0; i < 20; i++) yield* Effect.yieldNow
 
-        yield* sessions.closeAll()
-
+        expect(closeFiber.pollUnsafe()).toBeUndefined()
         expect(sandbox.closes()).toBe(0)
         expect(sessions.listSummaries().map((session) => session.id)).toEqual(["alpha"])
+
+        yield* Deferred.succeed(release, undefined)
+        yield* Fiber.join(executeFiber)
+        yield* Fiber.join(closeFiber)
+        expect(sandbox.closes()).toBe(1)
+        expect(sessions.listSummaries()).toEqual([])
       }),
     )
   })
@@ -899,50 +1507,124 @@ describe("BrowserControlSessions", () => {
     )
   })
 
-  it("finishes execute journaling after an interrupted request once browser work settles", async () => {
+  it.each(["execute", "reset", "delete"] as const)("retains an interrupted execute's permit through journal and catalog writes before queued %s", async (operation) => {
     await Effect.runPromise(Effect.gen(function* () {
-      const executeStarted = yield* Deferred.make<void>()
-      const releaseExecute = yield* Deferred.make<void>()
-      let markJournalStarted: (() => void) | undefined
-      let releaseJournal: (() => void) | undefined
-      let markJournalCompleted: (() => void) | undefined
-      const journalStarted = new Promise<void>((resolve) => {
-        markJournalStarted = resolve
-      })
-      const journalGate = new Promise<void>((resolve) => {
-        releaseJournal = resolve
-      })
-      const journalCompleted = new Promise<void>((resolve) => {
-        markJournalCompleted = resolve
-      })
-      const sessions = new BrowserControlSessions(
-        "http://127.0.0.1:0",
-        () => makeFakeSandbox({
-          onExecute: Deferred.succeed(executeStarted, undefined).pipe(
-            Effect.andThen(Deferred.await(releaseExecute)),
-            Effect.uninterruptible,
-          ),
+      const executeStarted = yield* Latch.make()
+      const releaseExecute = yield* Latch.make()
+      const journalStarted = yield* Latch.make()
+      const releaseJournal = yield* Latch.make()
+      const catalogStarted = yield* Latch.make()
+      const releaseCatalog = yield* Latch.make()
+      const events: string[] = []
+      let executions = 0
+      let blockCatalog = false
+      const sandbox = makeFakeSandbox({
+        onExecute: Effect.gen(function* () {
+          executions += 1
+          events.push("execute")
+          if (executions === 1) {
+            yield* executeStarted.open
+            yield* releaseExecute.await
+          }
         }),
-        {
-          onExecuteRecord: () => {
-            markJournalStarted?.()
-            return journalGate.then(() => {
-              markJournalCompleted?.()
-            })
-          },
+        onClose: Effect.sync(() => { events.push("close") }),
+      })
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox, {
+        onExecuteRecord: (record) => {
+          if (record.code !== "first") return
+          return Effect.runPromise(Effect.gen(function* () {
+            events.push("journal started")
+            yield* journalStarted.open
+            yield* releaseJournal.await
+            events.push("journal committed")
+          }))
         },
-      )
-      sessions.createNew("alpha")
-      const execute = yield* Effect.forkChild(sessions.execute({ sessionId: "alpha", code: "wait", createIfMissing: false }))
-      yield* Deferred.await(executeStarted)
+        onSessionsChanged: () => {
+          if (!blockCatalog) return
+          blockCatalog = false
+          return Effect.runPromise(Effect.gen(function* () {
+            events.push("catalog started")
+            yield* catalogStarted.open
+            yield* releaseCatalog.await
+            events.push("catalog committed")
+          }))
+        },
+      })
+      const session = sessions.createNew("alpha")
+      yield* sessions.persist()
+      blockCatalog = true
+      const execute = yield* Effect.forkChild(sessions.execute({ sessionId: "alpha", code: "first", createIfMissing: false }))
+      yield* executeStarted.await
       yield* Fiber.interrupt(execute)
 
-      yield* Deferred.succeed(releaseExecute, undefined)
-      yield* Effect.promise(() => journalStarted)
+      const next = operation === "execute"
+        ? sessions.execute({ sessionId: "alpha", code: "next", createIfMissing: false }).pipe(Effect.asVoid)
+        : operation === "reset"
+        ? sessions.reset("alpha").pipe(Effect.asVoid)
+        : sessions.delete("alpha").pipe(Effect.asVoid)
+      const queued = yield* Effect.forkChild(next, { startImmediately: true })
+      const drain = yield* Effect.forkChild(sessions.beginDrain(), { startImmediately: true })
+      expect(sessions.hasPendingWork("alpha")).toBe(true)
 
-      releaseJournal?.()
-      yield* Effect.promise(() => journalCompleted)
+      yield* releaseExecute.open
+      yield* journalStarted.await
+      expect(events).toEqual(["execute", "journal started"])
+      expect(sessions.hasPendingWork("alpha")).toBe(true)
       expect(sessions.isExecuting("alpha")).toBe(false)
+      expect((yield* session.executeSemaphore.withPermitsIfAvailable(1)(Effect.void))._tag).toBe("None")
+      expect(queued.pollUnsafe()).toBeUndefined()
+      expect(drain.pollUnsafe()).toBeUndefined()
+      expect(executions).toBe(1)
+      expect(sandbox.closes()).toBe(0)
+      expect(sessions.sessions.get("alpha")).toBe(session)
+
+      yield* releaseJournal.open
+      yield* catalogStarted.await
+      expect(events).toEqual(["execute", "journal started", "journal committed", "catalog started"])
+      expect(sessions.hasPendingWork("alpha")).toBe(true)
+      expect((yield* session.executeSemaphore.withPermitsIfAvailable(1)(Effect.void))._tag).toBe("None")
+      expect(queued.pollUnsafe()).toBeUndefined()
+      expect(drain.pollUnsafe()).toBeUndefined()
+      expect(executions).toBe(1)
+      expect(sandbox.closes()).toBe(0)
+      expect(sessions.sessions.get("alpha")).toBe(session)
+
+      yield* releaseCatalog.open
+      yield* Fiber.join(queued)
+      yield* Fiber.join(drain)
+      expect(sessions.hasPendingWork("alpha")).toBe(false)
+      expect(events).toEqual([
+        "execute", "journal started", "journal committed", "catalog started", "catalog committed",
+        operation === "execute" ? "execute" : "close",
+      ])
+    }))
+  })
+
+  it("never starts an interrupted execute queued for the session permit", async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const sandbox = makeFakeSandbox()
+      const execute = vi.spyOn(sandbox, "execute")
+      const records: string[] = []
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox, {
+        onExecuteRecord: (record) => { records.push(record.code) },
+      })
+      const session = sessions.createNew("alpha")
+      yield* session.executeSemaphore.take(1)
+
+      const queued = yield* Effect.forkChild(sessions.execute({
+        sessionId: "alpha", code: "cancelled", createIfMissing: false,
+      }), { startImmediately: true })
+      expect(queued.pollUnsafe()).toBeUndefined()
+      expect(execute).not.toHaveBeenCalled()
+      yield* Fiber.interrupt(queued)
+      expect(execute).not.toHaveBeenCalled()
+
+      yield* session.executeSemaphore.release(1)
+      yield* sessions.execute({ sessionId: "alpha", code: "next", createIfMissing: false })
+
+      expect(execute.mock.calls.map(([code]) => code)).toEqual(["next"])
+      expect(records).toEqual(["next"])
+      expect(sandbox.closes()).toBe(0)
     }))
   })
 
@@ -1277,17 +1959,23 @@ describe("BrowserControlSessions", () => {
   it("surfaces a durable adoption rollback failure", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {})
     let failRollback = false
-    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox({
-      adoptFailure: new Error("target vanished"),
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", (_id, onDefaultTargetChange) => makeFakeSandbox({
+      onDefaultTargetChange,
+      onAdopt: (target) => target.targetId === "target-a"
+        ? Effect.succeed(target.url)
+        : Effect.fail(new Error("target vanished")),
     }), {
       onSessionsChanged: (entries) => failRollback && entries.some((entry) => entry.id === "alpha" && !entry.target)
         ? Promise.reject(new Error("rollback catalog unavailable"))
         : undefined,
     })
     sessions.createNew("alpha")
-    await Effect.runPromise(sessions.persist())
-    sessions.updateTarget("alpha", { id: "target-a", owner: "user" })
-    await Effect.runPromise(sessions.persist())
+    await Effect.runPromise(sessions.adopt({
+      sessionId: "alpha",
+      createIfMissing: false,
+      targetId: "target-a",
+      targetUrl: "https://example.com/target-a",
+    }))
     failRollback = true
 
     try {

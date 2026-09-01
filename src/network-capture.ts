@@ -44,7 +44,7 @@ export type NetworkCaptureResult = NetworkCaptureStatus & {
   readonly observedSecretRefs: readonly string[]
 }
 
-export class NetworkCaptureError extends Schema.TaggedErrorClass<NetworkCaptureError>()(
+export class NetworkCaptureError extends Schema.TaggedError<NetworkCaptureError>()(
   "NetworkCapture.Error",
   {
     message: Schema.String,

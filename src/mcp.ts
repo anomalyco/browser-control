@@ -1,6 +1,6 @@
 import { NodeStdio } from "@effect/platform-node"
 import { Config, Context, Effect, Layer, Option } from "effect"
-import { McpSchema, McpServer } from "effect/unstable/ai"
+import { McpProtocol, McpSchema, McpServer } from "effect/unstable/ai"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -8,6 +8,7 @@ import type { JsonObject } from "./protocol.ts"
 import { getObject, parseTargetSelection } from "./relay-helpers.ts"
 import * as RelayClient from "./relay-client.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"
+import type { TargetSelection } from "./relay-schema.ts"
 import { browserControlVersion } from "./version.ts"
 
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
@@ -26,14 +27,12 @@ type ToolSpec = {
 type ExecuteArguments = {
   readonly code: string
   readonly session?: string | undefined
-  readonly targetUrl?: string | undefined
-  readonly targetIndex?: number | undefined
+  readonly targetSelection?: TargetSelection
 }
 
 type AdoptArguments = {
   readonly session?: string | undefined
-  readonly targetUrl?: string | undefined
-  readonly targetIndex?: number | undefined
+  readonly targetSelection: TargetSelection
 }
 
 const emptyInputSchema = objectSchema({})
@@ -60,14 +59,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
           sessionId,
           code: args.code,
           createIfMissing: !args.session,
-          ...(args.targetUrl || args.targetIndex !== undefined
-            ? {
-              targetSelection: {
-                ...(args.targetUrl ? { urlIncludes: args.targetUrl } : {}),
-                ...(args.targetIndex !== undefined ? { index: args.targetIndex } : {}),
-              },
-            }
-            : {}),
+          ...(args.targetSelection ? { targetSelection: args.targetSelection } : {}),
         })
         const recreated = !args.session && currentSession.established && result.session.created === true
         currentSession.id = sessionId
@@ -86,8 +78,9 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       destructive: false,
       idempotent: false,
       handle: () => Effect.gen(function* () {
-        const status = yield* relay.extensionStatus
-        return { endpoint: relay.endpoint, currentSession: currentSession.id, status }
+        const [version, status] = yield* Effect.all([relay.version, relay.extensionStatus])
+        const buildProblem = RelayLifecycle.relayBuildProblem(version)
+        return { endpoint: relay.endpoint, currentSession: currentSession.id, version, status, ...(buildProblem ? { buildProblem } : {}) }
       }),
     },
     {
@@ -197,10 +190,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         const result = yield* relay.sessionAdopt({
           sessionId,
           createIfMissing: !args.session,
-          targetSelection: {
-            ...(args.targetUrl ? { urlIncludes: args.targetUrl } : {}),
-            ...(args.targetIndex !== undefined ? { index: args.targetIndex } : {}),
-          },
+          targetSelection: args.targetSelection,
         })
         currentSession.id = sessionId
         currentSession.established = true
@@ -427,15 +417,20 @@ const registerTools = Effect.gen(function* () {
 })
 
 export function mcpToolRequiresRelayCompatibility(name: string): boolean {
-  return name !== "status" && name !== "session_current" && name !== "skill"
+  return !["status", "session_list", "session_current", "network_status", "secrets_status", "skill"].includes(name)
 }
 
+export const mcpServerLayer = McpServer.layerStdio({
+  name: "browser-control",
+  version: browserControlVersion,
+  protocols: [McpProtocol.v2025_06_18, McpProtocol.v2025_03_26, McpProtocol.v2024_11_05],
+})
+
+export const mcpToolsLayer = Layer.mergeAll(relayLayer, Layer.effectDiscard(registerTools))
+
 export const runMcpServer: Effect.Effect<never, Error> = Layer.launch(
-  Layer.mergeAll(
-    relayLayer,
-    Layer.effectDiscard(registerTools),
-  ).pipe(
-    Layer.provide(McpServer.layerStdio({ name: "browser-control", version: browserControlVersion })),
+  mcpToolsLayer.pipe(
+    Layer.provide(mcpServerLayer),
     Layer.provide(NodeStdio.layer),
     Layer.provide(RelayClient.layerFetch),
   ),
@@ -459,8 +454,7 @@ function parseExecuteArguments(input: unknown): ExecuteArguments {
   return {
     code,
     ...(session ? { session } : {}),
-    ...(targetSelection.urlIncludes ? { targetUrl: targetSelection.urlIncludes } : {}),
-    ...(targetSelection.index !== undefined ? { targetIndex: targetSelection.index } : {}),
+    ...(targetSelection ? { targetSelection } : {}),
   }
 }
 
@@ -468,22 +462,22 @@ function parseAdoptArguments(input: unknown): AdoptArguments {
   const object = requireObject(input)
   const session = optionalStringField(object, "session")
   const targetSelection = parseMcpTargetSelection(object)
-  if (!targetSelection.urlIncludes && targetSelection.index === undefined) {
+  if (!targetSelection) {
     throw new Error("session_adopt requires targetUrl or targetIndex")
   }
   return {
     ...(session ? { session } : {}),
-    ...(targetSelection.urlIncludes ? { targetUrl: targetSelection.urlIncludes } : {}),
-    ...(targetSelection.index !== undefined ? { targetIndex: targetSelection.index } : {}),
+    targetSelection,
   }
 }
 
-function parseMcpTargetSelection(input: JsonObject) {
+function parseMcpTargetSelection(input: JsonObject): TargetSelection | undefined {
   const urlIncludes = optionalStringField(input, "targetUrl")
-  return parseTargetSelection({
+  const selection = parseTargetSelection({
     ...(urlIncludes ? { urlIncludes } : {}),
     ...(input.targetIndex === undefined ? {} : { index: input.targetIndex }),
-  }) ?? {}
+  })
+  return selection?.urlIncludes || selection?.index !== undefined ? selection : undefined
 }
 
 function requiredStringField(input: unknown, field: string): string {

@@ -134,29 +134,6 @@ export function parseJournalLines(raw: string): JournalEntry[] {
   return entries
 }
 
-/** List session ids that have a journal on disk. */
-export async function listJournaledSessions(baseDir: string): Promise<string[]> {
-  let names: string[]
-  try {
-    names = await fs.promises.readdir(baseDir)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return []
-    }
-    throw error
-  }
-  const sessions: string[] = []
-  for (const name of names) {
-    try {
-      await fs.promises.access(journalPathForSession(baseDir, name))
-      sessions.push(name)
-    } catch {
-      // no journal file in this directory
-    }
-  }
-  return sessions.sort()
-}
-
 export function formatJournalEntry(entry: JournalEntry): string {
   const time = entry.ts.slice(11, 19) || entry.ts
   const status = entry.isError ? "ERR" : "ok "

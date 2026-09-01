@@ -18,7 +18,7 @@ jobs:
           fetch-depth: 0
       - uses: pnpm/action-setup@v6
         with:
-          version: 11.18.0
+          version: 11.20.0
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -27,6 +27,8 @@ jobs:
       - run: npm install --global npm@latest
       - run: pnpm install --frozen-lockfile
       - run: pnpm run ci
+      - name: Validate installed runtime
+        run: pnpm runtime:prepare --staging "$RUNNER_TEMP/browser-control-stage" --install "$RUNNER_TEMP/browser-control-runtime"
       - uses: changesets/action@v1
         with:
           publish: pnpm release

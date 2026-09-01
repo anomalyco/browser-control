@@ -3,6 +3,7 @@ import {
   completeExtensionHandshake,
   ensureReconnectAlarm,
   reconnectAlarmName,
+  startConnectionLifecycle,
   startSocketKeepAlive,
 } from "../extension/src/connection-lifecycle.ts"
 
@@ -25,11 +26,33 @@ describe("extension connection lifecycle", () => {
 
   it("preserves an existing reconnect alarm", async () => {
     const create = vi.fn(async () => {})
-    const get = vi.fn(async () => ({ name: reconnectAlarmName, scheduledTime: Date.now() }))
+    const get = vi.fn(async () => ({ name: reconnectAlarmName, scheduledTime: Date.now(), persistAcrossSessions: true }))
 
     await ensureReconnectAlarm({ create, get })
 
     expect(create).not.toHaveBeenCalled()
+  })
+
+  it("wakes and reconnects when the browser profile starts", async () => {
+    let onStartup: (() => void) | undefined
+    let onInstalled: (() => void) | undefined
+    const create = vi.fn(async () => {})
+    const get = vi.fn(async () => undefined)
+    const connect = vi.fn()
+
+    startConnectionLifecycle({
+      alarms: { create, get },
+      addStartupListener: (listener) => { onStartup = listener },
+      addInstalledListener: (listener) => { onInstalled = listener },
+      connect,
+    })
+    await vi.waitFor(() => expect(connect).toHaveBeenCalledTimes(1))
+
+    onStartup?.()
+    await vi.waitFor(() => expect(connect).toHaveBeenCalledTimes(2))
+    onInstalled?.()
+    await vi.waitFor(() => expect(connect).toHaveBeenCalledTimes(3))
+    expect(get).toHaveBeenCalledWith(reconnectAlarmName)
   })
 
   it("runs a heartbeat every 20 seconds and stops cleanly", () => {

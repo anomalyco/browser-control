@@ -14,6 +14,7 @@ import {
   RecordingStartResponse,
   RecordingStatusResponse,
   RelayVersion,
+  RelayShutdownRequest,
   SessionAdoptRequest,
   SessionAdoptResponse,
   SessionContainer,
@@ -60,6 +61,34 @@ const session = {
 }
 
 describe("relay-schema", () => {
+  const shutdown = {
+    instanceId: "relay-1",
+    requestId: "request-1",
+    reason: "explicit-restart",
+    client: { kind: "cli", instanceId: "client-1", buildId: "2026-08-31T12:00:00.000Z" },
+  }
+
+  it("requires complete explicit shutdown attribution and advertises protocol 2 optionally", () => {
+    expect(Schema.decodeUnknownSync(RelayShutdownRequest)(shutdown)).toEqual(shutdown)
+    for (const key of Object.keys(shutdown)) {
+      expect(() => Schema.decodeUnknownSync(RelayShutdownRequest)(Object.fromEntries(Object.entries(shutdown).filter(([name]) => name !== key)))).toThrow()
+    }
+    expect(() => Schema.decodeUnknownSync(RelayShutdownRequest)({ ...shutdown, reason: "auto-upgrade" })).toThrow()
+    expect(() => Schema.decodeUnknownSync(RelayShutdownRequest)({ ...shutdown, client: { ...shutdown.client, kind: "agent" } })).toThrow()
+    expect(decodeRelayVersion({ version: "1.0.0", shutdownProtocol: 2 }).shutdownProtocol).toBe(2)
+    expect(decodeRelayVersion({ version: "1.0.0" }).shutdownProtocol).toBeUndefined()
+  })
+
+  it.each(["", "bad value", "token\n", "token\r\n", "bad/token", "x".repeat(129)])("rejects unsafe shutdown identity %j", (value) => {
+    expect(() => Schema.decodeUnknownSync(RelayShutdownRequest)({ ...shutdown, instanceId: value })).toThrow()
+    expect(() => Schema.decodeUnknownSync(RelayShutdownRequest)({ ...shutdown, requestId: value })).toThrow()
+    expect(() => Schema.decodeUnknownSync(RelayShutdownRequest)({ ...shutdown, client: { ...shutdown.client, instanceId: value } })).toThrow()
+  })
+
+  it.each(["", "secret value", "build\n", "x".repeat(257)])("rejects unsafe shutdown build identity %j", (buildId) => {
+    expect(() => Schema.decodeUnknownSync(RelayShutdownRequest)({ ...shutdown, client: { ...shutdown.client, buildId } })).toThrow()
+  })
+
   it("decodes a session summary", () => {
     expect(decodeSession(session)).toEqual(session)
   })

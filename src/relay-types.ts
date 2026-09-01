@@ -39,7 +39,6 @@ export type StoredFrameEvents = {
 export type PendingExtensionRequest = {
   readonly resolve: (value: JsonObject) => void
   readonly reject: (error: Error) => void
-  readonly timeout: NodeJS.Timeout
   readonly debuggerTabId?: number
 }
 
@@ -51,10 +50,7 @@ export interface ExecuteSandboxLike {
   execute(code: string, options?: ExecuteOptions): Effect.Effect<ExecuteResult>
   authenticatedJson(request: Omit<AuthenticatedJsonRequest, "sessionId">): Effect.Effect<AuthenticatedJsonOutcome, Error>
   adoptPage(target: AdoptTarget): Effect.Effect<string, Error>
-  close(): Effect.Effect<void, Error>
-  /** Relay shutdown disconnects Playwright without closing or forgetting the default tab. */
-  disconnect(): Effect.Effect<void, Error>
-  /** Handoff cancellation waits for Playwright disconnection before releasing the execute permit. */
+  /** Shutdown and handoff cancellation await disconnection without closing or forgetting the default tab. */
   disconnectSettled(): Effect.Effect<void, Error>
   /** Adoption rollback cleanup does not settle before started Playwright close promises settle. */
   closeSettled(): Effect.Effect<void, Error>
@@ -88,8 +84,3 @@ export type BrowserControlSession = {
 }
 
 export type { SessionSummary }
-
-export type RelayServer = {
-  readonly url: string
-  readonly close: () => Effect.Effect<void>
-}

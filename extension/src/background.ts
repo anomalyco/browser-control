@@ -10,7 +10,7 @@ import type {
 import { finalizeBrowserControlGrouping, isBrowserControlGroupTitle, shouldUngroupBrowserControlTab, tabGroupColor, tabGroupTitle } from "./tab-groups.ts"
 import { pageStatusFromJson } from "./page-status.ts"
 import { debuggerDetachedEvent } from "./debugger-detach.ts"
-import { completeExtensionHandshake, ensureReconnectAlarm, reconnectAlarmName, startSocketKeepAlive } from "./connection-lifecycle.ts"
+import { completeExtensionHandshake, reconnectAlarmName, startConnectionLifecycle, startSocketKeepAlive } from "./connection-lifecycle.ts"
 
 const relayHost = "127.0.0.1"
 const relayPort = 19989
@@ -34,9 +34,12 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   void ensureConnection().catch(() => {})
 })
 
-// Chrome can clear persisted alarms, so repair the reconnect wake-up whenever
-// the MV3 service worker starts rather than only on install or browser startup.
-void ensureReconnectAlarm(chrome.alarms).catch(() => {})
+startConnectionLifecycle({
+  alarms: chrome.alarms,
+  addStartupListener: (listener) => chrome.runtime.onStartup.addListener(listener),
+  addInstalledListener: (listener) => chrome.runtime.onInstalled.addListener(listener),
+  connect,
+})
 
 chrome.action.onClicked.addListener((tab) => {
   if (tab.id) sendMessage({ method: "toolbar.clicked", params: { tabId: tab.id } })
@@ -82,8 +85,6 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
   )
   return true
 })
-
-connect()
 
 function connect(): void {
   void ensureConnection().catch(() => {})
@@ -640,12 +641,18 @@ function sendMessage(message: JsonObject): void {
 }
 
 async function sendMessageAfterConnection(message: JsonObject): Promise<void> {
-  if (socket?.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify(message))
+  const connected = openSocket()
+  if (connected) {
+    connected.send(JSON.stringify(message))
     return
   }
   await ensureConnection()
-  if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message))
+  openSocket()?.send(JSON.stringify(message))
+}
+
+function openSocket(): WebSocket | undefined {
+  const current = socket
+  return current?.readyState === WebSocket.OPEN ? current : undefined
 }
 
 async function sendBinaryAfterConnection(data: Uint8Array): Promise<void> {
@@ -660,7 +667,7 @@ async function sendBinaryAfterConnection(data: Uint8Array): Promise<void> {
     }
     if (Date.now() >= deadline) throw new Error("Timed out sending recording data to the Browser Control relay")
   }
-  currentSocket.send(data.buffer)
+  currentSocket.send(new Uint8Array(data))
 }
 
 function decodeBase64(value: string): Uint8Array {

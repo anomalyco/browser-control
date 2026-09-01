@@ -12,7 +12,7 @@ import { endpointForPort, portConfig } from "./relay-client.ts"
  * endpoint and migrated on the next write.
  */
 
-export class SessionStoreError extends Schema.TaggedErrorClass<SessionStoreError>()(
+export class SessionStoreError extends Schema.TaggedError<SessionStoreError>()(
   "SessionStore.SessionStoreError",
   {
     message: Schema.String,
@@ -38,7 +38,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("browser-control/SessionStore") {}
 
-export const defaultFilePath = (): string => {
+const defaultFilePath = (): string => {
   return `${os.homedir()}/.browser-control/session.json`
 }
 

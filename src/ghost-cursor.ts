@@ -26,7 +26,7 @@ type GhostCursorBrowserApi = {
   readonly isVisible: () => boolean
 }
 
-export const ghostCursorElementId = "__browser_control_ghost_cursor__"
+const ghostCursorElementId = "__browser_control_ghost_cursor__"
 
 export const ghostCursorClientSource = `(() => {
   if (window !== window.top) {

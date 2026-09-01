@@ -39,6 +39,25 @@ transport to the browser extension. It is a deep module, not a pass-through
 message relay.
 _Avoid_: Temporary bridge, extension reload helper
 
+**Runtime Candidate**:
+A complete standalone package installation, including its dependencies, built
+and validated outside the development checkout. Preparing a candidate changes
+neither the selected CLI/MCP installation nor the running Local Driver Daemon.
+_Avoid_: Rebuilt dist directory, live checkout
+
+**Installation Selection**:
+An explicit atomic pointer change selecting a validated Runtime Candidate for
+future CLI/MCP processes. Existing processes keep their loaded installation;
+selection neither restarts the daemon nor reloads the extension.
+_Avoid_: Relay restart, extension upgrade
+
+**Relay Restart**:
+An explicit, attributed replacement of an exact managed daemon instance. It
+closes admission, drains accepted work through persistence, then stops. A
+pre-commit timeout or cancellation leaves the old daemon running. Browser tabs
+and durable session identity are preserved; JavaScript state and refs reset.
+_Avoid_: Session reset, tab replacement, implicit client upgrade
+
 **Extension Protocol**:
 The compatibility version reported by the extension when it connects to the
 Local Driver Daemon. Store and npm release versions may differ while this
@@ -132,6 +151,12 @@ Network Capture. Agents use profile metadata and injected references rather
 than reading values directly.
 _Avoid_: HAR credentials, generated-source secrets
 
+**Profile Worker**:
+A child process launched through the public SDK or CLI with a Secret Profile's
+Stable Secret References injected into its environment. Its bounded output is
+redacted before returning to the parent application.
+_Avoid_: In-process secret reader, exported credential object
+
 **Stable Secret Reference**:
 An environment-variable name such as `BC_SECRET_1` that retains its identity
 when a Secret Profile is refreshed from the same request source.
@@ -155,6 +180,8 @@ _Avoid_: Secret Profile, encrypted response
 ## Relationships
 
 - A **Driver** serves one or more external **Agents**.
+- An **Installation Selection** chooses a validated **Runtime Candidate** for
+  future processes; a **Relay Restart** separately replaces the running daemon.
 - A **User Browser** contains zero or more **Attached Tabs**.
 - Unowned members of the **Attached-Tab Pool** are shared across sessions.
 - **Target Ownership** scopes a target to exactly one session.
@@ -172,6 +199,8 @@ _Avoid_: Secret Profile, encrypted response
 - An **Execute Sandbox** owns at most one active **Network Capture**.
 - A **Capture Artifact** refers to values in a **Secret Profile** through
   **Stable Secret References**.
+- A **Profile Worker** consumes a **Secret Profile** without exposing raw values
+  to its parent application.
 - An **Authenticated Origin** uses the current page's browser context without
   reading a **Secret Profile** or exporting cookies.
 - A **Sensitive Response** is never appended to the execute journal or admitted
@@ -186,8 +215,9 @@ _Avoid_: Secret Profile, encrypted response
 > through the user's installed browser extension."
 
 > **Dev:** "Are tabs private to one agent session?"
-> **Domain expert:** "No. v1 uses a loose attached-tab pool. Sessions keep
-> separate JavaScript state, but attached tabs are shared."
+> **Domain expert:** "Unowned attached tabs are shared. Session-owned and adopted
+> targets are exclusive to their session, which also keeps separate JavaScript
+> state."
 
 ## Flagged Ambiguities
 

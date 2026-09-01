@@ -270,7 +270,7 @@ function ariaSnapshotFixture(options: {
     ? vi.fn().mockRejectedValue(options.cleanupError)
     : vi.fn().mockResolvedValue(undefined)
   const frame = { locator: vi.fn(() => ({ waitFor })) }
-  const ownerPage = { frames: () => [frame] }
+  const ownerPage = { context: () => ({}), frames: () => [frame] }
   const locator = {
     locator: vi.fn(() => ({ ariaSnapshot })),
     page: vi.fn(() => ownerPage),
@@ -287,7 +287,7 @@ describe("ariaSnapshot helper", () => {
     expect(fixture.page.locator).toHaveBeenCalledWith("body")
     expect(fixture.ariaSnapshot).toHaveBeenCalledWith({ timeout: defaultAriaSnapshotTimeoutMs })
     const activation = vi.mocked(fixture.locator.locator).mock.calls[0]?.[0]
-    expect(activation).toMatch(/^bcariaredact=on_\d+$/)
+    expect(activation).toMatch(/^bcariaredact\d+=on_\d+$/)
     if (typeof activation !== "string") throw new Error("Expected redaction selector activation")
     expect(fixture.frame.locator).toHaveBeenCalledWith(activation.replace("=on_", "=off_"))
     expect(fixture.waitFor).toHaveBeenCalledWith({ state: "attached", timeout: 1_000 })

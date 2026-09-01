@@ -2,20 +2,18 @@ import http from "node:http"
 import stream from "node:stream"
 import crypto from "node:crypto"
 import fs from "node:fs"
+import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { Clock, Config, Effect, Fiber, Semaphore } from "effect"
+import { Clock, Config, Effect, Option } from "effect"
 import { WebSocket, WebSocketServer, type RawData } from "ws"
 import {
-  hasAnnouncedSession,
-  removeAnnouncedSession,
   replayChildFrameNavigation,
   replayChildTargetsForParent,
   replayTargetCreated,
-  sendAttachedToChildTarget,
-  sendAttachedToTarget,
 } from "./cdp-shims.ts"
 import { CdpClientPool } from "./cdp-client-pool.ts"
 import { CdpRouter, isRootRoutableBrowserContextMethod } from "./cdp-router.ts"
+import { CdpRuntime } from "./cdp-runtime.ts"
 import { ExtensionRpc } from "./extension-rpc.ts"
 import { createHttpRequestHandler } from "./http-api.ts"
 import type { CdpEvent, CdpRequest, JsonObject, PageStatus } from "./protocol.ts"
@@ -39,7 +37,7 @@ import {
   validateWebSocketOrigin,
 } from "./relay-helpers.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
-import { ghostCursorClientSource, ghostCursorMouseActionExpression, ghostCursorRestoreExpression, inputDispatchMouseEventToGhostCursorAction } from "./ghost-cursor.ts"
+import { ghostCursorMouseActionExpression, ghostCursorRestoreExpression, inputDispatchMouseEventToGhostCursorAction } from "./ghost-cursor.ts"
 import { guardCdpMethod } from "./cdp-guardrails.ts"
 import {
   awaitHandoffAction,
@@ -56,11 +54,12 @@ import { defaultSessionCatalogPath, SessionCatalog } from "./session-catalog.ts"
 import { BrowserControlSessions } from "./session-manager.ts"
 import { RecordingRelay } from "./recording-relay.ts"
 import { appendManagedRelayProcessLog } from "./relay-log.ts"
+import { appendRelayLifecycleEvent, RelayLifecycleEvent } from "./relay-lifecycle-log.ts"
+import { RelayShutdown } from "./relay-shutdown.ts"
+import { RootTargetLifecycle } from "./root-target-lifecycle.ts"
 import { boundedToken, runtimeFailureKind, summarizeDiagnosticUrl, summarizeRuntimeEvaluate } from "./runtime-diagnostics.ts"
 import { shouldExposeChildTarget, TargetRegistry, type RootTargetChange, type TargetOwnershipChange } from "./target-registry.ts"
-import { browserControlVersion } from "./version.ts"
-
-export type { RelayServer } from "./relay-types.ts"
+import { browserControlBuildId, browserControlVersion } from "./version.ts"
 
 export const startRelay = Effect.fn("Relay.start")(function* (options: {
   readonly port?: number
@@ -168,19 +167,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     : new SessionCatalog(options.sessionCatalogPath ?? defaultSessionCatalogPath(port))
   let catalogWritesEnabled = false
   const registry = new TargetRegistry()
-  const rootLifecycleSemaphores = new Map<number, Semaphore.Semaphore>()
-  type RootReconciliationWorker = {
-    attachIfMissing: boolean
-    generation: number
-    pending: boolean
-    promise: Promise<boolean>
-    verificationRetries: number
-  }
-  const rootReconciliationWorkers = new Map<string, RootReconciliationWorker>()
   type TabGroupingMethod = "tabs.group" | "tabs.ungroup"
   const pendingTabGrouping = new Map<number, TabGroupingMethod>()
   const tabGroupingWorkers = new Map<number, Promise<void>>()
-  let relayClosing = false
   let extensionGeneration = 0
   const extensionRpc = new ExtensionRpc()
   const sendToExtension = Effect.fnUntraced(function* (command: Parameters<ExtensionRpc["send"]>[0]) {
@@ -354,13 +343,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   }
   const sessions: BrowserControlSessions = new BrowserControlSessions(
     endpointUrl,
-    (id) =>
+    (id, onDefaultTargetChange) =>
       new ExecuteSandbox({
         endpointUrl,
         sessionId: id,
-        onDefaultTargetChange: (target) => {
-          sessions.updateTarget(id, target)
-        },
+        onDefaultTargetChange,
         requestHandoff: ({ message, timeoutMs, target, start, cancelStart }) => requestHandoff({
           sessionId: id,
           message,
@@ -504,12 +491,36 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     refreshTabGrouping(tabId)
   }
   const managed = yield* Config.boolean("BROWSER_CONTROL_MANAGED_RELAY").pipe(Config.withDefault(false))
+  const restartTimeoutMs = yield* Config.int("BROWSER_CONTROL_RESTART_TIMEOUT_MS").pipe(Config.withDefault(10_000))
+  const restartRequestId = yield* Config.option(Config.string("BROWSER_CONTROL_RESTART_REQUEST_ID"))
+  const lifecycleLogPath = path.join(path.dirname(defaultSessionCatalogPath(port)), "lifecycle.jsonl")
+  const audit = (event: RelayLifecycleEvent) => Effect.try(() => appendRelayLifecycleEvent(lifecycleLogPath, event))
+  const settleRootWork = Effect.fnUntraced(function* () {
+    yield* rootLifecycle.settle()
+    yield* sessions.beginDrain()
+  })
+  const shutdownControl = new RelayShutdown({
+    instanceId: browserId,
+    managed,
+    timeoutMs: Math.max(0, restartTimeoutMs),
+    drain: sessions.beginDrain(),
+    resume: () => sessions.resume(),
+    busy: () => {
+      if (Array.from(cdpClients).some((client) => !cdpClients.isSandbox(client))) return "raw-clients"
+      if (recordingRelay.hasActiveRecordings() || sessions.hasActiveNetworkCapture()) return "recordings"
+      return undefined
+    },
+    settle: settleRootWork(),
+    quiescent: () => rootLifecycle.isIdle() && sessions.isDrained(),
+    audit,
+    stop: () => { setImmediate(() => process.kill(process.pid, "SIGTERM")) },
+  })
   const relayRequestHandler = createHttpRequestHandler({
     host,
     port,
     browserId,
     relayInstance: { id: browserId, startedAt: new Date().toISOString(), pid: process.pid, managed },
-    shutdown: () => process.kill(process.pid, "SIGTERM"),
+    shutdown: shutdownControl,
     registry,
     recordingRelay,
     sessions,
@@ -538,10 +549,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const debugLog = debugEnabled ? (line: string) => console.error(`[bc ${new Date().toISOString().slice(11, 23)}] ${line}`) : undefined
   const contextDebugLog = debugLog ? (line: string) => debugLog(`[bc:ctx] ${line}`) : undefined
   const websocketServer = new WebSocketServer({ noServer: true })
-  const cdpClients = new CdpClientPool<WebSocket>()
+  const cdpClients = new CdpClientPool<WebSocket>(sendCdpEvent)
   const cdpRouter = new CdpRouter(cdpClients, registry)
-  const runtimeContextWaiters = new Set<(event: CdpEvent) => void>()
-  let nextTargetSessionId = 1
+  const cdpRuntime = new CdpRuntime({
+    registry,
+    generation: () => extensionGeneration,
+    send: sendDebuggerCommand,
+    ...(contextDebugLog ? { trace: contextDebugLog } : {}),
+  })
   const mainFrameIdsByTab = new Map<number, string>()
   const ghostCursorPositionsByTab = new Map<number, { readonly x: number; readonly y: number }>()
   const suppressedChildSessions = new Map<string, number>()
@@ -579,49 +594,22 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     return method === "Runtime.evaluate" || method === "Runtime.callFunctionOn"
   }
 
-  const runRuntimeResetCommand = Effect.fnUntraced(function* (options: {
-    readonly phase: string
-    readonly tabId: number
-    readonly sessionId?: string
-    readonly method: "Runtime.disable" | "Runtime.enable"
-    readonly params: JsonObject
-  }) {
-    const target = targetForCdpSession(options.tabId, options.sessionId)
-    contextDebugLog?.(`runtime-reset phase=${options.phase} command=${options.method} ${targetDiagnosticIdentity(target)}`)
-    return yield* Effect.matchEffect(
-      sendDebuggerCommand({
-        tabId: options.tabId,
-        method: options.method,
-        params: options.params,
-        ...(options.sessionId ? { sessionId: options.sessionId } : {}),
-      }),
-      {
-        onFailure: (error) => Effect.sync(() => {
-          contextDebugLog?.(`runtime-reset phase=${options.phase} command=${options.method} outcome=failed failure=${runtimeFailureKind(error)} ${targetDiagnosticIdentity(target)}`)
-          return false
-        }),
-        onSuccess: () => Effect.sync(() => {
-          contextDebugLog?.(`runtime-reset phase=${options.phase} command=${options.method} outcome=ok ${targetDiagnosticIdentity(target)}`)
-          return true
-        }),
-      },
-    )
-  })
-
   const cleanup = Effect.fnUntraced(function* () {
-    relayClosing = true
+    yield* shutdownControl.close().pipe(Effect.ignore)
+    yield* sessions.closeAll()
+    yield* rootLifecycle.close()
+    if (managed) {
+      yield* audit(RelayLifecycleEvent.cases.Closed.make({ instanceId: browserId })).pipe(
+        Effect.catch(() => Effect.sync(() => console.error("Failed to record relay shutdown lifecycle event"))),
+      )
+    }
     handoffs.cancelAll()
     extensionRpc.rejectPending(new Error("Relay closed"))
-    yield* Effect.promise(() => Promise.allSettled(
-      Array.from(rootReconciliationWorkers.values(), (worker) => worker.promise),
-    )).pipe(Effect.asVoid)
     yield* Effect.tryPromise(() => recordingRelay.cleanupAll("Relay closed")).pipe(Effect.ignore)
-    yield* sessions.closeAll()
     for (const socket of cdpClients) {
       socket.close()
     }
     extensionRpc.close()
-    rootLifecycleSemaphores.clear()
     yield* closeWebSocketServer(websocketServer).pipe(logCloseError("Failed to close websocket server"))
     yield* closeHttpServer(httpServer).pipe(logCloseError("Failed to close http server"))
   })
@@ -655,6 +643,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return
     }
     if (requestUrl.pathname.startsWith("/devtools/browser/")) {
+      const sessionId = requestUrl.searchParams.get("browserControlSessionId") ?? headerValue(request.headers["browser-control-session-id"])
+      if (!shutdownControl.accepting && (headerValue(request.headers["browser-control-client-kind"]) !== "sandbox" || !sessionId || !sessions.hasPendingWork(sessionId))) {
+        sendUpgradeError({ socket, status: 503, message: "Relay is draining for an explicit restart" })
+        return
+      }
       const originError = validateWebSocketOrigin({ origin, allowAnyChromeExtension, additionalChromeExtensionOrigins })
       if (originError) {
         sendUpgradeError({ socket, status: 403, message: originError })
@@ -711,10 +704,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
 
     const browserControlSessionId = requestUrl.searchParams.get("browserControlSessionId") ?? headerValue(request.headers["browser-control-session-id"])
-    cdpClients.register(socket, browserControlSessionId)
+    cdpClients.register(socket, browserControlSessionId, headerValue(request.headers["browser-control-client-kind"]) === "sandbox" ? "sandbox" : "raw")
     debugLog?.(`client+ ${browserControlSessionId ?? "raw"} total=${cdpClients.size}`)
     socket.on("message", (data) => {
-      Effect.runPromise(handleCdpMessage(socket, data.toString())).catch((error: unknown) => {
+      Effect.runPromise(shutdownControl.trackTransport(handleCdpMessage(socket, data.toString()))).catch((error: unknown) => {
         sendCdpResponse(socket, {
           id: 0,
           error: { message: error instanceof Error ? error.message : String(error) },
@@ -724,8 +717,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     socket.on("close", () => {
       debugLog?.(`client- ${cdpClients.sessionId(socket) ?? "raw"} total=${cdpClients.size - 1}`)
       const idleGeneration = cdpClients.unregister(socket)
-      if (idleGeneration !== undefined) {
-        Effect.runPromise(disableRuntimeForIdleTargets(idleGeneration).pipe(Effect.ignore)).catch((error: unknown) => {
+      if (idleGeneration !== undefined && !shutdownControl.stopping) {
+        Effect.runPromise(shutdownControl.trackTransport(cdpRuntime.disableIdle(() => cdpClients.isCurrentIdleGeneration(idleGeneration))).pipe(Effect.ignore)).catch((error: unknown) => {
           console.error("Failed to reset idle runtime domains", error)
         })
       }
@@ -788,12 +781,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return
     }
     if (extensionMethod === "ready") {
-      const workers = Array.from(rootReconciliationWorkers.values())
-        .filter((worker) => worker.generation === generation)
-        .map((worker) => worker.promise)
-      void Promise.all(workers).then((reconciled) => {
+      void Effect.runPromise(rootLifecycle.settle(generation)).then((reconciled) => {
         if (!extensionRpc.isCurrent(socket) || generation !== extensionGeneration) return
-        if (reconciled.every(Boolean)) {
+        if (reconciled) {
           for (const target of registry.listRootTargets()) {
             if (!announcedRootTabIds.has(target.tabId)) detachTargetState(target.tabId)
           }
@@ -809,7 +799,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       const tabId = typeof message.params?.tabId === "number" ? message.params.tabId : undefined
       if (tabId) {
         announcedRootTabIds.add(tabId)
-        queueRootReconciliation(tabId, true, 0, "Debugger re-announce failed", generation)
+        rootLifecycle.queue({ tabId, attachIfMissing: true, verificationRetries: 0, errorMessage: "Debugger re-announce failed", generation })
       }
       return
     }
@@ -856,7 +846,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }
       if (reason === "target_closed") {
         if (tabId) {
-          queueRootReconciliation(tabId, false, 3, "Failed to reconcile ambiguous debugger detach")
+          rootLifecycle.queue({ tabId, attachIfMissing: false, verificationRetries: 3, errorMessage: "Failed to reconcile ambiguous debugger detach" })
         }
         return
       }
@@ -893,6 +883,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const sourceSessionId = typeof message.params?.sessionId === "string" ? message.params.sessionId : undefined
     debugLog?.(`evt tab=${tabId} ${method} src=${sourceSessionId ?? "root"}`)
     const sourceChild = sourceSessionId ? registry.childTargets.get(sourceSessionId) : undefined
+    if (sourceSessionId && sourceSessionId !== target.sessionId && !sourceChild) {
+      return
+    }
     if (
       sourceSessionId &&
       method !== "Target.attachedToTarget" &&
@@ -954,23 +947,19 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         }
         suppressedChildSessions.delete(childSessionId)
         shouldBroadcast = false
-        if (registry.childTargets.has(childSessionId)) {
-          registry.updateChildTargetInfo(targetInfo)
-        }
         const parentSessionId = sourceSessionId ?? target.sessionId
-        if (!registry.childTargets.has(childSessionId)) {
-          const childTarget: ChildTarget = {
-            tabId,
-            sessionId: childSessionId,
-            parentSessionId,
-            targetInfo,
-            waitingForDebugger: params?.waitingForDebugger === true,
-          }
-          registry.addChildTarget(childTarget)
-          contextDebugLog?.(`target-attached kind=child parentSession=${boundedToken(parentSessionId)} ${targetDiagnosticIdentity(childTarget)} ${summarizeDiagnosticUrl(targetInfo.url)}`)
+        const childTarget: ChildTarget = {
+          tabId,
+          sessionId: childSessionId,
+          parentSessionId,
+          targetInfo,
+          waitingForDebugger: params?.waitingForDebugger === true,
         }
-        const childTarget = registry.childTargets.get(childSessionId)
-        if (childTarget && shouldExposeChildTarget(childTarget)) {
+        for (const previous of registry.addChildTarget(childTarget)) {
+          cdpClients.detachTarget(previous)
+        }
+        contextDebugLog?.(`target-attached kind=child parentSession=${boundedToken(parentSessionId)} ${targetDiagnosticIdentity(childTarget)} ${summarizeDiagnosticUrl(targetInfo.url)}`)
+        if (shouldExposeChildTarget(childTarget)) {
           attachedChildTarget = childTarget
         }
       }
@@ -978,6 +967,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (method === "Target.detachedFromTarget") {
       const childSessionId = typeof params?.sessionId === "string" ? params.sessionId : undefined
       if (childSessionId) {
+        shouldBroadcast = false
         suppressedChildSessions.delete(childSessionId)
         contextDebugLog?.(`target-detached kind=child ${targetDiagnosticIdentity(registry.childTargets.get(childSessionId))}`)
         detachChildTargetState(childSessionId)
@@ -993,7 +983,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       if (isRestrictedTarget(targetInfo)) {
         if (childTarget) {
           suppressedChildSessions.set(childTarget.sessionId, tabId)
-          detachChildTargetState(childTarget.sessionId, true)
+          detachChildTargetState(childTarget.sessionId)
         }
         return
       }
@@ -1001,7 +991,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       if (!changed) {
         const currentRoot = registry.routingRootTarget(tabId)
         if (targetInfo.type === "page" && currentRoot && currentRoot.targetInfo.targetId !== targetInfo.targetId) {
-          queueRootReconciliation(tabId, false, 1, "Failed to reconcile changed root target info")
+          rootLifecycle.queue({ tabId, attachIfMissing: false, verificationRetries: 1, errorMessage: "Failed to reconcile changed root target info" })
         }
         return
       }
@@ -1075,7 +1065,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     } else if (method === "Runtime.executionContextsCleared") {
       contextDebugLog?.(`contexts-cleared ${targetDiagnosticIdentity(targetForCdpSession(tabId, eventSessionId))}`)
     }
-    notifyRuntimeContextWaiters(event)
+    cdpRuntime.notify(event)
     if (attachedChildTarget) {
       announceAttachedChildTarget(target.sessionId, attachedChildTarget)
       return
@@ -1148,6 +1138,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
 
   const routeCdpCommand = Effect.fn("Relay.routeCdpCommand")(function* (socket: WebSocket, message: CdpRequest) {
     const clientBrowserControlSessionId = cdpClients.sessionId(socket)
+    if (!shutdownControl.accepting && (!cdpClients.isSandbox(socket) || !clientBrowserControlSessionId || !sessions.hasPendingWork(clientBrowserControlSessionId))) {
+      return yield* Effect.fail(new Error("Relay is draining for an explicit restart"))
+    }
     const guardMessage = guardCdpMethod({
       method: message.method,
       readOnly: clientBrowserControlSessionId ? sessions.isReadOnly(clientBrowserControlSessionId) : false,
@@ -1178,7 +1171,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       cdpClients.setAutoAttachParams(socket, message.params)
       for (const target of cdpRouter.visibleRoots(socket)) {
         yield* Effect.ignore(sendDebuggerCommand({ tabId: target.tabId, method: "Target.setAutoAttach", params: message.params ?? {} }))
-        sendAttachedToTarget({ socket, announcements: cdpClients.announcements(socket), target, onDuplicateTarget: logDuplicateTargetAnnouncement })
+        cdpClients.announce(socket, target)
       }
       return {}
     }
@@ -1188,7 +1181,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         return yield* Effect.fail(new Error(`Target not found: ${message.sessionId}`))
       }
       const result = yield* sendDebuggerCommand({ tabId: target.tabId, method: "Target.setAutoAttach", params: message.params ?? {} })
-      replayChildTargetsForParent({ socket, parentSessionId: target.sessionId, registry, announcements: cdpClients.announcements(socket), onDuplicateTarget: logDuplicateTargetAnnouncement })
+      replayChildTargetsForParent({ socket, parentSessionId: target.sessionId, registry, clients: cdpClients })
       return result
     }
     if (message.method === "Target.getTargets") {
@@ -1202,19 +1195,12 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (message.method === "Target.attachToTarget") {
       const targetId = typeof message.params?.targetId === "string" ? message.params.targetId : ""
       const target = cdpRouter.targetForAttach(socket, targetId)
-      if (target && "owner" in target) {
-        if (hasAnnouncedSession(cdpClients.announcements(socket), target.sessionId)) {
-          return { sessionId: cdpClients.createTargetAlias(socket, target, target.sessionId) }
-        }
-        sendAttachedToTarget({ socket, announcements: cdpClients.announcements(socket), target, onDuplicateTarget: logDuplicateTargetAnnouncement })
-        return { sessionId: target.sessionId }
-      }
       if (target) {
-        if (hasAnnouncedSession(cdpClients.announcements(socket), target.sessionId)) {
-          return { sessionId: cdpClients.createTargetAlias(socket, target, target.parentSessionId) }
+        if (cdpClients.hasSession(socket, target.sessionId)) {
+          return { sessionId: cdpClients.createTargetAlias(socket, target) }
         }
-        sendAttachedToChildTarget({ socket, announcements: cdpClients.announcements(socket), target, onDuplicateTarget: logDuplicateTargetAnnouncement })
-        replayChildFrameNavigation({ socket, registry, target })
+        cdpClients.announce(socket, target)
+        if ("parentSessionId" in target) replayChildFrameNavigation({ socket, registry, target })
         return { sessionId: target.sessionId }
       }
       return yield* Effect.fail(new Error(`Target not found: ${targetId}`))
@@ -1257,50 +1243,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (message.method === "Target.detachFromTarget") {
       const childSessionId = typeof message.params?.sessionId === "string" ? message.params.sessionId : undefined
       if (childSessionId) {
-        if (cdpClients.deleteAlias(socket, childSessionId)) {
-          return {}
-        }
-        removeAnnouncedSession(cdpClients.announcements(socket), childSessionId)
+        cdpClients.detach(socket, childSessionId)
       }
       return {}
     }
     const normalizedMessage = removeDefaultLightColorSchemeEmulation(message)
-    if (message.method === "Runtime.enable" && message.sessionId) {
-      const sessionId = message.sessionId
-      const route = cdpRouter.session(socket, sessionId)
-      if (!route) {
-        return yield* Effect.fail(new Error(`Unknown CDP session ${sessionId} for ${message.method}`))
-      }
-      const { tabId } = route
-      const chromeSessionId = route.chromeSessionId ? { sessionId: route.chromeSessionId } : {}
-      const contextSessionId = route.chromeSessionId ?? route.rootSessionId ?? sessionId
-      contextDebugLog?.(`runtime-enable phase=client-request ${targetDiagnosticIdentity(targetForCdpSession(tabId, sessionId))}`)
-      // Register the waiter before sending the enable so context events that
-      // arrive during the command round trip are not missed.
-      const contextWaiter = yield* Effect.forkChild(waitForDefaultRuntimeContext(contextSessionId), { startImmediately: true })
-      const result = yield* sendDebuggerCommand({
-        tabId,
-        method: normalizedMessage.method,
-        params: normalizedMessage.params ?? {},
-        ...chromeSessionId,
-      })
-      const seenDefaultContext = yield* Fiber.join(contextWaiter)
-      contextDebugLog?.(`runtime-enable phase=client-request defaultContextSeen=${seenDefaultContext} ${targetDiagnosticIdentity(targetForCdpSession(tabId, sessionId))}`)
-      if (!seenDefaultContext) {
-        // Chrome considered Runtime already enabled on the shared debugger
-        // attachment, so it acknowledged the enable without re-emitting
-        // Runtime.executionContextCreated and Playwright would wait forever
-        // for an execution context. Kick a disable/enable cycle to force
-        // re-emission; verified live to unstick hung page.evaluate calls.
-        const retryWaiter = yield* Effect.forkChild(waitForDefaultRuntimeContext(contextSessionId), { startImmediately: true })
-        contextDebugLog?.(`runtime-reset phase=missing-default-context attempt=start ${targetDiagnosticIdentity(targetForCdpSession(tabId, sessionId))}`)
-        yield* runRuntimeResetCommand({ phase: "missing-default-context", tabId, method: "Runtime.disable", params: {}, ...chromeSessionId })
-        yield* runRuntimeResetCommand({ phase: "missing-default-context", tabId, method: "Runtime.enable", params: normalizedMessage.params ?? {}, ...chromeSessionId })
-        const retrySeenDefaultContext = yield* Fiber.join(retryWaiter)
-        contextDebugLog?.(`runtime-reset phase=missing-default-context attempt=complete defaultContextSeen=${retrySeenDefaultContext} ${targetDiagnosticIdentity(targetForCdpSession(tabId, sessionId))}`)
-      }
-      return result
-    }
     const browserAlias = message.sessionId !== undefined && cdpRouter.isBrowserAlias(socket, message.sessionId)
     const rootRoutable = isRootRoutableBrowserContextMethod(message.method) && (!message.sessionId || browserAlias)
     const preferredRoot = rootRoutable ? cdpRouter.preferredRoot(socket) : undefined
@@ -1319,12 +1266,16 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         : `CDP sessionId is required for ${message.method}`))
     }
     const { tabId } = route
-    const result = yield* sendDebuggerCommand({
+    const command = {
       tabId,
       method: normalizedMessage.method,
       params: normalizedMessage.params ?? {},
       ...(route.chromeSessionId === undefined ? {} : { sessionId: route.chromeSessionId }),
-    })
+    }
+    const sessionId = message.sessionId
+    const result = yield* (message.method === "Runtime.enable" && sessionId
+      ? cdpRuntime.enable(route, command.params, () => cdpRouter.session(socket, sessionId) !== undefined)
+      : sendDebuggerCommand(command))
     yield* applyGhostCursorMouseEvent({ tabId, message }).pipe(Effect.ignore)
     return result
   })
@@ -1360,7 +1311,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       yield* Effect.ignore(sendToExtension({ method: "action.setAttached", params: { tabId, attached: false } }))
       return
     }
-    yield* attachTab({ tabId, owner: "user" })
+    yield* rootLifecycle.attach({ tabId, owner: "user" })
   })
 
   const createAndAttachTab = Effect.fnUntraced(function* (options: {
@@ -1374,7 +1325,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (!tabId) {
       return yield* Effect.fail(new Error("tabs.create did not return a tabId"))
     }
-    return yield* attachTab({
+    return yield* rootLifecycle.attach({
       tabId,
       owner: "relay",
       ...(options.browserControlSessionId ? { browserControlSessionId: options.browserControlSessionId } : {}),
@@ -1382,59 +1333,23 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     })
   })
 
-  const attachTabUnlocked = Effect.fnUntraced(function* (options: {
-    readonly tabId: number
-    readonly owner: "relay" | "user"
-    readonly browserControlSessionId?: string
-    readonly alreadyAttached?: boolean
-    readonly autoAttachParams?: JsonObject
-  }) {
-    const { tabId } = options
-    if (!options.alreadyAttached) {
-      yield* sendToExtension({ method: "debugger.attach", params: { tabId } })
-    }
-    yield* sendDebuggerCommand({ tabId, method: "Page.enable", params: {} })
-    yield* injectGhostCursor(tabId).pipe(Effect.ignore)
-    const targetInfoResult = yield* sendDebuggerCommand({ tabId, method: "Target.getTargetInfo", params: {} })
-    const targetInfo = getTargetInfo(targetInfoResult.targetInfo)
-    if (!targetInfo) {
-      return yield* Effect.fail(new Error("Target.getTargetInfo did not return targetInfo"))
-    }
-    const restoredTarget = options.browserControlSessionId
-      ? undefined
-      : sessions.persistedTargetOwner(targetInfo.targetId)
-    const browserControlSessionId = options.browserControlSessionId ?? restoredTarget?.sessionId
-    const sessionId = `bc-tab-${nextTargetSessionId++}`
-    const candidate: ConnectedTarget = {
-      tabId,
-      sessionId,
-      targetInfo,
-      owner: restoredTarget?.owner ?? options.owner,
-      ...(browserControlSessionId ? { browserControlSessionId } : {}),
-    }
-    return yield* finishAttachedTarget(registry.stageRootTarget(candidate), options.autoAttachParams)
+  const rootLifecycle = yield* RootTargetLifecycle.make({
+    registry,
+    sessions,
+    handoffs,
+    clients: cdpClients,
+    extension: { generation: () => extensionGeneration, send: sendToExtension },
+    presentation: {
+      replaced: recordRootReplacement,
+      committed: presentAttachedTarget,
+      announceRoot: announceAttachedTarget,
+      announceChild: announceAttachedChildTarget,
+    },
+    reportError: (message, error) => console.error(message, error),
   })
 
-  const finishAttachedTarget = Effect.fnUntraced(function* (target: ConnectedTarget, autoAttachParams?: JsonObject) {
-    const tabId = target.tabId
-    yield* sendDebuggerCommand({
-      tabId,
-      method: "Target.setAutoAttach",
-      params: autoAttachParams ?? {
-        autoAttach: true,
-        waitForDebuggerOnStart: false,
-        flatten: true,
-      },
-    })
-    const currentTargetInfoResult = yield* sendDebuggerCommand({ tabId, method: "Target.getTargetInfo", params: {} })
-    const currentTargetInfo = getTargetInfo(currentTargetInfoResult.targetInfo)
-    if (!currentTargetInfo || currentTargetInfo.targetId !== target.targetInfo.targetId) {
-      return yield* Effect.fail(new Error(`Root target changed while preparing ${target.targetInfo.targetId}`))
-    }
-    const change = registry.commitStagedRootTarget(tabId, target.sessionId)
-    if (!change) return yield* Effect.fail(new Error(`Staged root target changed before commit: ${target.targetInfo.targetId}`))
-    const committedTarget = change.target
-    if (change.kind === "replaced") reconcileRootReplacement(change)
+  function presentAttachedTarget(committedTarget: ConnectedTarget): void {
+    const tabId = committedTarget.tabId
     mainFrameIdsByTab.set(tabId, committedTarget.targetInfo.targetId)
     contextDebugLog?.(`target-attached kind=root ${targetDiagnosticIdentity(committedTarget)} ${summarizeDiagnosticUrl(committedTarget.targetInfo.url)}`)
     if (committedTarget.browserControlSessionId) {
@@ -1443,7 +1358,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (extensionRpc.connected) {
       refreshTabGrouping(tabId)
     }
-    yield* Effect.ignore(sendToExtension({ method: "action.setAttached", params: { tabId, attached: true } }))
     const pendingHandoff = handoffs.pendingForTab(tabId)
     if (pendingHandoff) {
       setActivityForTarget(committedTarget, "waiting", waitingBadge(pendingHandoff.message), {
@@ -1454,170 +1368,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     } else {
       sendPageStatus(committedTarget, committedTarget.browserControlSessionId && sessions.isExecuting(committedTarget.browserControlSessionId) ? "running" : "attached")
     }
-    announceAttachedTarget(committedTarget)
-    for (const child of registry.childTargets.values()) {
-      if (child.tabId === tabId && child.parentSessionId === committedTarget.sessionId && shouldExposeChildTarget(child)) {
-        announceAttachedChildTarget(committedTarget.sessionId, child)
-      }
-    }
-    return committedTarget
-  })
-
-  const attachTab = Effect.fnUntraced(function* (options: {
-    readonly tabId: number
-    readonly owner: "relay" | "user"
-    readonly browserControlSessionId?: string
-    readonly alreadyAttached?: boolean
-    readonly expectedExtensionGeneration?: number
-    readonly autoAttachParams?: JsonObject
-  }) {
-    const semaphore = rootLifecycleSemaphores.get(options.tabId) ?? Semaphore.makeUnsafe(1)
-    rootLifecycleSemaphores.set(options.tabId, semaphore)
-    return yield* semaphore.withPermit(Effect.gen(function* () {
-      if (relayClosing) return yield* Effect.fail(new Error("Relay is closing"))
-      if (options.expectedExtensionGeneration !== undefined && options.expectedExtensionGeneration !== extensionGeneration) {
-        return yield* Effect.fail(new Error("Extension changed before target reconciliation acquired its permit"))
-      }
-      return yield* attachTabUnlocked(options)
-    }))
-  })
-
-  const reconcileAttachedRootUnlocked = Effect.fnUntraced(function* (tabId: number) {
-    const expected = registry.tabTargets.get(tabId)
-    const staged = registry.stagedRootTarget(tabId)
-    if (!expected && !staged) return
-    let targetInfo: ReturnType<typeof getTargetInfo> | undefined
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      const result = yield* Effect.result(sendDebuggerCommand({ tabId, method: "Target.getTargetInfo", params: {} }))
-      if (result._tag === "Success") {
-        targetInfo = getTargetInfo(result.success.targetInfo)
-        break
-      }
-      if (attempt === 0) yield* Effect.sleep("50 millis")
-    }
-    if (relayClosing) return
-    if (!targetInfo) return
-    if (
-      registry.tabTargets.get(tabId)?.sessionId !== expected?.sessionId ||
-      registry.stagedRootTarget(tabId)?.sessionId !== staged?.sessionId
-    ) return
-    if (staged?.targetInfo.targetId === targetInfo.targetId) {
-      yield* finishAttachedTarget(staged)
-      return
-    }
-    if (!staged && expected?.targetInfo.targetId === targetInfo.targetId) return
-    const ownerSource = expected ?? staged
-    if (!ownerSource) return
-    yield* attachTabUnlocked({
-      tabId,
-      owner: ownerSource.owner,
-      alreadyAttached: true,
-      ...(ownerSource.browserControlSessionId ? { browserControlSessionId: ownerSource.browserControlSessionId } : {}),
-    })
-  })
-
-  const reconcileAttachedRoot = Effect.fnUntraced(function* (tabId: number, expectedExtensionGeneration?: number) {
-    const semaphore = rootLifecycleSemaphores.get(tabId) ?? Semaphore.makeUnsafe(1)
-    rootLifecycleSemaphores.set(tabId, semaphore)
-    yield* semaphore.withPermit(Effect.gen(function* () {
-      if (relayClosing) return
-      if (expectedExtensionGeneration !== undefined && expectedExtensionGeneration !== extensionGeneration) {
-        return yield* Effect.fail(new Error("Extension changed before target reconciliation acquired its permit"))
-      }
-      yield* reconcileAttachedRootUnlocked(tabId)
-    }))
-  })
-
-  function queueRootReconciliation(
-    tabId: number,
-    attachIfMissing: boolean,
-    verificationRetries: number,
-    errorMessage: string,
-    generation = extensionGeneration,
-  ): void {
-    if (relayClosing) return
-    const workerKey = `${generation}:${tabId}`
-    const existing = rootReconciliationWorkers.get(workerKey)
-    if (existing) {
-      existing.pending = true
-      existing.attachIfMissing ||= attachIfMissing
-      existing.verificationRetries = Math.max(existing.verificationRetries, verificationRetries)
-      return
-    }
-    const worker: RootReconciliationWorker = {
-      attachIfMissing,
-      generation,
-      pending: false,
-      promise: Promise.resolve(true),
-      verificationRetries,
-    }
-    worker.promise = (async () => {
-      let retries = 0
-      let reconciled = true
-      do {
-        if (generation !== extensionGeneration) return false
-        worker.pending = false
-        const mayAttach = worker.attachIfMissing
-        worker.attachIfMissing = false
-        try {
-          if (registry.tabTargets.has(tabId)) {
-            await Effect.runPromise(reconcileAttachedRoot(tabId, generation))
-          } else if (mayAttach && !relayClosing) {
-            await Effect.runPromise(attachTab({
-              tabId,
-              owner: "user",
-              alreadyAttached: true,
-              expectedExtensionGeneration: generation,
-            }))
-          }
-          if (generation !== extensionGeneration) {
-            detachTargetState(tabId, { preserveSessionTarget: true, updateExtension: false })
-            return false
-          }
-          retries = 0
-          if (worker.verificationRetries > 0 && !relayClosing) {
-            const retryDelayMs = 50 * (4 - worker.verificationRetries)
-            worker.verificationRetries -= 1
-            await new Promise((resolve) => setTimeout(resolve, retryDelayMs))
-            worker.pending = true
-          }
-        } catch (error) {
-          console.error(errorMessage, error)
-          if (generation !== extensionGeneration) {
-            detachTargetState(tabId, { preserveSessionTarget: true, updateExtension: false })
-            reconciled = false
-          } else if (retries < 2 && !relayClosing) {
-            retries += 1
-            worker.attachIfMissing ||= mayAttach
-            await new Promise((resolve) => setTimeout(resolve, 100 * retries))
-            worker.pending = true
-          } else {
-            reconciled = false
-          }
-        }
-      } while (worker.pending && !relayClosing)
-      return reconciled
-    })().finally(() => {
-      if (rootReconciliationWorkers.get(workerKey) === worker) {
-        rootReconciliationWorkers.delete(workerKey)
-      }
-      if (!registry.tabTargets.has(tabId)) rootLifecycleSemaphores.delete(tabId)
-    })
-    rootReconciliationWorkers.set(workerKey, worker)
   }
-
-  const injectGhostCursor = Effect.fnUntraced(function* (tabId: number) {
-    yield* sendDebuggerCommand({
-      tabId,
-      method: "Page.addScriptToEvaluateOnNewDocument",
-      params: { source: ghostCursorClientSource },
-    })
-    yield* sendDebuggerCommand({
-      tabId,
-      method: "Runtime.evaluate",
-      params: { expression: ghostCursorClientSource },
-    })
-  })
 
   const applyGhostCursorMouseEvent = Effect.fnUntraced(function* (options: { readonly tabId: number; readonly message: CdpRequest }) {
     if (options.message.method !== "Input.dispatchMouseEvent") {
@@ -1635,25 +1386,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     })
   })
 
-  const disableRuntimeForIdleTargets = Effect.fnUntraced(function* (generation: number) {
-    yield* Effect.forEach(Array.from(registry.targets.values()), (target) => {
-      if (!cdpClients.isCurrentIdleGeneration(generation)) {
-        return Effect.void
-      }
-      return runRuntimeResetCommand({ phase: "idle-client-disconnect", tabId: target.tabId, method: "Runtime.disable", params: {} }).pipe(Effect.asVoid)
-    })
-    yield* Effect.forEach(Array.from(registry.childTargets.values()), (target) => {
-      if (!cdpClients.isCurrentIdleGeneration(generation)) {
-        return Effect.void
-      }
-      return runRuntimeResetCommand({ phase: "idle-client-disconnect", tabId: target.tabId, sessionId: target.sessionId, method: "Runtime.disable", params: {} }).pipe(Effect.asVoid)
-    })
-  })
-
   function detachTargetState(tabId: number, options: {
     readonly preserveSessionTarget?: boolean
     readonly updateExtension?: boolean
   } = {}): void {
+    rootLifecycle.invalidate(tabId)
     if (options.updateExtension !== false) {
       Effect.runPromise(Effect.ignore(sendToExtension({ method: "pageStatus.clear", params: { tabId } }))).catch(() => {})
       scheduleTabGrouping(tabId, "tabs.ungroup")
@@ -1668,7 +1405,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     cancelTargetHandoffs(detached.target, "target-detached")
     if (!options.preserveSessionTarget) sessions.markTargetDetached(detached.target.targetInfo.targetId)
-    cdpClients.removeTargetAliases((alias) => alias.tabId === tabId)
+    cdpClients.detachTab(tabId, { destroyed: true })
     mainFrameIdsByTab.delete(tabId)
     ghostCursorPositionsByTab.delete(tabId)
     for (const [sessionId, childTabId] of suppressedChildSessions) {
@@ -1677,61 +1414,21 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }
     }
     contextDebugLog?.(`target-detached kind=root ${targetDiagnosticIdentity(detached.target)}`)
-    for (const client of cdpClients) {
-      for (const childSessionId of detached.childSessionIds) {
-        detachAnnouncedSession(client, childSessionId)
-      }
-    }
-    sendEventToTargetViewers(detached.target.sessionId, {
-      method: "Target.targetDestroyed",
-      params: { targetId: detached.target.targetInfo.targetId },
-    })
-    sendEventToTargetViewers(detached.target.sessionId, {
-      method: "Target.detachedFromTarget",
-      params: { sessionId: detached.target.sessionId, targetId: detached.target.targetInfo.targetId },
-    })
-    for (const client of cdpClients) {
-      const announcements = cdpClients.announcements(client)
-      removeAnnouncedSession(announcements, detached.target.sessionId)
-    }
   }
 
-  function reconcileRootReplacement(change: Extract<RootTargetChange, { readonly kind: "replaced" }>): void {
-    handoffs.rebindTarget({
-      tabId: change.target.tabId,
-      previousTargetId: change.previous.targetInfo.targetId,
-      previousTargetSessionId: change.previous.sessionId,
-      targetId: change.target.targetInfo.targetId,
-      targetSessionId: change.target.sessionId,
-    })
-    sessions.markTargetReplaced(change.previous.targetInfo.targetId, change.target.targetInfo.targetId)
-    cdpClients.removeTargetAliases((alias) => alias.tabId === change.target.tabId)
+  function recordRootReplacement(change: Extract<RootTargetChange, { readonly kind: "replaced" }>): void {
     mainFrameIdsByTab.delete(change.target.tabId)
     ghostCursorPositionsByTab.delete(change.target.tabId)
     for (const [sessionId, childTabId] of suppressedChildSessions) {
       if (childTabId === change.target.tabId) suppressedChildSessions.delete(sessionId)
     }
-    for (const client of cdpClients) {
-      for (const childSessionId of change.childSessionIds) detachAnnouncedSession(client, childSessionId)
-      detachAnnouncedSession(client, change.previous.sessionId)
-    }
     contextDebugLog?.(`target-replaced kind=root old=${targetDiagnosticIdentity(change.previous)} new=${targetDiagnosticIdentity(change.target)}`)
   }
 
-  function detachChildTargetState(sessionId: string, notifyClients = false): void {
-    if (notifyClients) {
-      for (const client of cdpClients) {
-        detachAnnouncedSession(client, sessionId)
-      }
-    }
+  function detachChildTargetState(sessionId: string): void {
     const detached = registry.detachChildTargetState(sessionId)
     if (detached) {
-      cdpClients.removeTargetAliases((alias) => alias.targetId === detached.targetInfo.targetId)
-    }
-    if (!notifyClients) {
-      for (const client of cdpClients) {
-        removeAnnouncedSession(cdpClients.announcements(client), sessionId)
-      }
+      cdpClients.detachTarget(detached)
     }
   }
 
@@ -1739,50 +1436,20 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   // the tab's root target. Broadcasting to every client lets concurrently
   // connected sandboxes attach to each other's pages and interfere.
   function sendEventToTargetViewers(rootSessionId: string, event: CdpEvent): void {
-    const target = registry.targets.get(rootSessionId)
-    for (const client of cdpClients) {
-      if (!hasAnnouncedSession(cdpClients.announcements(client), rootSessionId)) {
-        continue
-      }
-      if (target && !cdpRouter.canSeeTarget(client, target)) {
-        detachAnnouncedSession(client, rootSessionId)
-        continue
-      }
-      sendCdpEvent(client, event)
-    }
+    cdpClients.sendToViewers(rootSessionId, event, (client, tabId) => cdpRouter.canSeeTab(client, tabId))
   }
 
   function pruneInvisibleAnnouncementsForSession(browserControlSessionId: string): void {
     for (const client of cdpClients) {
       if (cdpClients.sessionId(client) === browserControlSessionId) {
-        pruneInvisibleAnnouncementsForClient(client)
-      }
-    }
-  }
-
-  function pruneInvisibleAnnouncementsForClient(client: WebSocket): void {
-    const announcements = cdpClients.announcements(client)
-    for (const announced of Array.from(announcements.targets.values())) {
-      const rootTarget = registry.targets.get(announced.sessionId)
-      if (rootTarget) {
-        if (!cdpRouter.canSeeTarget(client, rootTarget)) {
-          cdpClients.removeClientTargetAliases(client, (alias) => alias.tabId === rootTarget.tabId)
-          detachAnnouncedSession(client, announced.sessionId)
-        }
-        continue
-      }
-      const childTarget = registry.childTargets.get(announced.sessionId)
-      if (childTarget && !cdpRouter.canSeeTab(client, childTarget.tabId)) {
-        cdpClients.removeClientTargetAliases(client, (alias) => alias.tabId === childTarget.tabId)
-        detachAnnouncedSession(client, announced.sessionId)
+        cdpRouter.reconcileClient(client)
       }
     }
   }
 
   function reconcileTargetOwnership(change: TargetOwnershipChange): void {
     for (const client of cdpClients) {
-      cdpRouter.pruneInvisibleAliases(client, change.tabIds)
-      pruneInvisibleAnnouncementsForClient(client)
+      cdpRouter.reconcileClient(client)
     }
     for (const targetId of change.targetIds) {
       const target = registry.targetsByTargetId.get(targetId)
@@ -1795,72 +1462,19 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
   }
 
-  function detachAnnouncedSession(client: WebSocket, sessionId: string): void {
-    const announcements = cdpClients.announcements(client)
-    const targetId = announcements?.sessionTargets.get(sessionId)
-    const announced = targetId ? announcements?.targets.get(targetId) : undefined
-    removeAnnouncedSession(announcements, sessionId)
-    if (targetId && announced) {
-      sendCdpEvent(client, {
-        ...(announced.parentSessionId === undefined ? {} : { sessionId: announced.parentSessionId }),
-        method: "Target.detachedFromTarget",
-        params: { sessionId, targetId },
-      })
-    }
-  }
-
-  function logDuplicateTargetAnnouncement(duplicate: { readonly targetId: string; readonly oldSessionId: string; readonly newSessionId: string }): void {
-    console.error(`Deduped duplicate target announcement for ${duplicate.targetId}: ${duplicate.oldSessionId} -> ${duplicate.newSessionId}`)
-  }
-
   function announceAttachedTarget(target: ConnectedTarget): void {
     for (const client of cdpClients) {
       if (cdpRouter.canSeeTarget(client, target)) {
-        sendAttachedToTarget({ socket: client, announcements: cdpClients.announcements(client), target, onDuplicateTarget: logDuplicateTargetAnnouncement })
+        cdpClients.announce(client, target)
       }
     }
   }
 
   function announceAttachedChildTarget(rootSessionId: string, target: ChildTarget): void {
     for (const client of cdpClients) {
-      if (hasAnnouncedSession(cdpClients.announcements(client), rootSessionId)) {
-        sendAttachedToChildTarget({ socket: client, announcements: cdpClients.announcements(client), target, onDuplicateTarget: logDuplicateTargetAnnouncement })
+      if (cdpClients.hasSession(client, rootSessionId) && cdpRouter.canSeeTab(client, target.tabId)) {
+        cdpClients.announce(client, target)
       }
-    }
-  }
-
-  // Resolves true once a default Runtime.executionContextCreated event arrives
-  // for the session, or false when none arrives within the wait window.
-  function waitForDefaultRuntimeContext(sessionId: string): Effect.Effect<boolean> {
-    return Effect.callback<boolean>((resume) => {
-      const timeout = setTimeout(() => {
-        runtimeContextWaiters.delete(onEvent)
-        resume(Effect.succeed(false))
-      }, 3_000)
-      const onEvent = (event: CdpEvent) => {
-        if (event.sessionId !== sessionId || event.method !== "Runtime.executionContextCreated") {
-          return
-        }
-        const context = getObject(event.params?.context)
-        const auxData = getObject(context?.auxData)
-        if (auxData?.isDefault !== true) {
-          return
-        }
-        clearTimeout(timeout)
-        runtimeContextWaiters.delete(onEvent)
-        resume(Effect.succeed(true))
-      }
-      runtimeContextWaiters.add(onEvent)
-      return Effect.sync(() => {
-        clearTimeout(timeout)
-        runtimeContextWaiters.delete(onEvent)
-      })
-    })
-  }
-
-  function notifyRuntimeContextWaiters(event: CdpEvent): void {
-    for (const waiter of runtimeContextWaiters) {
-      waiter(event)
     }
   }
 
@@ -1882,6 +1496,13 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         catch: (cause) => cause instanceof Error ? cause : new Error("Restore Browser Control sessions", { cause }),
       })
       catalogWritesEnabled = true
+      if (managed) {
+        yield* audit(yield* RelayLifecycleEvent.cases.Ready.makeEffect({
+          instanceId: browserId,
+          buildId: browserControlBuildId,
+          ...(Option.isSome(restartRequestId) ? { restartRequestId: restartRequestId.value } : {}),
+        }))
+      }
       relayReady = true
     }),
     (error) => Effect.gen(function* () {
@@ -1900,7 +1521,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
 
 function sendUpgradeError(options: {
   readonly socket: stream.Duplex
-  readonly status: 400 | 403 | 404
+  readonly status: 400 | 403 | 404 | 503
   readonly message: string
 }): void {
   const statusText = options.status === 400 ? "Bad Request" : options.status === 403 ? "Forbidden" : "Not Found"

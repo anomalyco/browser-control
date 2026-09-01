@@ -1,11 +1,11 @@
-export type JsonPrimitive = string | number | boolean | null
+type JsonPrimitive = string | number | boolean | null
 
 export type JsonValue = JsonPrimitive | JsonValue[] | { readonly [key: string]: JsonValue }
 
 export type JsonObject = { readonly [key: string]: JsonValue }
 
 export const extensionProtocolVersion = 2
-export const legacyExtensionProtocolVersion = 1
+const legacyExtensionProtocolVersion = 1
 
 export type ExtensionProtocolCompatibility = {
   readonly version: number | null

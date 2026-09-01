@@ -9,7 +9,7 @@ import type {
 const defaultTimeoutMs = 30_000
 const defaultMaxResponseBytes = 2_000_000
 
-export class AuthenticatedOriginError extends Schema.TaggedErrorClass<AuthenticatedOriginError>()(
+export class AuthenticatedOriginError extends Schema.TaggedError<AuthenticatedOriginError>()(
   "AuthenticatedOrigin.Error",
   {
     message: Schema.String,

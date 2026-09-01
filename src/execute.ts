@@ -1,4 +1,4 @@
-import { Effect, Schema, Scope } from "effect"
+import { Effect, Schema } from "effect"
 import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type ElementHandle, type Frame, type Locator, type Page } from "playwright-core"
 import * as acorn from "acorn"
 import fs from "node:fs"
@@ -21,7 +21,7 @@ import * as NetworkCapture from "./network-capture.ts"
 import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest, ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary, ExecuteMedia } from "./relay-schema.ts"
 import type { SessionTarget } from "./relay-types.ts"
 import { executionContextFailureDiagnostic, runtimeFailureKind } from "./runtime-diagnostics.ts"
-import { ariaSnapshotWithoutTextControlValues } from "./aria-snapshot.ts"
+import { ariaSnapshotWithoutTextControlValues, registerAriaSnapshotSelector } from "./aria-snapshot.ts"
 
 const nodeModules = { fs, path, os, crypto, url, util, events, stream, buffer, http, https, zlib }
 const nodeModuleAliases = Object.keys(nodeModules).join(", ")
@@ -30,12 +30,13 @@ const playwrightCloseTimeoutMs = 2_000
 const playwrightConnectTimeoutMs = 15_000
 const sessionPageHealthCheckTimeoutMs = 3_000
 const sessionPageHealthRetryDelayMs = 100
+const handoffPageContextTimeoutMs = 15_000
 const timedOut = Symbol("timed-out")
 export const downloadCapabilityErrorMessage = "Downloads are unavailable in Browser Control extension-backed tabs: Chromium blocks Browser.setDownloadBehavior and Page.setDownloadBehavior through chrome.debugger, so Playwright cannot retain an artifact for download.saveAs(). Fetch the response in the page and write the returned bytes with fs when the site exposes them."
 const downloadGuardedPages = new WeakSet<Page>()
 const downloadGuardedContexts = new WeakSet<BrowserContext>()
 
-export class PlaywrightOperationError extends Schema.TaggedErrorClass<PlaywrightOperationError>()(
+class PlaywrightOperationError extends Schema.TaggedError<PlaywrightOperationError>()(
   "Execute.PlaywrightOperationError",
   {
     message: Schema.String,
@@ -45,7 +46,7 @@ export class PlaywrightOperationError extends Schema.TaggedErrorClass<Playwright
   },
 ) {}
 
-export class SessionPageRecoveryError extends Schema.TaggedErrorClass<SessionPageRecoveryError>()(
+class SessionPageRecoveryError extends Schema.TaggedError<SessionPageRecoveryError>()(
   "Execute.SessionPageRecoveryError",
   {
     message: Schema.String,
@@ -54,7 +55,7 @@ export class SessionPageRecoveryError extends Schema.TaggedErrorClass<SessionPag
   },
 ) {}
 
-export class TargetSelectionError extends Schema.TaggedErrorClass<TargetSelectionError>()(
+export class TargetSelectionError extends Schema.TaggedError<TargetSelectionError>()(
   "Execute.TargetSelectionError",
   {
     message: Schema.String,
@@ -173,6 +174,37 @@ export async function waitForPageContext(options: {
   throw lastError ?? new Error(`Execution context did not become available within ${options.timeoutMs}ms`)
 }
 
+export async function finishHandoff(options: {
+  readonly outcome: HandoffOutcome
+  readonly message: string
+  readonly timeoutMs: number
+  readonly evaluate: () => Promise<void>
+  readonly contextTimeoutMs?: number
+  readonly retryDelayMs?: number
+  readonly delay?: (milliseconds: number) => Promise<void>
+}): Promise<void> {
+  if (options.outcome === "timeout") {
+    throw new Error(`Handoff timed out after ${options.timeoutMs}ms waiting for the user: ${options.message}`)
+  }
+  if (options.outcome !== "resolved") {
+    const targetEvent = options.outcome.reason === "target-crashed" ? "crashed" : "detached"
+    throw new Error(`Handoff cancelled because its target ${targetEvent}: ${options.message}`)
+  }
+  await waitForPageContext({
+    evaluate: options.evaluate,
+    timeoutMs: options.contextTimeoutMs ?? sessionPageHealthCheckTimeoutMs,
+    ...(options.retryDelayMs === undefined ? {} : { retryDelayMs: options.retryDelayMs }),
+    ...(options.delay === undefined ? {} : { delay: options.delay }),
+  })
+}
+
+export function isSessionPageConnected(options: {
+  readonly browserConnected: boolean
+  readonly pageUrl: string | null
+}): boolean {
+  return options.browserConnected && options.pageUrl !== null
+}
+
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
@@ -243,15 +275,15 @@ const defaultHandoffTimeoutMs = 10 * 60 * 1_000
 
 const defaultHandoffMessage = "Complete the requested task, then use the in-page continue control."
 
-export type AriaSnapshotTarget = Locator | string
+type AriaSnapshotTarget = Locator | string
 
-export type AriaSnapshotOptions = {
+type AriaSnapshotOptions = {
   readonly timeout?: number
 }
 
 export type AriaSnapshotHelper = (target?: AriaSnapshotTarget, options?: AriaSnapshotOptions) => Promise<string>
 
-export type SnapshotOptions = {
+type SnapshotOptions = {
   readonly within?: AriaSnapshotTarget
   readonly interactive?: boolean
   readonly compact?: boolean
@@ -305,7 +337,7 @@ type SnapshotBaseline = {
 type InputTarget = AriaSnapshotTarget
 
 export const defaultAriaSnapshotTimeoutMs = 5_000
-export const defaultSnapshotTimeoutMs = 10_000
+const defaultSnapshotTimeoutMs = 10_000
 
 type InputField = {
   readonly selector: InputTarget
@@ -361,8 +393,8 @@ export type AdoptTarget = {
 }
 
 export const defaultPageClosedWarning = "The session default page was closed; created a new page. References to the old page in state are stale."
-export const defaultPageRecoveredWarning = "The session default page was unresponsive; created a new page. References to the old page in state are stale."
-export const defaultPageCrashedWarning = "The session default page target crashed; checking it before the next execute."
+const defaultPageRecoveredWarning = "The session default page was unresponsive; created a new page. References to the old page in state are stale."
+const defaultPageCrashedWarning = "The session default page target crashed; checking it before the next execute."
 export const defaultPageReplacedWarning = "The session default page target was replaced; rebound to the same browser tab. References to the old page in state are stale."
 
 export const shouldCloseCurrentPageOnAdopt = (options: {
@@ -427,13 +459,6 @@ export class ExecuteSandbox {
   private boundPageClose: { readonly page: Page; readonly listener: () => void } | undefined
 
   constructor(readonly options: ExecuteSandboxOptions) {}
-
-  static scoped(options: ExecuteSandboxOptions): Effect.Effect<ExecuteSandbox, never, Scope.Scope> {
-    return Effect.acquireRelease(
-      Effect.sync(() => new ExecuteSandbox(options)),
-      (sandbox) => sandbox.close().pipe(Effect.ignore),
-    )
-  }
 
   execute(code: string, options: ExecuteOptions = {}): Effect.Effect<ExecuteResult> {
     return Effect.tryPromise({
@@ -548,61 +573,6 @@ export class ExecuteSandbox {
     }
   }
 
-  close(): Effect.Effect<void, Error> {
-    const sandbox = this
-    return Effect.gen(function* () {
-      const page = sandbox.page
-      const browser = sandbox.browser
-      const ownsOpenPage = page !== undefined && sandbox.ownsPage && !page.isClosed()
-      sandbox.browser = undefined
-      sandbox.page = undefined
-      sandbox.clearPageListeners()
-      sandbox.defaultPageTargetId = undefined
-      sandbox.ownsPage = false
-      sandbox.pageHealthCheckRequired = false
-      sandbox.pendingPageTarget = undefined
-      sandbox.notifyDefaultTargetChange()
-      yield* sandbox.networkCapture.cancel()
-
-      if (ownsOpenPage) {
-        yield* runPlaywrightOperation({
-          label: "Close sandbox page",
-          timeoutMs: playwrightCloseTimeoutMs,
-          run: () => page.close(),
-        }).pipe(Effect.ignore)
-      }
-      if (browser) {
-        yield* runPlaywrightOperation({
-          label: "Close sandbox browser connection",
-          timeoutMs: playwrightCloseTimeoutMs,
-          run: () => browser.close(),
-        }).pipe(Effect.ignore)
-      }
-    })
-  }
-
-  disconnect(): Effect.Effect<void, Error> {
-    const sandbox = this
-    return Effect.gen(function* () {
-      const browser = sandbox.browser
-      sandbox.browser = undefined
-      sandbox.page = undefined
-      sandbox.clearPageListeners()
-      sandbox.pageHealthCheckRequired = false
-      if (sandbox.defaultPageTargetId) {
-        sandbox.pendingPageTarget = { targetId: sandbox.defaultPageTargetId, warnReplaced: false }
-      }
-      yield* sandbox.networkCapture.cancel()
-      if (browser) {
-        yield* runPlaywrightOperation({
-          label: "Disconnect sandbox browser during relay shutdown",
-          timeoutMs: playwrightCloseTimeoutMs,
-          run: () => browser.close(),
-        }).pipe(Effect.ignore)
-      }
-    })
-  }
-
   disconnectSettled(): Effect.Effect<void, Error> {
     const sandbox = this
     return Effect.gen(function* () {
@@ -670,7 +640,7 @@ export class ExecuteSandbox {
           label: "Connect to the relay for session adoption",
           run: () => chromium.connectOverCDP(sandbox.options.endpointUrl, {
             timeout: playwrightConnectTimeoutMs,
-            ...(sandbox.options.sessionId ? { headers: { "Browser-Control-Session-Id": sandbox.options.sessionId } } : {}),
+            ...(sandbox.options.sessionId ? { headers: { "Browser-Control-Session-Id": sandbox.options.sessionId, "Browser-Control-Client-Kind": "sandbox" } } : {}),
           }),
         })
         sandbox.browser = browser
@@ -690,6 +660,10 @@ export class ExecuteSandbox {
         label: "Create a browser context for session adoption",
         run: () => browser.newContext(),
       }))
+      yield* Effect.tryPromise({
+        try: () => registerAriaSnapshotSelector(context),
+        catch: (cause) => cause instanceof Error ? cause : new Error("Register ARIA snapshot selector", { cause }),
+      })
       const selected = yield* Effect.tryPromise({
         try: () => waitForPageTarget({ context, targetId: target.targetId, timeoutMs: sessionPageHealthCheckTimeoutMs }),
         catch: (cause) => cause instanceof Error ? cause : new Error("Select page for session adoption", { cause }),
@@ -731,7 +705,7 @@ export class ExecuteSandbox {
       }
       this.browser = await chromium.connectOverCDP(this.options.endpointUrl, {
         timeout: playwrightConnectTimeoutMs,
-        ...(this.options.sessionId ? { headers: { "Browser-Control-Session-Id": this.options.sessionId } } : {}),
+        ...(this.options.sessionId ? { headers: { "Browser-Control-Session-Id": this.options.sessionId, "Browser-Control-Client-Kind": "sandbox" } } : {}),
       })
       this.page = undefined
       if (this.defaultPageTargetId) {
@@ -744,6 +718,7 @@ export class ExecuteSandbox {
       }
     }
     const context = this.browser.contexts()[0] ?? (await this.browser.newContext())
+    await registerAriaSnapshotSelector(context)
     installDownloadCapabilityGuards(context)
     const targetSelection = options.targetSelection
     const page = await this.getSessionPage({ context, ...(targetSelection ? { targetSelection } : {}) })
@@ -769,6 +744,7 @@ export class ExecuteSandbox {
       if (handoffPage.isClosed() || handoffPage.context() !== context) {
         throw new Error("handoff requires an open page in the current browser context")
       }
+      const followsDefaultPage = handoffPage === this.page
       const targetId = await pageTargetId(handoffPage)
       const outcome = await requestHandoff({
         message: handoffMessage,
@@ -777,13 +753,23 @@ export class ExecuteSandbox {
         ...(options?.start ? { start: options.start } : {}),
         ...(options?.start ? { cancelStart: () => Effect.runPromise(this.disconnectSettled()) } : {}),
       })
-      if (outcome === "timeout") {
-        throw new Error(`Handoff timed out after ${timeoutMs}ms waiting for the user: ${handoffMessage}`)
-      }
-      if (outcome !== "resolved") {
-        const targetEvent = outcome.reason === "target-crashed" ? "crashed" : "detached"
-        throw new Error(`Handoff cancelled because its target ${targetEvent}: ${handoffMessage}`)
-      }
+      await finishHandoff({
+        outcome,
+        message: handoffMessage,
+        timeoutMs,
+        contextTimeoutMs: handoffPageContextTimeoutMs,
+        evaluate: async () => {
+          try {
+            const currentPage = followsDefaultPage ? await this.getSessionPage({ context }) : handoffPage
+            await currentPage.evaluate(() => true)
+          } catch (error) {
+            if (error instanceof SessionPageRecoveryError && error.reason === "target-unavailable") {
+              throw new Error("Execution context is not available while the handoff destination settles", { cause: error })
+            }
+            throw error
+          }
+        },
+      })
       handoffTracker.count += 1
     }
     return {
@@ -912,10 +898,11 @@ export class ExecuteSandbox {
   }
 
   getStatus(): { readonly sessionId?: string; readonly connected: boolean; readonly pageUrl: string | null; readonly stateKeys: string[] } {
+    const pageUrl = this.page && !this.page.isClosed() ? this.page.url() : null
     return {
       ...(this.options.sessionId ? { sessionId: this.options.sessionId } : {}),
-      connected: Boolean(this.browser?.isConnected()),
-      pageUrl: this.page && !this.page.isClosed() ? this.page.url() : null,
+      connected: isSessionPageConnected({ browserConnected: Boolean(this.browser?.isConnected()), pageUrl }),
+      pageUrl,
       stateKeys: Object.keys(this.state),
     }
   }
@@ -2228,8 +2215,8 @@ async function hideScreenshotLabels(page: Page): Promise<void> {
 }
 
 const maxTrackedNavigations = 25
-export const maxCapturedPageLogs = 50
-export const maxCapturedScriptLogs = 100
+const maxCapturedPageLogs = 50
+const maxCapturedScriptLogs = 100
 
 type ExecuteLogCaptureSnapshot = {
   readonly logs: readonly ExecuteLogEntry[]
@@ -2544,7 +2531,7 @@ export function wrapCode(code: string): string {
   return code
 }
 
-export function wrapCodeWithModuleAliases(code: string): string {
+function wrapCodeWithModuleAliases(code: string): string {
   return `const { ${nodeModuleAliases} } = modules;\n{\n${wrapCode(code)}\n}`
 }
 
@@ -2688,13 +2675,9 @@ function convertJsonSafe(value: unknown, options: { readonly seen: WeakSet<objec
   if (typeof value !== "object") {
     return { omit: true, reason: `unsupported ${typeof value} value` }
   }
-  if (value instanceof Map) {
-    return convertMapJsonSafe(value, options)
-  }
-  if (value instanceof Set) {
-    return convertSetJsonSafe(value, options)
-  }
-  if (!isPlainJsonContainer(value)) {
+  const isMap = value instanceof Map
+  const isSet = !isMap && value instanceof Set
+  if (!isMap && !isSet && !isPlainJsonContainer(value)) {
     return { omit: true, reason: options.topLevel ? "class instance" : "class instance property" }
   }
   if (options.seen.has(value)) {
@@ -2705,6 +2688,45 @@ function convertJsonSafe(value: unknown, options: { readonly seen: WeakSet<objec
   }
   options.seen.add(value)
   try {
+    if (isMap) {
+      try {
+        const output: Record<string, unknown> = {}
+        let entries: IterableIterator<[unknown, unknown]>
+        try {
+          entries = value.entries()
+        } catch {
+          return { omit: true, reason: options.topLevel ? "map entries unavailable" : "map property entries unavailable" }
+        }
+        for (const [key, item] of entries) {
+          if (typeof key !== "string") {
+            return { omit: true, reason: options.topLevel ? "map contains non-string key" : "map property contains non-string key" }
+          }
+          const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1, topLevel: false })
+          if (!converted.omit) output[key] = converted.value
+        }
+        return { omit: false, value: output }
+      } catch {
+        return { omit: true, reason: options.topLevel ? "map iteration failed" : "map property iteration failed" }
+      }
+    }
+    if (isSet) {
+      try {
+        const output: unknown[] = []
+        let values: IterableIterator<unknown>
+        try {
+          values = value.values()
+        } catch {
+          return { omit: true, reason: options.topLevel ? "set values unavailable" : "set property values unavailable" }
+        }
+        for (const item of values) {
+          const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1, topLevel: false })
+          output.push(converted.omit ? null : converted.value)
+        }
+        return { omit: false, value: output }
+      } catch {
+        return { omit: true, reason: options.topLevel ? "set iteration failed" : "set property iteration failed" }
+      }
+    }
     if (Array.isArray(value)) {
       let length: number
       try {
@@ -2747,67 +2769,6 @@ function convertJsonSafe(value: unknown, options: { readonly seen: WeakSet<objec
       }
     }
     return { omit: false, value: output }
-  } finally {
-    options.seen.delete(value)
-  }
-}
-
-function convertMapJsonSafe(value: Map<unknown, unknown>, options: { readonly seen: WeakSet<object>; readonly depth: number; readonly topLevel: boolean }): JsonSafeConversion {
-  if (options.seen.has(value)) {
-    return options.topLevel ? { omit: true, reason: "circular reference" } : { omit: true, reason: "circular property" }
-  }
-  if (options.depth >= maxJsonSafeDepth) {
-    return options.topLevel ? { omit: true, reason: "maximum object depth exceeded" } : { omit: true, reason: "nested value exceeded maximum depth" }
-  }
-  options.seen.add(value)
-  try {
-    const output: Record<string, unknown> = {}
-    let entries: IterableIterator<[unknown, unknown]>
-    try {
-      entries = value.entries()
-    } catch {
-      return { omit: true, reason: options.topLevel ? "map entries unavailable" : "map property entries unavailable" }
-    }
-    for (const [key, item] of entries) {
-      if (typeof key !== "string") {
-        return { omit: true, reason: options.topLevel ? "map contains non-string key" : "map property contains non-string key" }
-      }
-      const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1, topLevel: false })
-      if (!converted.omit) {
-        output[key] = converted.value
-      }
-    }
-    return { omit: false, value: output }
-  } catch {
-    return { omit: true, reason: options.topLevel ? "map iteration failed" : "map property iteration failed" }
-  } finally {
-    options.seen.delete(value)
-  }
-}
-
-function convertSetJsonSafe(value: Set<unknown>, options: { readonly seen: WeakSet<object>; readonly depth: number; readonly topLevel: boolean }): JsonSafeConversion {
-  if (options.seen.has(value)) {
-    return options.topLevel ? { omit: true, reason: "circular reference" } : { omit: true, reason: "circular property" }
-  }
-  if (options.depth >= maxJsonSafeDepth) {
-    return options.topLevel ? { omit: true, reason: "maximum object depth exceeded" } : { omit: true, reason: "nested value exceeded maximum depth" }
-  }
-  options.seen.add(value)
-  try {
-    const output: unknown[] = []
-    let values: IterableIterator<unknown>
-    try {
-      values = value.values()
-    } catch {
-      return { omit: true, reason: options.topLevel ? "set values unavailable" : "set property values unavailable" }
-    }
-    for (const item of values) {
-      const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1, topLevel: false })
-      output.push(converted.omit ? null : converted.value)
-    }
-    return { omit: false, value: output }
-  } catch {
-    return { omit: true, reason: options.topLevel ? "set iteration failed" : "set property iteration failed" }
   } finally {
     options.seen.delete(value)
   }

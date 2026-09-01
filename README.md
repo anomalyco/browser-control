@@ -170,8 +170,36 @@ journals and are rejected while session network capture is active. Reveal a
 sensitive result with `BrowserControlClient.reveal`; this keeps unwrapping in
 the same Effect runtime that created the redacted value, including when an
 application and Browser Control resolve separate Effect package instances.
+Client construction waits through a bounded extension reconnect window even
+when the matching relay was already running. A session summary reports
+`connected: true` only when its Playwright transport and live default page are
+both available.
 Use `resetSession(id)` to replace a persisted session generation that is no
 longer connected before creating a new authenticated-origin capability.
+
+Applications with a generated direct client can also consume a Secret Profile
+without requiring users to wrap the application in `browser-control secrets
+run`:
+
+```ts
+import { SecretProfile } from "@opencode-ai/browser-control"
+import { Effect } from "effect"
+
+const result = await Effect.runPromise(SecretProfile.run({
+  name: "github",
+  command: process.execPath,
+  args: ["./github-cli.js", "repositories"],
+}))
+
+process.stdout.write(result.stdout)
+process.stderr.write(result.stderr)
+process.exitCode = result.exitCode
+```
+
+The child receives `BC_SECRET_N` variables. The parent never receives their raw
+values, and known values are redacted from bounded child output. `status()`
+returns metadata only; the public SDK intentionally does not expose raw profile
+reads.
 
 ## Work in Sessions
 
@@ -382,8 +410,17 @@ Current limitations:
   running relay automatically.
 - **After an npm upgrade**: reload the unpacked extension. Extension and relay
   versions may differ when they use the same reported protocol version.
-- **Stale relay warning**: run `browser-control doctor`, stop the old relay
-  process it identifies, then rerun a relay-backed command.
+- **Stale relay warning**: ordinary commands never replace a running relay.
+  Coordinate with other users, finish recordings and raw CDP work, then run
+  `browser-control relay restart`. It drains accepted work and preserves tabs
+  and durable session identity, but JavaScript state and snapshot refs reset.
+  A busy/timeout result leaves the relay running. Legacy relays without safe
+  shutdown protocol 2 need a one-time coordinated manual stop; the new CLI will
+  not force-kill them or downgrade a newer relay.
+- **Who restarted the relay?** Inspect the private
+  `~/.browser-control/relays/<port>/lifecycle.jsonl` records for requester, build,
+  instance, and outcome metadata. Browser URLs and executed code are not recorded
+  there.
 For PowerShell, print the unpacked extension path with:
 
 ```powershell
@@ -396,14 +433,48 @@ Join-Path (npm root --global) "@opencode-ai/browser-control/extension/dist"
 git clone git@github.com:anomalyco/browser-control.git
 cd browser-control
 pnpm install
-pnpm build
-bun link
-
 pnpm typecheck
 pnpm test
-pnpm build
-SMOKE_CASE=oopif-reconnect pnpm smoke
+pnpm check:unused
+pnpm check:locals
+pnpm audit:duplicates
+
+# Fresh paths outside this checkout; parent directories must exist.
+mkdir -p "$HOME/.browser-control/builds" "$HOME/.browser-control/runtimes"
+pnpm runtime:prepare \
+  --staging "$HOME/.browser-control/builds/candidate-1" \
+  --install "$HOME/.browser-control/runtimes/candidate-1"
+
+# Select only after validation. This does not restart the relay.
+pnpm runtime:select \
+  --install "$HOME/.browser-control/runtimes/candidate-1" \
+  --active "$HOME/.browser-control/active"
+export PATH="$HOME/.browser-control/active/bin:$PATH"
 ```
+
+For occasional whole-codebase audits, `pnpm exec knip --production` excludes test
+usage. Review its findings rather than requiring a clean result: an export used
+only by tests can still have production callers inside its own module. Normal
+`pnpm check:unused` remains the CI gate.
+
+Use the same `active/bin/browser-control-mcp` path in MCP configuration. Do not
+`bun link` the active tool into the checkout: changing dependencies or rebuilding
+`dist` would also change what other agents execute. Retain previous installation
+directories while existing processes may still load resources from them. Selecting
+an older installation does not authorize a daemon downgrade.
+
+`pnpm runtime:check-lifecycle --previous /absolute/install-a --candidate
+/absolute/install-b` checks two validated protocol-2 installations on a private
+temporary home and loopback port using a fake extension. The candidate must have
+a later build id. It verifies non-replacement by ordinary CLI/MCP clients,
+explicit restart attribution, synthetic adopted-target restoration, and downgrade
+refusal. It does not prove real-browser tab continuity or cross-release
+compatibility when both installations came from the same source revision.
+
+For a build-only check, `pnpm build:cli --outdir /absolute/fresh-external-directory`
+redirects bundles and declarations together. Candidate preparation never writes
+checkout `dist`, `node_modules`, or the loaded `extension/dist`. Explicitly run
+`browser-control relay restart` when ready to replace the active daemon.
 
 Extension source changes require `pnpm build:extension` and reloading the
 unpacked extension. Relay-only changes require rebuilding or restarting the

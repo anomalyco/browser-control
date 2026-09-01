@@ -1,4 +1,4 @@
-import type { CdpClientPool } from "./cdp-client-pool.ts"
+import { ClientCdpSessionAlias, type CdpClientPool } from "./cdp-client-pool.ts"
 import { canClientSeeTarget } from "./cdp-visibility.ts"
 import type { TargetInfo } from "./protocol.ts"
 import { isRestrictedTarget } from "./relay-helpers.ts"
@@ -19,7 +19,7 @@ export function isRootRoutableBrowserContextMethod(method: string): boolean {
 
 export type CdpRoutedSession = {
   readonly tabId: number
-  readonly rootSessionId?: string
+  readonly rootSessionId: string
   readonly chromeSessionId?: string
 }
 
@@ -30,7 +30,7 @@ export class CdpRouter<Client extends object> {
   ) {}
 
   canSeeTarget(client: Client, target: ConnectedTarget): boolean {
-    return this.canSessionSeeTarget(this.clients.sessionId(client), target)
+    return this.clients.has(client) && this.canSessionSeeTarget(this.clients.sessionId(client), target)
   }
 
   canSessionSeeTarget(clientSessionId: string | undefined, target: ConnectedTarget): boolean {
@@ -66,7 +66,7 @@ export class CdpRouter<Client extends object> {
   }
 
   isBrowserAlias(client: Client, sessionId: string): boolean {
-    return this.clients.alias(client, sessionId)?.kind === "browser"
+    return ClientCdpSessionAlias.$is("Browser")(this.clients.alias(client, sessionId))
   }
 
   visibleRoots(client: Client): ConnectedTarget[] {
@@ -90,7 +90,7 @@ export class CdpRouter<Client extends object> {
     readonly sessionId?: string
   }): ConnectedTarget | ChildTarget | undefined {
     const alias = options.sessionId ? this.clients.alias(client, options.sessionId) : undefined
-    const aliasedTargetId = alias?.kind === "target" ? alias.targetId : undefined
+    const aliasedTargetId = ClientCdpSessionAlias.$is("Target")(alias) ? alias.targetId : undefined
     const target = (options.targetId
       ? this.registry.targetsByTargetId.get(options.targetId) ?? this.registry.childTargetsByTargetId.get(options.targetId)
       : undefined) ??
@@ -108,8 +108,8 @@ export class CdpRouter<Client extends object> {
 
   session(client: Client, requestedSessionId: string): CdpRoutedSession | undefined {
     const sessionAlias = this.clients.alias(client, requestedSessionId)
-    if (sessionAlias?.kind === "browser") return undefined
-    const alias = sessionAlias?.kind === "target" ? sessionAlias : undefined
+    if (ClientCdpSessionAlias.$is("Browser")(sessionAlias)) return undefined
+    const alias = ClientCdpSessionAlias.$is("Target")(sessionAlias) ? sessionAlias : undefined
     const target = alias
       ? this.registry.targetsByTargetId.get(alias.targetId) ?? this.registry.childTargetsByTargetId.get(alias.targetId)
       : this.registry.targets.get(requestedSessionId) ?? this.registry.childTargets.get(requestedSessionId)
@@ -125,10 +125,8 @@ export class CdpRouter<Client extends object> {
     }
   }
 
-  pruneInvisibleAliases(client: Client, tabIds: Iterable<number>): void {
-    const invisibleTabIds = new Set(Array.from(tabIds).filter((tabId) => !this.canSeeTab(client, tabId)))
-    if (invisibleTabIds.size === 0) return
-    this.clients.removeClientTargetAliases(client, (alias) => invisibleTabIds.has(alias.tabId))
+  reconcileClient(client: Client): void {
+    this.clients.pruneInvisible(client, (tabId) => this.canSeeTab(client, tabId))
   }
 
   visibleTargetInfos(client: Client): TargetInfo[] {

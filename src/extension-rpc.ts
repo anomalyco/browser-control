@@ -97,20 +97,16 @@ export class ExtensionRpc {
   }
 
   rejectPending(error: Error): void {
-    for (const [id, pending] of this.pendingRequests.entries()) {
-      clearTimeout(pending.timeout)
-      this.pendingRequests.delete(id)
+    for (const pending of this.pendingRequests.values()) {
       pending.reject(error)
     }
   }
 
   rejectDebuggerCommandsForTab(tabId: number, error: Error): void {
-    for (const [id, pending] of this.pendingRequests.entries()) {
+    for (const pending of this.pendingRequests.values()) {
       if (pending.debuggerTabId !== tabId) {
         continue
       }
-      clearTimeout(pending.timeout)
-      this.pendingRequests.delete(id)
       pending.reject(error)
     }
   }
@@ -120,8 +116,6 @@ export class ExtensionRpc {
     if (!pending) {
       return false
     }
-    clearTimeout(pending.timeout)
-    this.pendingRequests.delete(response.id)
     if (response.error) {
       pending.reject(new Error(response.error))
       return true
@@ -173,7 +167,6 @@ export class ExtensionRpc {
         reject: (error) => {
           finish(Effect.fail(error))
         },
-        timeout,
         ...(debuggerTabId === undefined ? {} : { debuggerTabId }),
       })
       try {

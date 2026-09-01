@@ -10,6 +10,7 @@ import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import util from "node:util"
+import { registerAriaSnapshotSelector } from "../src/aria-snapshot.ts"
 import { createAriaSnapshotHelper } from "../src/execute.ts"
 import { getObject } from "../src/relay-helpers.ts"
 import { browserControlBuildId } from "../src/version.ts"
@@ -990,8 +991,8 @@ return { result: await page.locator('#class-result').textContent() }
     name: "handoff-navigation",
     run: Effect.fnUntraced(function* (page) {
       const extension = yield* fetchStatus()
-      if (extension.protocolVersion !== 1 || extension.protocolCompatible !== true) {
-        return yield* Effect.fail(new Error(`handoff-navigation requires extension protocol 1; connected extension reports ${extension.protocolVersion ?? "unknown"}`))
+      if ((extension.protocolVersion ?? 0) < 1 || extension.protocolCompatible !== true) {
+        return yield* Effect.fail(new Error(`handoff-navigation requires a compatible extension protocol; connected extension reports ${extension.protocolVersion ?? "unknown"}`))
       }
       const marker = `bc-handoff-${Date.now()}`
       const smokeSession = `${marker}-session`
@@ -1006,7 +1007,7 @@ return { result: await page.locator('#class-result').textContent() }
             "execute",
             "--session",
             smokeSession,
-            `await handoff('Navigate and resume ${marker}', { timeoutMs: 30000 }); return { resumed: true, url: page.url() }`,
+            `await handoff('Navigate and resume ${marker}', { timeoutMs: 30000 }); return { resumed: true, url: page.url(), view: await snapshot({ maxItems: 20 }) }`,
           ]).pipe(Effect.forkChild)
           yield* Effect.sleep("500 millis")
           const ownerPage = yield* scopedOwnerCdpPage({ sessionId: smokeSession, urlIncludes: marker })
@@ -1023,7 +1024,7 @@ return { result: await page.locator('#class-result').textContent() }
 
           yield* ownerPage.evaluate(`document.querySelector('#__browser_control_page_status__')?.shadowRoot?.querySelector('button')?.click()`)
           const output = yield* Fiber.join(executeFiber)
-          if (!output.includes("resumed: true") || !output.includes(fixture.afterUrl)) {
+          if (!output.includes("resumed: true") || !output.includes(fixture.afterUrl) || !output.includes('button "Unrelated page button"')) {
             return yield* Effect.fail(new Error(`handoff did not resume on the navigated page: ${output}`))
           }
           return output.trim()
@@ -1035,8 +1036,8 @@ return { result: await page.locator('#class-result').textContent() }
     name: "handoff-cross-tab",
     run: Effect.fnUntraced(function* (page) {
       const extension = yield* fetchStatus()
-      if (extension.protocolVersion !== 1 || extension.protocolCompatible !== true) {
-        return yield* Effect.fail(new Error(`handoff-cross-tab requires extension protocol 1; connected extension reports ${extension.protocolVersion ?? "unknown"}`))
+      if ((extension.protocolVersion ?? 0) < 1 || extension.protocolCompatible !== true) {
+        return yield* Effect.fail(new Error(`handoff-cross-tab requires a compatible extension protocol; connected extension reports ${extension.protocolVersion ?? "unknown"}`))
       }
       const marker = `bc-handoff-a-${Date.now()}`
       const peerMarker = `bc-handoff-b-${Date.now()}`
@@ -1590,6 +1591,7 @@ const withPage = Effect.fnUntraced(function* <A>(run: (page: Page) => Effect.Eff
     Effect.gen(function* () {
       const browser = yield* scopedBrowser()
       const context = yield* playwright("get browser context", () => getBrowserContext(browser))
+      yield* playwright("register ARIA snapshot selector", () => registerAriaSnapshotSelector(context))
       const page = yield* playwright("create page", () => context.newPage())
       return yield* run(page).pipe(Effect.ensuring(boundedCleanup("close smoke page", () => page.close())))
     }),
