@@ -106,7 +106,7 @@ type ActiveCapture = {
   readonly pending: Map<Request, PendingEntry>
   readonly entries: CapturedEntry[]
   readonly finalizeQueue: FinalizeWork[]
-  readonly finalizeWaiters: Array<() => void>
+  readonly finalizeWaiters: Set<() => void>
   readonly liveCollector: SecretCollector
   finalizeWorkers: number
   finalizeGeneration: number
@@ -155,7 +155,7 @@ export class Recorder {
           pending: new Map(),
           entries: [],
           finalizeQueue: [],
-          finalizeWaiters: [],
+          finalizeWaiters: new Set(),
           liveCollector: new SecretCollector(),
           finalizeWorkers: 0,
           finalizeGeneration: 0,
@@ -778,10 +778,12 @@ async function bodyWithTimeout(response: Response, timeoutMs: number): Promise<B
 async function settleFinalizers(active: ActiveCapture, timeoutMs: number): Promise<boolean> {
   if (active.pending.size === 0 && active.finalizeQueue.length === 0 && active.finalizeWorkers === 0) return true
   let timeout: NodeJS.Timeout | undefined
+  let waiter: (() => void) | undefined
   try {
     return await Promise.race([
       new Promise<true>((resolve) => {
-        active.finalizeWaiters.push(() => resolve(true))
+        waiter = () => resolve(true)
+        active.finalizeWaiters.add(waiter)
       }),
       new Promise<false>((resolve) => {
         timeout = setTimeout(() => resolve(false), timeoutMs)
@@ -789,12 +791,14 @@ async function settleFinalizers(active: ActiveCapture, timeoutMs: number): Promi
     ])
   } finally {
     if (timeout) clearTimeout(timeout)
+    if (waiter) active.finalizeWaiters.delete(waiter)
   }
 }
 
 function notifyFinalizersSettled(active: ActiveCapture): void {
   if (active.pending.size > 0 || active.finalizeQueue.length > 0 || active.finalizeWorkers > 0) return
-  for (const resolve of active.finalizeWaiters.splice(0)) resolve()
+  for (const resolve of active.finalizeWaiters) resolve()
+  active.finalizeWaiters.clear()
 }
 
 function safeValue<A>(read: () => A, fallback: A): A {

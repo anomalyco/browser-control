@@ -21,6 +21,7 @@ describe("runtime diagnostics", () => {
       pageErrorCount: 0,
       handoffs: 0,
     })).toBe("execution-context/context-destroyed; pageClosed=false; urlChanged=true; mainFrameNavigations=1")
+    expect(runtimeFailureKind(new Error("Frame was detached"))).toBe("context-missing")
   })
 
   it("classifies cross-extension navigation failures", () => {

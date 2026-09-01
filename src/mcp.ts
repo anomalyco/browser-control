@@ -162,7 +162,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       }),
       readOnly: false,
       destructive: true,
-      idempotent: false,
+      idempotent: true,
       handle: (input) => Effect.gen(function* () {
         const id = optionalStringField(input, "id") ?? currentSession.id
         const result = yield* relay.sessionDelete(id)
@@ -219,10 +219,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         if (explicitSession) {
           yield* ensureSessionExists(relay, sessionId)
         } else {
-          const sessions = yield* relay.sessions
-          if (!sessions.some((session) => session.id === sessionId)) {
-            yield* relay.sessionNew(sessionId)
-          }
+          yield* relay.sessionEnsure(sessionId)
           currentSession.established = true
         }
         yield* RelayLifecycle.ensureExtensionConnected({ relay, waitForReconnect: true })
@@ -423,7 +420,7 @@ export function mcpToolRequiresRelayCompatibility(name: string): boolean {
 export const mcpServerLayer = McpServer.layerStdio({
   name: "browser-control",
   version: browserControlVersion,
-  protocols: [McpProtocol.v2025_06_18, McpProtocol.v2025_03_26, McpProtocol.v2024_11_05],
+  protocols: [McpProtocol.v2025_06_18, McpProtocol.v2025_11_25, McpProtocol.v2025_03_26, McpProtocol.v2024_11_05],
 })
 
 export const mcpToolsLayer = Layer.mergeAll(relayLayer, Layer.effectDiscard(registerTools))

@@ -7,7 +7,7 @@ import * as RelayClient from "../src/relay-client.ts"
 vi.mock("../src/version.ts", () => ({ browserControlVersion: "1.0.0", browserControlBuildId: "2026-08-31T12:00:00.000Z" }))
 
 describe("MCP protocol negotiation", () => {
-  it.each(["2025-06-18", "2025-03-26", "2024-11-05", "2024-10-07"])(
+  it.each(["2025-06-18", "2025-11-25", "2025-03-26", "2024-11-05", "2024-10-07"])(
     "negotiates an initialize offer for %s without a relay",
     async (protocolVersion) => {
       const response = await Effect.runPromise(Effect.gen(function* () {
@@ -158,6 +158,24 @@ describe("MCP tool results", () => {
     expect(mcpToolRequiresRelayCompatibility("secrets_status")).toBe(false)
     expect(mcpToolRequiresRelayCompatibility("session_current")).toBe(false)
     expect(mcpToolRequiresRelayCompatibility("skill")).toBe(false)
+  })
+
+  it("advertises session deletion as idempotent in registered tool metadata", async () => {
+    const tool = await Effect.runPromise(Effect.gen(function* () {
+      const server = yield* McpServer.McpServer.make
+      yield* Layer.build(mcpToolsLayer.pipe(
+        Layer.provide(Layer.succeed(McpServer.McpServer, server)),
+        Layer.provide(Layer.mock(RelayClient.Service, {
+          endpoint: "http://127.0.0.1:19989",
+          version: Effect.succeed({ version: "1.0.0", buildId: "2026-08-31T12:00:00.000Z" }),
+        })),
+      ))
+      return server.tools.find(({ tool }) => tool.name === "session_delete")?.tool
+    }).pipe(Effect.scoped))
+    expect(tool).toMatchObject({
+      name: "session_delete",
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+    })
   })
 
   it("marks execute script failures as failed MCP tool calls", () => {

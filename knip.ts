@@ -3,10 +3,8 @@ import type { KnipConfig } from "knip"
 export default {
   // Trailing ! keeps runtime roots in the optional --production audit.
   entry: [
-    // Published SDK exports remain public; do not enable includeEntryExports.
+    // The SDK entry exposes public namespaces; do not enable includeEntryExports.
     "src/index.ts!",
-    // index.ts exposes this module through its self-re-exported public namespaces.
-    "src/browser-control-client.ts!",
     "src/cli.ts!",
     "src/mcp-main.ts!",
     // Browser-loaded roots from manifest.json, offscreen.html, and build-extension.ts.

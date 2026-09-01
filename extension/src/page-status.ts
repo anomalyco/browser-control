@@ -1,4 +1,4 @@
-import type { JsonObject, PageStatus } from "../../src/protocol.ts"
+import { isJsonObject, type PageStatus } from "../../src/protocol.ts"
 
 export type PageStatusView = {
   readonly label: string
@@ -51,22 +51,23 @@ export function pageStatusView(status: PageStatus): PageStatusView {
   }
 }
 
-export function pageStatusFromJson(value: JsonObject | undefined): PageStatus | undefined {
-  const state = value?.state
-  const owner = value?.owner
+export function pageStatusFromJson(value: unknown): PageStatus | undefined {
+  if (!isJsonObject(value)) return undefined
+  const state = value.state
+  const owner = value.owner
   if ((state !== "attached" && state !== "running" && state !== "waiting") || (owner !== "session" && owner !== "user")) {
     return undefined
   }
-  const message = value?.message
-  const handoffId = value?.handoffId
+  const message = value.message
+  const handoffId = value.handoffId
   if (state === "waiting" && (typeof message !== "string" || typeof handoffId !== "string")) {
     return undefined
   }
   return {
     state,
     owner,
-    ...(typeof value?.sessionId === "string" ? { sessionId: value.sessionId } : {}),
-    ...(value?.readOnly === true ? { readOnly: true } : {}),
+    ...(typeof value.sessionId === "string" ? { sessionId: value.sessionId } : {}),
+    ...(value.readOnly === true ? { readOnly: true } : {}),
     ...(typeof message === "string" ? { message } : {}),
     ...(typeof handoffId === "string" ? { handoffId } : {}),
   }

@@ -14,7 +14,7 @@ export function runtimeFailureKind(cause: unknown): RuntimeFailureKind {
     if (/execution context was destroyed|context.*destroyed/i.test(message)) {
       return "context-destroyed"
     }
-    if (/cannot find context with (?:specified )?id|execution context.*(?:not found|not available|does not exist)|context.*detached frame/i.test(message)) {
+    if (/cannot find context with (?:specified )?id|execution context.*(?:not found|not available|does not exist)|context.*detached frame|frame (?:was|got) detached/i.test(message)) {
       return "context-missing"
     }
     if (/target page, context or browser has been closed|target closed|session closed/i.test(message)) {

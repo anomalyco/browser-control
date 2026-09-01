@@ -15,7 +15,7 @@ the result, logs, warnings, and a summary of what changed.
 
 ## Quick Start
 
-Browser Control requires Node.js 20 or newer and a Chromium-family browser such
+Browser Control requires Node.js 22.19 or newer and a Chromium-family browser such
 as Chrome, Brave, Edge, Arc, or Chromium.
 
 Setup has three parts: install the npm package, install the agent skill, and
@@ -196,8 +196,8 @@ process.stderr.write(result.stderr)
 process.exitCode = result.exitCode
 ```
 
-The child receives `BC_SECRET_N` variables. The parent never receives their raw
-values, and known values are redacted from bounded child output. `status()`
+The trusted child receives `BC_SECRET_N` variables. The parent never receives
+their raw values, and known values are redacted from bounded child output. `status()`
 returns metadata only; the public SDK intentionally does not expose raw profile
 reads.
 
@@ -230,6 +230,9 @@ result envelope. Delete the session when you finish:
 ```bash
 browser-control session delete docs
 ```
+
+Deletion is idempotent for an explicit session id, so cleanup can be safely
+retried when that session is already absent.
 
 ## Control an Existing Tab
 
@@ -271,8 +274,9 @@ of silently targeting a different control.
 
 Other inspection helpers include:
 
-- `ariaSnapshot()` for a deeper accessibility-tree view with text-control values
-  omitted; await it separately from other operations on the same page
+- `ariaSnapshot()` for a deeper accessibility-tree view with native text-control
+  values, custom ARIA range values, and editable content omitted; await it
+  separately from other operations on the same page
 - `screenshotWithLabels()` for an annotated screenshot and element metadata
 - `fillInput()` and `fillInputs()` when browser extensions interfere with
   Playwright's normal `locator.fill()`

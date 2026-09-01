@@ -1,4 +1,5 @@
-import { selectors, type BrowserContext, type Locator, type Page } from "playwright-core"
+import { selectors, type BrowserContext, type Frame, type Locator, type Page } from "playwright-core"
+import { runtimeFailureKind } from "./runtime-diagnostics.ts"
 
 const redactionCleanupErrorMessage = "Browser Control could not confirm ARIA snapshot value-redaction cleanup"
 // Keep the engine as source text so bundlers cannot inject Node-only helpers into the browser function.
@@ -14,8 +15,10 @@ const redactionSelectorSource = `({
       if (!state) {
         state = {
           tokens: new Set(),
+          editableNameAttributes: new Set(["alt", "aria-description", "aria-describedby", "aria-label", "aria-labelledby", "aria-placeholder", "placeholder", "title"]),
           nonTextInputTypes: new Set(["button", "checkbox", "file", "hidden", "image", "radio", "reset", "submit"]),
           valueAttributes: new Set(["aria-valuenow", "aria-valuetext", "value"]),
+          valueRoles: new Set(["meter", "progressbar", "scrollbar", "separator", "slider", "spinbutton"]),
           inputValue: Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value"),
           textareaValue: Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value"),
           nodeValue: Object.getOwnPropertyDescriptor(Node.prototype, "nodeValue"),
@@ -24,21 +27,51 @@ const redactionSelectorSource = `({
           getAttribute: Object.getOwnPropertyDescriptor(Element.prototype, "getAttribute"),
         }
         globalThis[stateKey] = state
-        const isRedactedControl = (element) => element instanceof HTMLTextAreaElement
+        const getAttribute = (element, name) => state.getAttribute.value.call(element, name)
+        const explicitEditableState = (element) => {
+          const value = getAttribute(element, "contenteditable")
+          if (value === null) return undefined
+          const normalized = value.trim().toLowerCase()
+          if (normalized === "false") return false
+          return normalized === "" || normalized === "true" || normalized === "plaintext-only" ? true : undefined
+        }
+        const composedParent = (node) => {
+          if (node.parentNode) return node.parentNode
+          const treeRoot = node.getRootNode?.()
+          return treeRoot instanceof ShadowRoot ? treeRoot.host : null
+        }
+        const isInEditableSubtree = (node) => {
+          let current = node.nodeType === Node.TEXT_NODE ? node.parentNode : node
+          while (current) {
+            if (current instanceof Element) {
+              const explicit = explicitEditableState(current)
+              if (explicit !== undefined) return explicit
+              if (current instanceof HTMLElement && current.isContentEditable) return true
+            }
+            current = composedParent(current)
+          }
+          return false
+        }
+        const isEditableDescendant = (element) => explicitEditableState(element) !== true && isInEditableSubtree(element)
+        const isNativeTextControl = (element) => element instanceof HTMLTextAreaElement
           || (element instanceof HTMLInputElement && !state.nonTextInputTypes.has(element.type))
-          || (element instanceof HTMLElement && element.isContentEditable)
+        const isValueRole = (element) => {
+          const role = getAttribute(element, "role")
+          return role !== null && role.trim().toLowerCase().split(/\\s+/).some((candidate) => state.valueRoles.has(candidate))
+        }
+        const hasRedactedText = (node) => isInEditableSubtree(node)
+          || (node.nodeType === Node.TEXT_NODE && node.parentElement && isNativeTextControl(node.parentElement))
         Object.defineProperty(HTMLInputElement.prototype, "value", {
           ...state.inputValue,
           get() {
-            return isRedactedControl(this) ? "" : state.inputValue.get.call(this)
+            return isNativeTextControl(this) ? "" : state.inputValue.get.call(this)
           },
         })
         Object.defineProperty(HTMLTextAreaElement.prototype, "value", { ...state.textareaValue, get() { return "" } })
         Object.defineProperty(Node.prototype, "nodeValue", {
           ...state.nodeValue,
           get() {
-            const parent = this.parentElement
-            return parent && isRedactedControl(parent)
+            return this.nodeType === Node.TEXT_NODE && hasRedactedText(this)
               ? ""
               : state.nodeValue.get.call(this)
           },
@@ -46,8 +79,7 @@ const redactionSelectorSource = `({
         Object.defineProperty(Node.prototype, "textContent", {
           ...state.textContent,
           get() {
-            const parent = this.parentElement
-            return isRedactedControl(this) || (this.nodeType === Node.TEXT_NODE && parent && isRedactedControl(parent))
+            return (this instanceof Element && isNativeTextControl(this)) || hasRedactedText(this)
               ? ""
               : state.textContent.get.call(this)
           },
@@ -55,16 +87,17 @@ const redactionSelectorSource = `({
         Object.defineProperty(HTMLElement.prototype, "innerText", {
           ...state.innerText,
           get() {
-            return isRedactedControl(this) ? "" : state.innerText.get.call(this)
+            return isNativeTextControl(this) || isInEditableSubtree(this) ? "" : state.innerText.get.call(this)
           },
         })
         Object.defineProperty(Element.prototype, "getAttribute", {
           ...state.getAttribute,
           value(name) {
-            const rawAttribute = String(name)
-            const attribute = state.valueAttributes.has(rawAttribute) ? rawAttribute : rawAttribute.toLowerCase()
-            if (!state.valueAttributes.has(attribute)) return state.getAttribute.value.call(this, name)
-            return isRedactedControl(this) ? null : state.getAttribute.value.call(this, name)
+            const attribute = String(name).toLowerCase()
+            if (state.valueAttributes.has(attribute)
+              && (isNativeTextControl(this) || isValueRole(this) || isInEditableSubtree(this))) return null
+            if (state.editableNameAttributes.has(attribute) && isEditableDescendant(this)) return null
+            return state.getAttribute.value.call(this, name)
           },
         })
       }
@@ -89,11 +122,12 @@ const redactionSelectorSource = `({
   },
 })`
 
+const redactionModuleId = globalThis.crypto.randomUUID().replaceAll("-", "")
 let nextRedactionSelector = 0
 let nextRedactionToken = 0
 const contextSelectors = new WeakMap<BrowserContext, Promise<string>>()
 const pageCleanup = new WeakMap<Page, {
-  readonly pendingTokens: Set<string>
+  readonly pendingTokens: Map<string, { readonly frame: Frame; readonly selectorName: string }>
   queue: Promise<void>
 }>()
 
@@ -103,7 +137,11 @@ export async function ariaSnapshotWithoutTextControlValues(
 ): Promise<string> {
   const page = locator.page()
   const redactionSelectorName = await selectorForContext(page.context())
-  const token = String(++nextRedactionToken)
+  const token = `${redactionModuleId}${++nextRedactionToken}`
+  const handle = await locator.elementHandle({ timeout: options.timeout })
+  if (!handle) throw new Error("ARIA snapshot target did not resolve to an element")
+  const frame = await handle.ownerFrame().finally(() => handle.dispose())
+  if (!frame) throw new Error("ARIA snapshot target is not attached to a frame")
   let snapshot: string | undefined
   let captureFailed = false
   let captureError: unknown
@@ -117,7 +155,7 @@ export async function ariaSnapshotWithoutTextControlValues(
   }
 
   try {
-    await cleanupRedaction(page, redactionSelectorName, token)
+    await cleanupRedaction(page, frame, redactionSelectorName, token)
   } catch (cleanupError) {
     if (captureFailed) {
       const cleanupReasons = cleanupError instanceof AggregateError ? cleanupError.errors : [cleanupError]
@@ -138,7 +176,7 @@ async function selectorForContext(context: BrowserContext): Promise<string> {
   const existing = contextSelectors.get(context)
   if (existing) return existing
 
-  const name = `bcariaredact${++nextRedactionSelector}`
+  const name = `bcariaredact${redactionModuleId}${++nextRedactionSelector}`
   const registration = selectors.register(
     name,
     { content: redactionSelectorSource },
@@ -151,23 +189,36 @@ async function selectorForContext(context: BrowserContext): Promise<string> {
   return registration
 }
 
-async function cleanupRedaction(page: Page, redactionSelectorName: string, token: string): Promise<void> {
+async function cleanupRedaction(page: Page, frame: Frame, redactionSelectorName: string, token: string): Promise<void> {
   let state = pageCleanup.get(page)
   if (!state) {
-    state = { pendingTokens: new Set(), queue: Promise.resolve() }
+    state = { pendingTokens: new Map(), queue: Promise.resolve() }
     pageCleanup.set(page, state)
   }
-  state.pendingTokens.add(token)
+  state.pendingTokens.set(token, { frame, selectorName: redactionSelectorName })
 
   const cleanup = state.queue.then(async () => {
-    const tokens = [...state.pendingTokens]
-    const results = await Promise.allSettled(page.frames().flatMap((frame) => tokens.map(async (pendingToken) => {
-      await frame.locator(`${redactionSelectorName}=off_${pendingToken}`).waitFor({ state: "attached", timeout: 1_000 })
-    })))
-    const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : [])
+    const pending = [...state.pendingTokens]
+    const results = await Promise.allSettled(pending.map(async ([pendingToken, target]) => {
+      await target.frame.locator(`${target.selectorName}=off_${pendingToken}`).waitFor({ state: "attached", timeout: 1_000 })
+    }))
+    const failures: unknown[] = []
+    for (let index = 0; index < results.length; index++) {
+      const result = results[index]!
+      const pendingToken = pending[index]![0]
+      if (result.status === "fulfilled" || redactionContextIsGone(result.reason)) {
+        state.pendingTokens.delete(pendingToken)
+      } else {
+        failures.push(result.reason)
+      }
+    }
     if (failures.length > 0) throw new AggregateError(failures, redactionCleanupErrorMessage)
-    for (const pendingToken of tokens) state.pendingTokens.delete(pendingToken)
   })
   state.queue = cleanup.catch(() => {})
   await cleanup
+}
+
+function redactionContextIsGone(cause: unknown): boolean {
+  const kind = runtimeFailureKind(cause)
+  return kind === "context-destroyed" || kind === "context-missing" || kind === "target-closed"
 }

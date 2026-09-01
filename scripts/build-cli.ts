@@ -26,25 +26,27 @@ const execFileAsync = promisify(execFile)
 if (dist === path.join(root, "dist")) await fs.rm(dist, { recursive: true, force: true })
 // A custom output is a fresh candidate, never permission to delete another tree.
 await fs.mkdir(dist)
-await build({
-  entryPoints: {
-    cli: path.join(root, "src", "cli.ts"),
-    index: path.join(root, "src", "index.ts"),
-    mcp: path.join(root, "src", "mcp-main.ts"),
-  },
-  bundle: true,
-  format: "esm",
-  platform: "node",
-  target: "node20",
-  packages: "external",
-  define: {
-    "globalThis.__BROWSER_CONTROL_VERSION__": JSON.stringify(packageJson.version),
-    "globalThis.__BROWSER_CONTROL_BUILD_ID__": JSON.stringify(buildId),
-  },
-  outdir: dist,
-})
-await execFileAsync(path.join(root, "node_modules", ".bin", "tsc"), [
-  "-p", path.join(root, "tsconfig.build.json"), "--outDir", path.join(dist, "types"),
+await Promise.all([
+  build({
+    entryPoints: {
+      cli: path.join(root, "src", "cli.ts"),
+      index: path.join(root, "src", "index.ts"),
+      mcp: path.join(root, "src", "mcp-main.ts"),
+    },
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    target: "node22",
+    packages: "external",
+    define: {
+      "globalThis.__BROWSER_CONTROL_VERSION__": JSON.stringify(packageJson.version),
+      "globalThis.__BROWSER_CONTROL_BUILD_ID__": JSON.stringify(buildId),
+    },
+    outdir: dist,
+  }),
+  execFileAsync(path.join(root, "node_modules", ".bin", "tsc"), [
+    "-p", path.join(root, "tsconfig.build.json"), "--outDir", path.join(dist, "types"),
+  ]),
 ])
 await fs.chmod(path.join(dist, "cli.js"), 0o755)
 await fs.chmod(path.join(dist, "mcp.js"), 0o755)

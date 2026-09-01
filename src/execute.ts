@@ -201,8 +201,9 @@ export async function finishHandoff(options: {
 export function isSessionPageConnected(options: {
   readonly browserConnected: boolean
   readonly pageUrl: string | null
+  readonly healthCheckRequired: boolean
 }): boolean {
-  return options.browserConnected && options.pageUrl !== null
+  return options.browserConnected && options.pageUrl !== null && !options.healthCheckRequired
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -496,7 +497,7 @@ export class ExecuteSandbox {
       },
     }).pipe(
       Effect.uninterruptible,
-      Effect.ensuring(Effect.promise(() => this.networkCapture.settleForOutput())),
+      Effect.tapError(() => Effect.promise(() => this.networkCapture.settleForOutput())),
       Effect.match({
         onFailure: (error): ExecuteResult => {
           const logSummary = error instanceof ExecuteCodeError ? error.logSummary : emptyExecuteLogSummary()
@@ -901,7 +902,11 @@ export class ExecuteSandbox {
     const pageUrl = this.page && !this.page.isClosed() ? this.page.url() : null
     return {
       ...(this.options.sessionId ? { sessionId: this.options.sessionId } : {}),
-      connected: isSessionPageConnected({ browserConnected: Boolean(this.browser?.isConnected()), pageUrl }),
+      connected: isSessionPageConnected({
+        browserConnected: Boolean(this.browser?.isConnected()),
+        pageUrl,
+        healthCheckRequired: this.pageHealthCheckRequired,
+      }),
       pageUrl,
       stateKeys: Object.keys(this.state),
     }

@@ -73,7 +73,7 @@ the publisher. See `docs/PRIVACY.md`.
 
 ## Reviewer Instructions
 
-1. Install Node.js 20 or later.
+1. Install Node.js 22.19 or later.
 2. Run `npm install --global @opencode-ai/browser-control`.
 3. Install the submitted Browser Control extension.
 4. Run:

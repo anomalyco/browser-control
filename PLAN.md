@@ -113,20 +113,11 @@ Verification:
 
 ## Recently Shipped
 
-### Unpacked extension connectivity survives browser and path differences
+### Session cleanup is safely repeatable
 
-The unpacked manifest carries a stable public key, while Store packaging strips
-it before creating the review ZIP. Extension readiness waits only for debugger
-inventory: Arc tab-group queries and restored-tab presentation run afterward,
-cannot mutate from stale sockets, serialize ownership changes per tab, and
-report failures through relay diagnostics.
-
-### Public clients tolerate extension reconnect windows
-
-`BrowserControlClient.make` gives a matching pre-existing relay the same bounded
-extension reconnect grace used after relay startup. Session summaries report
-connected only when the Playwright transport and a live default page are both
-available.
+Deleting a resolved session id is idempotent across HTTP, CLI, and MCP. The
+structured result reports whether a live session was deleted, while CLI cleanup
+retries no longer turn an already-absent session into a failure.
 
 ### Handoffs return on a live destination context
 
@@ -141,6 +132,21 @@ The extension registers a global `runtime.onStartup` listener so restarting the
 browser profile wakes its MV3 worker, repairs the reconnect alarm, and opens a
 fresh relay socket. The existing 20-second heartbeat keeps that socket active
 after reconnection.
+
+### Unpacked extension connectivity survives browser and path differences
+
+The unpacked manifest carries a stable public key, while Store packaging strips
+it before creating the review ZIP. Extension readiness waits only for debugger
+inventory: Arc tab-group queries and restored-tab presentation run afterward,
+cannot mutate from stale sockets, serialize ownership changes per tab, and
+report failures through relay diagnostics.
+
+### Public clients tolerate extension reconnect windows
+
+`BrowserControlClient.make` gives a matching pre-existing relay the same bounded
+extension reconnect grace used after relay startup. Session summaries report
+connected only when the Playwright transport and a live default page are both
+available.
 
 ### Tab-capture recordings stream with intrinsic framing
 
@@ -259,6 +265,8 @@ require a new extension capture protocol and permission model.
   artifact. Development uses isolated `runtime:prepare` / `runtime:select`
   installations rather than linking a mutable checkout into the live CLI/MCP.
   Candidate builds never overwrite the loaded unpacked extension directory.
+- The CLI, MCP server, and source toolchain require Node.js 22.19 or newer,
+  matching the minimum runtime supported by the pinned Effect Platform stack.
 - Until the first Store review completes, the browser extension is loaded
   unpacked from the npm package's `extension/dist` directory or a source build.
   Its current shim version is `0.0.24`. A manifest public key gives unpacked
@@ -382,10 +390,12 @@ reconciles existing client announcements, browser grouping, and page status.
 - `ref(id)` resolves controls from the latest valid snapshot and fails closed
   after navigation or incompatible DOM drift.
 - `ariaSnapshot()` and raw Playwright provide deeper inspection when compact
-  snapshots are insufficient. The helper omits text-control values so password,
-  token, search, numeric, range, and textarea contents do not enter tool output.
-  It must be awaited separately from other operations on the same page while its
-  isolated-world value mask is active.
+  snapshots are insufficient. The helper omits native text-control values,
+  custom ARIA range values, and editable content across SVG and open-shadow
+  boundaries. Each isolated-world mask is scoped to its activation frame and a
+  module-unique token, so concurrent guarded snapshots restore safely without
+  depending on unrelated frames. It must be awaited separately from other page
+  operations while the mask is active.
 - `screenshotWithLabels({ page, path? })` annotates likely interactive elements
   and returns label metadata.
 - `fillInput` and `fillInputs` provide a DOM-evaluation fallback when browser
@@ -540,6 +550,9 @@ relay reports both values so `doctor` can identify a stale long-running relay.
 It also reports an instance id, start time, and PID; bounded managed-relay
 process-fault diagnostics are retained locally so unexpected same-build
 restarts can be distinguished from session eviction.
+Explicit restart confirms the exact managed instance and safe shutdown protocol,
+then waits for that process to exit before starting the current build. Ordinary
+commands never replace a running relay.
 
 ## Known Limitations
 

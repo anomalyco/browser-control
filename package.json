@@ -1,11 +1,11 @@
 {
   "name": "@opencode-ai/browser-control",
-  "version": "0.4.0",
+  "version": "0.5.1",
   "description": "Local browser driver for trusted agents: control your existing Chromium-family browser through a small extension and a local relay.",
   "license": "MIT",
   "packageManager": "pnpm@11.20.0",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "repository": {
     "type": "git",
@@ -59,19 +59,19 @@
     "acorn": "^8.18.0",
     "effect": "4.0.0-rc.112",
     "playwright-core": "^1.62.1",
-    "ws": "^8.21.2"
+    "ws": "^8.21.3"
   },
   "devDependencies": {
-    "@changesets/cli": "^2.31.1",
-    "@types/chrome": "^0.2.5",
-    "@types/node": "^26.1.2",
+    "@changesets/cli": "^3.0.1",
+    "@types/chrome": "^0.2.7",
+    "@types/node": "^26.2.0",
     "@types/ws": "^8.18.1",
-    "esbuild": "^0.28.1",
+    "esbuild": "^0.28.2",
     "fflate": "^0.8.3",
     "jscpd": "^5.1.1",
     "knip": "^6.34.0",
-    "tsx": "4.23.8",
+    "tsx": "^4.23.12",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
   }
 }

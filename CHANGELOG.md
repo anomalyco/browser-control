@@ -1,5 +1,38 @@
 # @opencode-ai/browser-control
 
+## 0.5.1
+
+### Patch Changes
+
+- 73beb8a: Simplify session, target, recording, and extension lifecycles while avoiding duplicate network-capture settlement and stale finalizer waiters.
+
+## 0.5.0
+
+### Minor Changes
+
+- b26536f: Update Playwright, WebSocket, parser, package-manager, build, test, and TypeScript dependencies to their current compatible releases. Align the documented Node.js requirement with the Node 22.19 minimum required by the current Effect Platform runtime.
+
+### Patch Changes
+
+- 6994459: Wait through transient extension reconnects when constructing the TypeScript client and report sessions connected only when they have a live default page.
+- 3146cdc: Wait for the destination page execution context before returning from a navigation-triggering human handoff.
+- 5271076: Expose safe Secret Profile status and profile-worker execution through the TypeScript SDK.
+- 2d05bbc: Automatically replace a stale detached relay that supports guarded shutdown with the current CLI build before running operational commands, while older and foreground relays continue to fail closed with restart guidance.
+- 2de472a: Make session deletion idempotent when the requested session is already absent.
+- 83904e5: Wake the extension service worker and reconnect to the relay after a full browser restart.
+
+## 0.4.1
+
+### Patch Changes
+
+- 7874e37: Update Effect and the Node platform package from `4.0.0-beta.97` to `4.0.0-rc.111`, including current tagged errors and explicit MCP protocol adapters.
+- 8d6897d: Keep the unauthenticated HTTP and CDP relay bound to loopback while allowing explicitly configured extension origins for same-host unpacked installs.
+- f625957: Register ARIA snapshot redaction selectors on each connected Playwright context so `ariaSnapshot()` works through `connectOverCDP`.
+- ba7f5b5: Keep extension readiness independent from browser tab-group APIs that can remain pending indefinitely in Arc, and give unpacked builds a stable extension id with platform-correct migration support for existing Windows installs.
+- f12441c: Route Playwright browser-context permission and cookie commands through the correct session-owned tab.
+- 045805c: Omit text-control values from detailed ARIA snapshots so sensitive form contents do not enter agent output.
+- 4761e61: Harden `ariaSnapshot()` redaction for custom ARIA value controls, rich editable content, concurrent callers, and frame lifecycle changes.
+
 ## 0.4.0
 
 ### Minor Changes

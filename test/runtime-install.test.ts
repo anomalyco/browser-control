@@ -60,7 +60,7 @@ async function fixture() {
       await fs.mkdir(path.join(pkg, "dist"), { recursive: true })
       await fs.copyFile(path.join(staging, "package.json"), path.join(pkg, "package.json"))
       await fs.cp(path.join(staging, "skills"), path.join(pkg, "skills"), { recursive: true })
-      await fs.writeFile(path.join(pkg, "dist/index.js"), "export const BrowserControlClient = { Service: {} }; export const AuthenticatedOrigin = { reveal() {} }; export const SecretProfile = { run() {} };\n")
+      await fs.writeFile(path.join(pkg, "dist/index.js"), "export const BrowserControlClient = { Service: {} }; export const AuthenticatedOrigin = { reveal() {} }; export const SecretProfile = { run() {}, Error: class extends Error {} };\n")
       await fs.writeFile(path.join(pkg, "dist/cli.js"), `#!/usr/bin/env node
 import fs from 'node:fs';
 const argument = process.argv[2];

@@ -230,9 +230,9 @@ export const prepareRuntime = Effect.fn("RuntimeInstall.prepare")(function* (
   if (version.trim() !== `browser-control v${manifest.version}`) return yield* Effect.fail(new Error("CLI version mismatch"))
   const skill = yield* attempt(() => fs.readFile(path.join(installedPackage, "skills", "browser-control", "SKILL.md"), "utf8"))
   if (!skill.trim() || (yield* run(cli, ["skill"], install)).trim() !== skill.trim()) return yield* Effect.fail(new Error("CLI skill mismatch"))
-  yield* run("node", ["--input-type=module", "--eval", `import { BrowserControlClient, AuthenticatedOrigin, SecretProfile } from '${packageName}'; if (!BrowserControlClient.Service || !AuthenticatedOrigin.reveal || !SecretProfile.run) throw new Error('SDK exports missing')`], install)
+  yield* run("node", ["--input-type=module", "--eval", `import { BrowserControlClient, AuthenticatedOrigin, SecretProfile } from '${packageName}'; if (!BrowserControlClient.Service || !AuthenticatedOrigin.reveal || !SecretProfile.run || !SecretProfile.Error) throw new Error('SDK exports missing')`], install)
   const consumer = path.join(install, "validate-sdk.mts")
-  yield* attempt(() => fs.writeFile(consumer, `import { BrowserControlClient, AuthenticatedOrigin, SecretProfile } from '${packageName}'\nvoid [BrowserControlClient.Service, AuthenticatedOrigin.reveal, SecretProfile.run]\n`, { flag: "wx" }))
+  yield* attempt(() => fs.writeFile(consumer, `import { BrowserControlClient, AuthenticatedOrigin, SecretProfile } from '${packageName}'\nvoid [BrowserControlClient.Service, AuthenticatedOrigin.reveal, SecretProfile.run, SecretProfile.Error]\n`, { flag: "wx" }))
   yield* run(path.join(staging, "node_modules", ".bin", "tsc"), [
     "--noEmit", "--strict", "--module", "NodeNext", "--target", "ES2022", "--types", "node",
     "--typeRoots", path.join(staging, "node_modules", "@types"), consumer,
