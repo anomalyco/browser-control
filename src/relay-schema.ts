@@ -242,6 +242,7 @@ export const ExtensionStatus = Schema.Struct({
   protocolVersion: Schema.optionalKey(Schema.NullOr(Schema.Number)),
   protocolCompatible: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
   protocolLegacy: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+  rejectedConnections: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   activeTargets: Schema.Number,
   childTargets: Schema.optionalKey(Schema.Number),
   cdpClients: Schema.optionalKey(Schema.Number),

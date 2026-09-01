@@ -123,6 +123,30 @@ describe("ExtensionRpc", () => {
     expect(socket.closes[0]?.code).toBe(4002)
   })
 
+  it("deduplicates contention probes and keeps a responsive socket", async () => {
+    const rpc = new ExtensionRpc({ livenessProbeTimeoutMs: 20 })
+    const socket = connect(rpc)
+    rpc.probeLiveness()
+    rpc.probeLiveness()
+    expect(socket.pings()).toBe(1)
+    socket.emitPong()
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    expect(socket.closes).toEqual([])
+    expect(rpc.connected).toBe(true)
+  })
+
+  it("does not let a late old-socket pong cancel the replacement's probe", async () => {
+    const rpc = new ExtensionRpc({ livenessProbeTimeoutMs: 20 })
+    const first = connect(rpc)
+    rpc.probeLiveness()
+    const second = connect(rpc)
+    rpc.probeLiveness()
+    first.emitPong()
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    expect(first.closes).toEqual([{ code: 4001, reason: "Extension replaced" }])
+    expect(second.closes).toEqual([{ code: 4002, reason: "Extension websocket did not answer liveness probe" }])
+  })
+
   it("rejects only debugger commands for a crashed tab", async () => {
     const rpc = new ExtensionRpc()
     const socket = connect(rpc)

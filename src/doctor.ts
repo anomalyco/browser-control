@@ -84,6 +84,7 @@ export type DoctorReport = {
     readonly expectedProtocolVersion: number
     readonly protocolCompatible: boolean | null
     readonly protocolLegacy: boolean | null
+    readonly rejectedConnections: number | null
     readonly error: string | null
   }
   readonly targets: {
@@ -260,6 +261,7 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
       expectedProtocolVersion: extensionProtocolVersion,
       protocolCompatible: extensionResult.ok ? extensionResult.value.protocolCompatible ?? null : null,
       protocolLegacy: extensionResult.ok ? extensionResult.value.protocolLegacy ?? null : null,
+      rejectedConnections: extensionResult.ok ? extensionResult.value.rejectedConnections ?? null : null,
       error: extensionResult.ok ? null : extensionResult.error,
     },
     targets: {
@@ -357,6 +359,14 @@ function buildDoctorChecks(options: {
       bundledManifestVersion: options.bundledManifestVersion,
     }),
     extensionProtocolCheck(options.extensionResult),
+    ...(options.extensionResult.ok && options.extensionResult.value.rejectedConnections !== undefined ? [{
+      id: "extension-connection-conflicts",
+      label: "competing browser connections",
+      status: options.extensionResult.value.rejectedConnections > 0 ? "warn" as const : "ok" as const,
+      message: options.extensionResult.value.rejectedConnections > 0
+        ? `${options.extensionResult.value.rejectedConnections} connection attempt(s) rejected; the active browser connection was preserved`
+        : "none observed on this connection",
+    }] : []),
     {
       id: "targets-readable",
       label: "targets readable",
@@ -551,6 +561,9 @@ function buildDoctorRecommendations(options: {
   const artifactRecommendations = options.artifacts.some((artifact) => {
     return !artifact.exists
   }) ? ["Prepare and select a fresh validated runtime with `pnpm runtime:prepare` / `pnpm runtime:select`; do not rebuild the active installation."] : []
+  const connectionConflictRecommendations = options.extensionResult.ok && (options.extensionResult.value.rejectedConnections ?? 0) > 0
+    ? ["Keep Browser Control enabled in one browser/profile. To switch, disable it in the current browser before connecting the other; new sessions do not change the active browser."]
+    : []
   const staleSessionRecommendations = options.staleCurrent && options.current ? [
     `Current session ${options.current} is stale; run \`browser-control session new\` or \`browser-control session use <id>\` after the relay is running.`,
   ] : []
@@ -561,6 +574,7 @@ function buildDoctorRecommendations(options: {
     ...relayRecommendations,
     ...relayBuildRecommendations,
     ...extensionRecommendations,
+    ...connectionConflictRecommendations,
     ...artifactRecommendations,
     ...staleSessionRecommendations,
     ...unhealthyTargetRecommendations,

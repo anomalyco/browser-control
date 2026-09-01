@@ -285,6 +285,22 @@ require a new extension capture protocol and permission model.
 
 ## Session And Tab Model
 
+A relay serves one browser/profile connection at a time. The first compatible
+OPEN connection keeps ownership through inventory reconciliation and normal
+operation; another connection is rejected with close code 4004 instead of
+destroying existing targets, handoffs, or pending commands. Contention starts a
+bounded websocket liveness probe so a dead incumbent cannot hold ownership
+indefinitely. Genuine disconnect/reconnect still rebuilds the inventory.
+`status` and `doctor` report rejected connection attempts, not a browser count.
+This does not add simultaneous multi-browser routing or persistent browser
+selection: switching requires disconnecting the incumbent extension.
+
+Password-manager extension UI is a Chromium permission boundary, not a missing
+page. A cross-extension failure keeps the session's page and returns an explicit
+human-action warning rather than scheduling automatic page replacement.
+Protected extension iframes/popups and native unlock/Touch ID prompts are not
+supported control surfaces; no browser security flags or vault access are added.
+
 An attached tab is a browser target exposed by the extension. An unowned
 attached tab remains visible to connected clients for explicit recovery and raw
 CDP workflows. A Browser Control session owns one default page and persistent

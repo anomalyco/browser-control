@@ -171,6 +171,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const pendingTabGrouping = new Map<number, TabGroupingMethod>()
   const tabGroupingWorkers = new Map<number, Promise<void>>()
   let extensionGeneration = 0
+  let rejectedExtensionConnections = 0
   const extensionRpc = new ExtensionRpc()
   const sendToExtension = Effect.fnUntraced(function* (command: Parameters<ExtensionRpc["send"]>[0]) {
     return yield* extensionRpc.send(command)
@@ -531,6 +532,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         protocolVersion: extensionRpc.protocolVersion ?? null,
         protocolCompatible: extensionRpc.protocolCompatible ?? null,
         protocolLegacy: extensionRpc.protocolLegacy ?? null,
+        rejectedConnections: rejectedExtensionConnections,
         cdpClients: cdpClients.size,
       }
     },
@@ -697,6 +699,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       })
       socket.on("close", () => {
         if (extensionRpc.disconnectIfCurrent(socket)) {
+          rejectedExtensionConnections = 0
           clearLiveExtensionState("Extension disconnected")
         }
       })
@@ -746,7 +749,16 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       socket.close(4003, "Extension protocol incompatible")
       return extensionGeneration
     }
+    // Protect an OPEN compatible connection, including its inventory handshake.
+    // Competing browser retries must not erase targets, handoffs, or pending RPCs.
+    if (extensionRpc.acceptsEvents) {
+      rejectedExtensionConnections += 1
+      extensionRpc.probeLiveness()
+      socket.close(4004, "Another browser or profile is already connected")
+      return extensionGeneration
+    }
     extensionGeneration += 1
+    rejectedExtensionConnections = 0
     clearLiveExtensionState("Extension replaced")
     extensionRpc.replaceSocket(socket)
     extensionRpc.markHandshake(

@@ -76,6 +76,12 @@ session. Reset or delete releases an adopted user tab without closing it.
 Prefer adoption for authenticated browser state rather than reproducing login
 in a fresh page.
 
+Each relay controls one browser/profile at a time. A second extension connection
+cannot replace a healthy active connection. If `status` or `doctor` reports
+rejected competing connections, keep the extension enabled only in the intended
+browser/profile. To switch browsers, disconnect the incumbent extension first;
+creating a new execute session does not switch browsers.
+
 Completion: the selected page URL is the intended page, and later work either
 retains the returned session id or intentionally uses the MCP process session.
 
@@ -183,6 +189,22 @@ without `start`. The default timeout is ten minutes.
 
 Completion: the prompt was presented only after WAIT was registered, the action
 settled, and the authenticated result was independently verified.
+
+### Password Manager Prompts
+
+Ordinary webpage fields and accessible open-shadow-root controls remain usable.
+1Password's inline menus are extension-owned iframes, not ordinary webpage DOM.
+Chromium blocks one extension from debugging another extension's pages; toolbar
+popups and native unlock, Touch ID, and Windows Hello prompts are not supported
+Playwright control surfaces.
+
+`target/cross-extension-page` means a permission boundary. Ask the user to finish
+or dismiss the prompt and retry; do not reset the page, read vault contents, or
+weaken browser security to get around it. Register `handoff` on the originating
+webpage before triggering a human-only prompt when possible. If the prompt
+already prevents attachment, give the user the required action directly rather
+than assuming an in-page handoff can be displayed. Verify the intended webpage
+state after the prompt is completed.
 
 ## Inspection Tools
 
@@ -381,6 +403,9 @@ Common diagnoses:
   does not recover.
 - Incompatible extension protocol: update either the extension or npm package;
   exact extension and relay release versions do not need to match.
+- Competing browser/profile connections: the active browser is preserved and
+  additional connections are rejected. Use one browser/profile per relay;
+  repeatedly creating sessions or resetting tabs does not switch browsers.
 - Stale relay build: inspect `doctor`, then coordinate an explicit
   `browser-control relay restart`. It requires an exact managed instance and
   safe shutdown protocol 2. Legacy relays need a one-time coordinated manual

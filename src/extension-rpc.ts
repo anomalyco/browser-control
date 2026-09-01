@@ -29,7 +29,7 @@ export class ExtensionRpc {
   private ready = false
   private nextRequestId = 1
   private readonly pendingRequests = new Map<number, PendingExtensionRequest>()
-  private livenessProbe: NodeJS.Timeout | undefined
+  private livenessProbe: { readonly timeout: NodeJS.Timeout; readonly socket: WebSocket; readonly onPong: () => void } | undefined
   version: string | undefined
   protocolVersion: number | null | undefined
   protocolCompatible: boolean | undefined
@@ -186,20 +186,21 @@ export class ExtensionRpc {
     })
   }
 
-  private probeLiveness(socket: WebSocket): void {
-    if (this.socket !== socket || this.livenessProbe || socket.readyState !== WebSocket.OPEN) {
+  probeLiveness(socket = this.socket): void {
+    if (!socket || this.socket !== socket || this.livenessProbe || socket.readyState !== WebSocket.OPEN) {
       return
     }
     const probeTimeoutMs = this.timeouts.livenessProbeTimeoutMs ?? 10_000
     const onPong = () => {
+      if (this.livenessProbe?.socket !== socket) return
       this.cancelLivenessProbe()
-      socket.off("pong", onPong)
     }
-    this.livenessProbe = setTimeout(() => {
-      this.livenessProbe = undefined
-      socket.off("pong", onPong)
+    const timeout = setTimeout(() => {
+      if (this.livenessProbe?.socket !== socket) return
+      this.cancelLivenessProbe()
       socket.close(4002, "Extension websocket did not answer liveness probe")
     }, probeTimeoutMs)
+    this.livenessProbe = { timeout, socket, onPong }
     socket.on("pong", onPong)
     try {
       socket.ping()
@@ -211,7 +212,8 @@ export class ExtensionRpc {
 
   private cancelLivenessProbe(): void {
     if (this.livenessProbe) {
-      clearTimeout(this.livenessProbe)
+      clearTimeout(this.livenessProbe.timeout)
+      this.livenessProbe.socket.off("pong", this.livenessProbe.onPong)
       this.livenessProbe = undefined
     }
   }

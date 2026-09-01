@@ -274,12 +274,14 @@ describe("relay-schema", () => {
   it("decodes extension status with and without optional fields", () => {
     const minimal = decodeExtensionStatus({ connected: false, version: null, activeTargets: 0 })
     expect(minimal.cdpClients).toBeUndefined()
+    expect(minimal.rejectedConnections).toBeUndefined()
     const full = decodeExtensionStatus({
       connected: true,
       version: "0.0.5",
       protocolVersion: 2,
       protocolCompatible: true,
       protocolLegacy: false,
+      rejectedConnections: 3,
       activeTargets: 2,
       childTargets: 1,
       cdpClients: 3,
@@ -289,7 +291,11 @@ describe("relay-schema", () => {
     expect(full.childTargets).toBe(1)
     expect(full.protocolCompatible).toBe(true)
     expect(full.protocolLegacy).toBe(false)
+    expect(full.rejectedConnections).toBe(3)
     expect(full.sessions).toHaveLength(1)
+    for (const rejectedConnections of [-1, 1.5, "3"]) {
+      expect(() => decodeExtensionStatus({ ...minimal, rejectedConnections })).toThrow()
+    }
   })
 
   it("decodes relay versions from current and older builds", () => {

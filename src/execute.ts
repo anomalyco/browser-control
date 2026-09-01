@@ -503,10 +503,13 @@ export class ExecuteSandbox {
           const logSummary = error instanceof ExecuteCodeError ? error.logSummary : emptyExecuteLogSummary()
           const aftermath = error instanceof ExecuteCodeError ? error.aftermath : undefined
           const diagnostic = executionContextFailureDiagnostic(error, aftermath)
-          if (diagnostic?.startsWith("execution-context/") || diagnostic === "target/cross-extension-page") {
+          if (diagnostic?.startsWith("execution-context/")) {
             this.pageHealthCheckRequired = true
           }
           const warnings = this.drainWarnings()
+          if (diagnostic === "target/cross-extension-page") {
+            warnings.push("Chromium blocked protected extension UI, possibly a password manager. Ask the user to finish or dismiss it in the browser, then retry.")
+          }
           const logCompactionWarning = formatLogCompactionWarning(logSummary)
           if (logCompactionWarning) {
             warnings.push(logCompactionWarning)
