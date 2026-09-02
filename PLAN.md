@@ -34,6 +34,10 @@ checkout. Installation selection changes one shared pointer for future CLI/MCP
 processes, not an existing daemon. Keep old complete installations until their
 processes retire. The loaded extension directory is separate from this workflow.
 
+Preparation also checks the packed Effect dependency cohort in a fresh isolated
+pnpm consumer, without checkout locks or user overrides. Keep all three Effect
+runtime packages exactly aligned; this is not a universal host-graph lock.
+
 Ordinary clients may start an absent daemon but never replace a running one.
 `browser-control relay restart` is the sole CLI replacement operation. It requires
 an exact managed instance with safe shutdown protocol 2, records bounded private

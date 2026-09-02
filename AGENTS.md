@@ -49,9 +49,10 @@ local Node relay.
 - Each Browser Control session owns one default page and persistent JavaScript
   `state`; do not default to arbitrary shared tabs for normal execute calls.
 - Use stock `playwright-core` for v1.
-- Use Effect v4 for Node-side code, keeping `effect` and `@effect/platform-node`
-  on the same release. The local `/Users/kit/code/open-source/effect` checkout
-  is the source of truth for APIs and patterns; `effect-smol` is archived.
+- Use Effect v4 for Node-side code, keeping `effect`, `@effect/platform-node`,
+  and `@effect/platform-node-shared` exactly pinned to the same release. The local
+  `/Users/kit/code/open-source/effect` checkout is the source of truth for APIs and
+  patterns; `effect-smol` is archived.
 - Prefer `Effect.fn` / `Effect.fnUntraced` for functions that return Effects,
   and use scoped resources (`Effect.acquireRelease`, `Effect.scoped`) for
   Playwright and relay lifecycles.

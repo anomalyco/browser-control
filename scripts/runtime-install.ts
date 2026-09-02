@@ -25,13 +25,13 @@ const attempt = <A>(run: (signal: AbortSignal) => Promise<A>) => Effect.tryPromi
   catch: (cause) => cause instanceof Error ? cause : new Error(String(cause)),
 })
 
-type RunCommand = (command: string, args: string[], cwd: string) => Effect.Effect<string, Error>
+type RunCommand = (command: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv) => Effect.Effect<string, Error>
 
-const runCommand: RunCommand = Effect.fn("RuntimeInstall.command")(function* (command, args, cwd) {
+const runCommand: RunCommand = Effect.fn("RuntimeInstall.command")(function* (command, args, cwd, env) {
   const result = yield* Effect.tryPromise({
     try: (signal) => exec(command, args, {
       cwd, signal, timeout: 300_000, maxBuffer: 8 * 1024 * 1024,
-      env: { ...process.env, NODE_OPTIONS: undefined, NODE_PATH: undefined },
+      env: env ?? { ...process.env, NODE_OPTIONS: undefined, NODE_PATH: undefined },
     }),
     catch: (cause) => new Error(`${command} ${args.join(" ")} failed in ${cwd}`, { cause }),
   })
@@ -176,6 +176,52 @@ const validateMcp = Effect.fn("RuntimeInstall.validateMcp")(function* (install: 
   })
 })
 
+const validatePnpmConsumer = Effect.fn("RuntimeInstall.validatePnpmConsumer")(function* (
+  staging: string, archive: string, version: string, packageManager: string, run: RunCommand,
+) {
+  const consumer = yield* Effect.acquireRelease(
+    attempt(() => fs.mkdtemp(path.join(path.dirname(staging), ".browser-control-pnpm-"))),
+    (directory) => attempt(() => fs.rm(directory, { recursive: true, force: true })).pipe(Effect.orDie),
+  )
+  // No checkout lockfile, user config or overrides: resolve the packed runtime as a standalone consumer.
+  const env: NodeJS.ProcessEnv = {
+    PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, HOME: consumer,
+    XDG_CONFIG_HOME: path.join(consumer, "config"), XDG_DATA_HOME: path.join(consumer, "data"),
+    XDG_CACHE_HOME: path.join(consumer, "cache"), XDG_STATE_HOME: path.join(consumer, "state"),
+  }
+  yield* attempt(async () => {
+    await fs.writeFile(path.join(consumer, "package.json"), JSON.stringify({ private: true, type: "module", packageManager }), { flag: "wx" })
+    await fs.writeFile(path.join(consumer, "pnpm-workspace.yaml"), "packages:\n  - .\n", { flag: "wx" })
+  })
+  yield* run("pnpm", ["add", "--workspace-root", "--prod", "--ignore-scripts", "--config.node-linker=isolated", archive], consumer, env)
+  yield* run("node", ["--input-type=module", "--eval", String.raw`
+import assert from 'node:assert/strict'
+import { realpathSync } from 'node:fs'
+import { createRequire } from 'node:module'
+const require = createRequire(realpathSync('./node_modules/${packageName}/package.json'))
+const packed = require('./package.json')
+assert.equal(packed.name, '${packageName}')
+assert.equal(packed.version, ${JSON.stringify(version)})
+const pins = packed.dependencies
+assert.match(pins.effect, /^\d+\.\d+\.\d+(?:-[\w.-]+)?(?:\+[\w.-]+)?$/, 'Effect must be exactly pinned')
+for (const name of ['@effect/platform-node', '@effect/platform-node-shared']) {
+  assert.equal(pins[name], pins.effect, name + ' must share the exact Effect pin')
+  assert.equal(require(name + '/package.json').version, pins.effect, name + ' resolved version mismatch')
+}
+const node = createRequire(require.resolve('@effect/platform-node/NodeServices'))
+const shared = createRequire(node.resolve('@effect/platform-node-shared/NodeFileSystem'))
+assert.equal(node('@effect/platform-node-shared/package.json').version, pins.effect)
+const runtimes = [require, node, shared]
+for (const runtime of runtimes) assert.equal(runtime('effect/package.json').version, pins.effect)
+assert.equal(new Set(runtimes.map(runtime => runtime.resolve('effect'))).size, 1, 'Multiple Effect runtimes')
+const { BrowserControlClient, AuthenticatedOrigin, SecretProfile } = await import('${packageName}')
+assert.ok(BrowserControlClient.Service && AuthenticatedOrigin.reveal && SecretProfile.run && SecretProfile.Error, 'SDK exports missing')
+`], consumer, env)
+  const cli = path.join(consumer, "node_modules", ".bin", "browser-control")
+  if (!(yield* run(cli, ["--help"], consumer, env)).includes("browser-control")) return yield* Effect.fail(new Error("pnpm CLI help is missing"))
+  if ((yield* run(cli, ["--version"], consumer, env)).trim() !== `browser-control v${version}`) return yield* Effect.fail(new Error("pnpm CLI version mismatch"))
+}, Effect.scoped)
+
 export const prepareRuntime = Effect.fn("RuntimeInstall.prepare")(function* (
   options: { readonly source: string; readonly staging: string; readonly install: string },
   run: RunCommand = runCommand,
@@ -199,7 +245,9 @@ export const prepareRuntime = Effect.fn("RuntimeInstall.prepare")(function* (
       })
     }
   })
-  const manifest = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(manifestSchema))(
+  const manifest = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Struct({
+    ...manifestSchema.fields, packageManager: Schema.String,
+  })))(
     yield* attempt(() => fs.readFile(path.join(staging, "package.json"), "utf8")),
   )
   yield* run("pnpm", ["install", "--frozen-lockfile"], staging)
@@ -209,6 +257,7 @@ export const prepareRuntime = Effect.fn("RuntimeInstall.prepare")(function* (
   const archives = yield* attempt(() => fs.readdir(path.join(staging, "artifacts")))
   if (archives.length !== 1 || !archives[0]?.endsWith(".tgz")) return yield* Effect.fail(new Error("Expected one packed tarball"))
   const archive = path.join(staging, "artifacts", archives[0])
+  yield* validatePnpmConsumer(staging, archive, manifest.version, manifest.packageManager, run)
   yield* attempt(() => fs.writeFile(path.join(install, "package.json"), '{"private":true,"type":"module"}\n', { flag: "wx" }))
   yield* run("npm", ["install", "--prefix", install, "--ignore-scripts", "--no-audit", "--no-fund", "--omit=dev", archive], install)
   yield* attempt(() => fs.symlink("node_modules/.bin", path.join(install, "bin")))

@@ -19,6 +19,8 @@ export default {
   project: ["src/**/*.ts!", "extension/src/**/*.ts!", "scripts/*.{ts,js}", "test/**/*.ts"],
   // Package scripts discover the TS command entrypoints; Vitest discovers tests.
   vitest: { entry: ["test/**/*.test.ts"] },
+  // Align the transitive Node runtime with Effect's prerelease scope layout.
+  ignoreDependencies: ["@effect/platform-node-shared"],
   // ffmpeg is installed separately; the benchmark invokes this package's own bin.
   ignoreBinaries: ["ffmpeg", "browser-control"],
 } satisfies KnipConfig

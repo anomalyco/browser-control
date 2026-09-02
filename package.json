@@ -56,6 +56,7 @@
   },
   "dependencies": {
     "@effect/platform-node": "4.0.0-rc.112",
+    "@effect/platform-node-shared": "4.0.0-rc.112",
     "acorn": "^8.18.0",
     "effect": "4.0.0-rc.112",
     "playwright-core": "^1.62.1",

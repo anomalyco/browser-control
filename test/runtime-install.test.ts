@@ -26,7 +26,7 @@ async function fixture() {
   for (const relative of ["src", "scripts", "extension/src", "extension/icons", "extension/dist", "dist", "node_modules", "skills/browser-control"]) {
     await fs.mkdir(path.join(source, relative), { recursive: true })
   }
-  await fs.writeFile(path.join(source, "package.json"), JSON.stringify({ name: packageName, version: "1.2.3", type: "module", exports: "./dist/index.js" }))
+  await fs.writeFile(path.join(source, "package.json"), JSON.stringify({ name: packageName, version: "1.2.3", packageManager: "pnpm@11.20.0", type: "module", exports: "./dist/index.js" }))
   for (const relative of ["pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.json", "tsconfig.build.json", "extension/manifest.json", "README.md", "LICENSE"]) {
     await fs.writeFile(path.join(source, relative), "fixture")
   }
@@ -36,7 +36,22 @@ async function fixture() {
 
   // Fake only expensive build/package-manager/compiler steps. Installed binaries,
   // SDK resolution, MCP protocol, filesystem isolation and selection run for real.
-  const run = (command: string, args: string[], cwd: string) => Effect.tryPromise(async () => {
+  // The strict pnpm consumer runs against a real tarball in CI's runtime:prepare.
+  const run = (command: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv) => Effect.tryPromise(async () => {
+    if (path.basename(cwd).startsWith(".browser-control-pnpm-")) {
+      expect(path.dirname(cwd)).toBe(directory)
+      expect(env).toEqual({
+        PATH: process.env.PATH, SystemRoot: process.env.SystemRoot, HOME: cwd,
+        XDG_CONFIG_HOME: path.join(cwd, "config"), XDG_DATA_HOME: path.join(cwd, "data"),
+        XDG_CACHE_HOME: path.join(cwd, "cache"), XDG_STATE_HOME: path.join(cwd, "state"),
+      })
+      expect(await fs.readFile(path.join(cwd, "package.json"), "utf8")).toBe(JSON.stringify({ private: true, type: "module", packageManager: "pnpm@11.20.0" }))
+      if (command === "pnpm") {
+        expect(args).toEqual(["add", "--workspace-root", "--prod", "--ignore-scripts", "--config.node-linker=isolated", path.join(staging, "artifacts/package.tgz")])
+        await expect(fs.lstat(path.join(cwd, "pnpm-lock.yaml"))).rejects.toMatchObject({ code: "ENOENT" })
+      }
+      return args[0] === "--version" ? "browser-control v1.2.3" : args[0] === "--help" ? "browser-control help" : ""
+    }
     if (command === "pnpm") {
       expect(cwd).toBe(staging)
       if (args[0] === "install") {
@@ -159,12 +174,21 @@ describe("isolated runtime installation", () => {
 
   it("does not stamp a candidate whose final installed validation fails", async () => {
     const f = await fixture()
-    await expect(Effect.runPromise(prepareRuntime(f, (command, args, cwd) => args[0] === "--version"
+    await expect(Effect.runPromise(prepareRuntime(f, (command, args, cwd, env) => args[0] === "--version" && !env
       ? Effect.succeed("wrong-version")
-      : f.run(command, args, cwd)))).rejects.toThrow("CLI version mismatch")
+      : f.run(command, args, cwd, env)))).rejects.toThrow("CLI version mismatch")
     await expect(fs.lstat(path.join(f.install, marker))).rejects.toMatchObject({ code: "ENOENT" })
     await fs.symlink(f.source, f.active)
     await expect(Effect.runPromise(selectRuntime(f))).rejects.toThrow()
     expect(await fs.realpath(f.active)).toBe(f.source)
+  })
+
+  it("cleans the strict packed consumer and leaves the candidate unvalidated when its check fails", async () => {
+    const f = await fixture()
+    await expect(Effect.runPromise(prepareRuntime(f, (command, args, cwd, env) => command === "node" && env
+      ? Effect.fail(new Error("packed Effect cohort mismatch"))
+      : f.run(command, args, cwd, env)))).rejects.toThrow("packed Effect cohort mismatch")
+    expect((await fs.readdir(f.directory)).some((name) => name.startsWith(".browser-control-pnpm-"))).toBe(false)
+    await expect(fs.lstat(path.join(f.install, marker))).rejects.toMatchObject({ code: "ENOENT" })
   })
 })
