@@ -54,7 +54,7 @@ export class CdpRouter<Client extends object> {
     let preferred: ConnectedTarget | undefined
     for (const target of this.registry.listRootTargets()) {
       if (clientSessionId !== undefined) {
-        if (target.browserControlSessionId === clientSessionId) return target
+        if (target.browserControlSessionId === clientSessionId && target.crashed !== true) return target
         continue
       }
       const matches = this.canSeeTarget(client, target)

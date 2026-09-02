@@ -269,6 +269,39 @@ describe("relay extension handshake", () => {
       expect(status).toMatchObject({ connected: false, activeTargets: 0 })
     })))
   })
+
+  it.each(["rpc", "malformed"] as const)("rejects ready and clears live roots after a committed root %s probe failure", async (failure) => {
+    const port = 24_000 + Math.floor(Math.random() * 10_000)
+    const error = vi.spyOn(console, "error").mockImplementation(() => {})
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port, sessionCatalogPath: null })
+      const options: { targetId?: string; error?: string } = { targetId: "committed-target" }
+      const extension = yield* Effect.promise(() => connectRespondingExtension(relay.url, options))
+      const closed = waitForClose(extension)
+      try {
+        extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.24", protocolVersion: 2 } }))
+        extension.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 7 } }))
+        const committed = yield* Effect.promise(() => waitForStatus(relay.url, (candidate) => candidate.activeTargets === 1))
+        expect(committed.connected).toBe(false)
+
+        if (failure === "rpc") options.error = "Debugger is not attached to the tab with id: 7"
+        else delete options.targetId
+        extension.send(JSON.stringify({ method: "debugger.detached", params: { tabId: 7, reason: "target_closed" } }))
+        extension.send(JSON.stringify({ method: "ready" }))
+
+        const status = yield* Effect.promise(() => waitForStatus(relay.url, (candidate) => candidate.connected || candidate.activeTargets === 0))
+        expect(status).toMatchObject({ connected: false, activeTargets: 0 })
+        expect(yield* Effect.promise(() => closed)).toBe(1011)
+        expect(error).toHaveBeenCalled()
+        if (failure === "rpc") {
+          expect(error.mock.calls.some((call) => call[1] instanceof Error && call[1].message === options.error)).toBe(true)
+        }
+        expect(extension.commands.some((command) => command.method === "tabs.remove" || command.method === "debugger.detach")).toBe(false)
+      } finally {
+        extension.close()
+      }
+    })))
+  })
 })
 
 type ExtensionStatus = { readonly connected: boolean; readonly activeTargets: number; readonly protocolCompatible?: boolean }

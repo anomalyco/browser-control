@@ -99,6 +99,34 @@ describe("CdpRouter", () => {
     expect(router.isBrowserAlias(client, "unknown-session")).toBe(false)
   })
 
+  it("skips a crashed owned root that precedes a healthy sibling", () => {
+    const { clients, registry, router } = setup()
+    const client = {}
+    clients.register(client, "session-a")
+    registry.addRootTarget(root({ tabId: 1, sessionId: "crashed-root", targetId: "crashed-target", browserControlSessionId: "session-a" }))
+    registry.markRootTargetCrashed(1)
+    const healthy = root({ tabId: 2, sessionId: "healthy-root", targetId: "healthy-target", browserControlSessionId: "session-a" })
+    registry.addRootTarget(healthy)
+
+    expect(registry.listRootTargets().map((target) => target.tabId)).toEqual([1, 2])
+    expect(router.preferredRoot(client)).toBe(healthy)
+    expect(router.visibleRoots(client)).toHaveLength(2)
+    expect(router.session(client, "crashed-root")).toEqual({ tabId: 1, rootSessionId: "crashed-root" })
+  })
+
+  it("does not replace crashed owned roots with an unrelated healthy root", () => {
+    const { clients, registry, router } = setup()
+    const client = {}
+    clients.register(client, "session-a")
+    for (const tabId of [1, 2]) {
+      registry.addRootTarget(root({ tabId, sessionId: `root-${tabId}`, targetId: `target-${tabId}`, browserControlSessionId: "session-a" }))
+      registry.markRootTargetCrashed(tabId)
+    }
+    registry.addRootTarget(root({ tabId: 3, sessionId: "unrelated-root", targetId: "unrelated-target", owner: "user" }))
+
+    expect(router.preferredRoot(client)).toBeUndefined()
+  })
+
   it("does not fall through from an empty named session to an unrelated root", () => {
     const { clients, registry, router } = setup()
     const client = {}
@@ -121,6 +149,18 @@ describe("CdpRouter", () => {
     registry.addRootTarget(visible)
 
     expect(router.preferredRoot(client)).toBe(visible)
+
+    registry.addRootTarget(root({ tabId: 2, sessionId: "root-2", targetId: "target-2" }))
+    expect(router.preferredRoot(client)).toBeUndefined()
+  })
+
+  it("keeps crashed roots in raw-client selection and ambiguity checks", () => {
+    const { clients, registry, router } = setup()
+    const client = {}
+    clients.register(client)
+    registry.addRootTarget(root({ tabId: 1, sessionId: "root-1", targetId: "target-1" }))
+    const crashed = registry.markRootTargetCrashed(1)
+    expect(router.preferredRoot(client)).toBe(crashed)
 
     registry.addRootTarget(root({ tabId: 2, sessionId: "root-2", targetId: "target-2" }))
     expect(router.preferredRoot(client)).toBeUndefined()

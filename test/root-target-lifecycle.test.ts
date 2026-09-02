@@ -298,6 +298,65 @@ describe("root target lifecycle", () => {
     })).pipe(Effect.provide(TestClock.layer())))
   })
 
+  it.each([
+    ["committed", "rpc"],
+    ["committed", "malformed"],
+    ["staged", "malformed"],
+  ] as const)("retains exhausted %s root %s probe failure until a successful queue", async (state, failure) => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const f = yield* fixture()
+      const target = root("root-new")
+      if (state === "committed") f.registry.addRootTarget(target)
+      else f.registry.stageRootTarget(target)
+      const failed = yield* Latch.make()
+      const error = new Error("Debugger is not attached to the tab with id: 1")
+      f.state.intercept = (command) => command.params?.method === "Target.getTargetInfo"
+        ? failed.open.pipe(Effect.andThen(failure === "rpc"
+          ? Effect.fail(error)
+          : Effect.succeed({ targetInfo: { targetId: 123 } })))
+        : undefined
+      f.lifecycle.queue({ tabId: 1, attachIfMissing: false, verificationRetries: 3, errorMessage: "Reconcile failed" })
+      yield* failed.await
+      yield* TestClock.adjust(1_000)
+      expect(yield* f.lifecycle.settle(1)).toBe(false)
+      expect(f.commands).toEqual(Array(failure === "rpc" ? 6 : 3).fill("Target.getTargetInfo"))
+      expect(f.errors).toHaveLength(3)
+      for (const reported of f.errors) {
+        if (failure === "rpc") expect(reported).toBe(error)
+        else expect(reported).toMatchObject({ message: `Unable to verify ${state} root target` })
+      }
+      expect(f.events).toEqual([])
+      expect(f.registry.routingRootTarget(1)?.targetInfo.targetId).toBe("root-new")
+
+      f.state.intercept = () => undefined
+      f.queue()
+      expect(yield* f.lifecycle.settle(1)).toBe(true)
+      expect(f.registry.tabTargets.get(1)?.targetInfo.targetId).toBe("root-new")
+    })).pipe(Effect.provide(TestClock.layer())))
+  })
+
+  it("retries a committed root probe after the inner retry is exhausted", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const f = yield* fixture()
+      const target = root("root-new")
+      f.registry.addRootTarget(target)
+      const failed = yield* Latch.make()
+      const error = new Error("Transient target probe failure")
+      let probes = 0
+      f.state.intercept = (command) => command.params?.method === "Target.getTargetInfo" && ++probes <= 2
+        ? failed.open.pipe(Effect.andThen(Effect.fail(error)))
+        : undefined
+      f.queue()
+      yield* failed.await
+      yield* TestClock.adjust(300)
+      expect(yield* f.lifecycle.settle(1)).toBe(true)
+      expect(probes).toBe(3)
+      expect(f.errors).toEqual([error])
+      expect(f.registry.tabTargets.get(1)).toBe(target)
+      expect(f.events).toEqual([])
+    })).pipe(Effect.provide(TestClock.layer())))
+  })
+
   it.each(["attach", "queue"] as const)("drains accepted %s work before close, even after an interrupted settle", async (operation) => {
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const f = yield* fixture()

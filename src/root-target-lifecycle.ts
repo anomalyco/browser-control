@@ -1,4 +1,4 @@
-import { Effect, Exit, Latch, Option, Schedule, Schema, Scope, Semaphore } from "effect"
+import { Effect, Exit, Latch, Schedule, Schema, Scope, Semaphore } from "effect"
 import type { CdpClientPool } from "./cdp-client-pool.ts"
 import { ghostCursorClientSource } from "./ghost-cursor.ts"
 import type { HandoffRegistry } from "./handoff.ts"
@@ -283,13 +283,11 @@ export class RootTargetLifecycle {
     if (!expected && !staged) return
     const result = yield* this.command(transition, "Target.getTargetInfo").pipe(
       Effect.retry({ times: 1, schedule: Schedule.spaced(50), while: (error) => !(error instanceof GenerationChanged) }),
-      Effect.option,
     )
     yield* this.check(transition)
-    const targetInfo = getTargetInfo(Option.isSome(result) ? result.value.targetInfo : undefined)
+    const targetInfo = getTargetInfo(result.targetInfo)
     if (!targetInfo) {
-      if (staged) return yield* Effect.fail(new Error("Unable to verify staged root target"))
-      return
+      return yield* Effect.fail(new Error(staged ? "Unable to verify staged root target" : "Unable to verify committed root target"))
     }
     if (staged?.targetInfo.targetId === targetInfo.targetId) {
       yield* this.finish(transition, staged)

@@ -92,9 +92,10 @@ local Node relay.
 - CDP guardrails are pure logic in `src/cdp-guardrails.ts`, enforced at the top
   of `routeCdpCommand`. Destructive browser-state methods are always blocked;
   read-only sessions additionally reject `Input.*`.
-- Browser-context CDP methods route through a session-owned root for named
-  clients or exactly one visible root for raw clients. A named client never
-  falls back to an unrelated unowned tab.
+- Browser-context CDP methods route through a non-crashed session-owned root for
+  named clients or exactly one visible root for raw clients. A named client never
+  falls back to an unrelated unowned tab. Crashed roots remain visible and count
+  toward raw-client ambiguity; explicit target routes remain available.
 - Human handoff waiters live in `src/handoff.ts`; derive their stable CDP target
   id from the actual Playwright `Page`, then bind the exact registry
   target/tab/session. The relay resolves only a matching handoff id from that
@@ -125,7 +126,9 @@ local Node relay.
 - `RootTargetLifecycle` owns per-tab setup, staging, verification, commit, retry,
   and generation invalidation. Stale workers must never detach a successor tab.
   Drain its scoped workers before closing extension RPCs; keep presentation
-  best-effort and outside authoritative ownership.
+  best-effort and outside authoritative ownership. Exhausted committed or staged
+  root probes fail readiness; preserve original RPC errors. Readiness rejection
+  closes the extension socket with 1011 and disconnect cleanup clears live targets.
 - `BrowserControlSessions` installs the sandbox's default-target callback and
   binds it to the exact session instance. Retired sandbox callbacks must never
   update a reset or recreated session with the same id.

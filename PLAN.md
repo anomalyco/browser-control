@@ -65,6 +65,9 @@ its interface, tested through an event sink without browser or websocket mocks.
 `CdpRouter` owns
 client-relative visibility, target inventory, target and alias resolution, and
 exact root-versus-child Chrome session routing.
+Named browser-context commands skip crashed owned roots without falling back to
+unrelated tabs. Raw-client ambiguity includes crashed roots; visibility and
+explicit target routing do not filter them out.
 
 `CdpRuntime` owns register-before-send context observation, bounded reset fallback,
 and idle reset targeting. Runtime recovery is tied to captured root/child and
@@ -93,6 +96,10 @@ with exact-target reacquisition retained for default-page replacement.
 scoped reconciliation workers, and generation checks across asynchronous steps.
 Committed ownership and handoff/default-target rebinding precede retiring old
 client views; stale workers cannot tear down a successor generation.
+Committed and staged root probes retain exhausted RPC errors or reject malformed
+target info. A failed inventory readiness check closes the extension socket with
+1011 and clears live registry state through disconnect cleanup; this is not
+automatic debugger reattachment or full SPA recovery.
 
 Verification:
 
