@@ -1,5 +1,21 @@
 # @opencode-ai/browser-control
 
+## 0.7.0
+
+### Minor Changes
+
+- a2e5bc9: Add the code-first screenshotDiff helper for PNG visual comparisons, changed-pixel
+  metrics, and highlighted diff images. Expose CDP recording quality in stop/status
+  receipts and JSON output, including screenshot fallback. Reject frame rates outside
+  the supported integer range of 1 through 60 instead of silently clamping them.
+
+### Patch Changes
+
+- a2e5bc9: Fix undersized, padded CDP recordings with emulated viewports and Retina backing
+  surfaces. Preserve the starting viewport instead of downscaling to 720p, improve
+  source image quality, and default to 60 fps with a 60 fps ceiling. Frame delivery
+  still depends on the browser; use a lower frame rate for smaller recordings.
+
 ## 0.6.0
 
 ### Minor Changes
