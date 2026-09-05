@@ -231,6 +231,21 @@ describe("RelayClient", () => {
     })
   })
 
+  it("retains recording quality in decoded stop and status responses", async () => {
+    const quality = {
+      width: 1280, height: 720, frameRate: 60,
+      sourceFrameCount: 12, encodedSourceFrameCount: 10, coalescedFrameCount: 1, droppedFrameCount: 1,
+      achievedSourceFrameRate: 6, achievedEncodedSourceFrameRate: 5,
+      screenshotFallback: false, sourceWidth: 2560, sourceHeight: 1273,
+    }
+    routes.set("POST /recording/stop", { status: 200, body: { success: true, frameCount: 120, quality } })
+    routes.set("GET /recording/status", { status: 200, body: { isRecording: true, frameCount: 120, quality } })
+    expect((await withClient((client) => client.recordingStop({ tabId: 7 }))).quality).toEqual(quality)
+    expect((await withClient((client) => client.recordingStatus({ tabId: 7 }))).quality).toEqual(quality)
+    routes.set("POST /recording/stop", { status: 200, body: { success: true, frameCount: 120 } })
+    expect((await withClient((client) => client.recordingStop({ tabId: 7 }))).quality).toBeUndefined()
+  })
+
   it("preserves network limits and decodes capture results", async () => {
     routes.set("POST /network/start", {
       status: 200,

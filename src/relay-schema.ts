@@ -390,6 +390,25 @@ const RecordingMode = Schema.Literals(["tab-capture", "cdp"])
 
 const RecordingRequestedMode = Schema.Literals(["auto", "tab-capture", "cdp"])
 
+const RecordingFrameRate = Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 1, maximum: 60 }))
+
+export const RecordingQuality = Schema.Struct({
+  width: Schema.Number,
+  height: Schema.Number,
+  frameRate: Schema.Number,
+  sourceFrameCount: Schema.Number,
+  encodedSourceFrameCount: Schema.Number,
+  coalescedFrameCount: Schema.Number,
+  droppedFrameCount: Schema.Number,
+  achievedSourceFrameRate: Schema.Number,
+  achievedEncodedSourceFrameRate: Schema.Number,
+  screenshotFallback: Schema.Boolean,
+  sourceWidth: Schema.optionalKey(Schema.Number),
+  sourceHeight: Schema.optionalKey(Schema.Number),
+})
+
+export interface RecordingQuality extends Schema.Schema.Type<typeof RecordingQuality> {}
+
 export const RecordingTargetRequest = Schema.Struct({
   sessionId: Schema.optionalKey(Schema.String),
   tabId: Schema.optionalKey(Schema.Number),
@@ -401,7 +420,7 @@ export const RecordingStartRequest = RecordingTargetRequest.pipe(Schema.fieldsAs
   outputPath: Schema.String,
   mode: Schema.optionalKey(RecordingRequestedMode),
   audio: Schema.optionalKey(Schema.Boolean),
-  frameRate: Schema.optionalKey(Schema.Number),
+  frameRate: Schema.optionalKey(RecordingFrameRate),
   videoBitsPerSecond: Schema.optionalKey(Schema.Number),
   audioBitsPerSecond: Schema.optionalKey(Schema.Number),
   maxDurationMs: Schema.optionalKey(Schema.Number),
@@ -419,6 +438,7 @@ export const RecordingStartResponse = Schema.Struct({
   mimeType: Schema.optionalKey(Schema.String),
   mode: Schema.optionalKey(RecordingMode),
   artifactType: Schema.optionalKey(RecordingArtifactType),
+  frameRate: Schema.optionalKey(Schema.Number),
   error: Schema.optionalKey(Schema.String),
 })
 
@@ -433,6 +453,7 @@ export const RecordingStopResponse = Schema.Struct({
   mode: Schema.optionalKey(RecordingMode),
   artifactType: Schema.optionalKey(RecordingArtifactType),
   frameCount: Schema.optionalKey(Schema.Number),
+  quality: Schema.optionalKey(RecordingQuality),
   error: Schema.optionalKey(Schema.String),
 })
 
@@ -447,6 +468,7 @@ export const RecordingStatusResponse = Schema.Struct({
   mode: Schema.optionalKey(RecordingMode),
   artifactType: Schema.optionalKey(RecordingArtifactType),
   frameCount: Schema.optionalKey(Schema.Number),
+  quality: Schema.optionalKey(RecordingQuality),
 })
 
 export interface RecordingStatusResponse extends Schema.Schema.Type<typeof RecordingStatusResponse> {}

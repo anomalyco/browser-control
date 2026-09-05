@@ -278,6 +278,8 @@ Other inspection helpers include:
   values, custom ARIA range values, and editable content omitted; await it
   separately from other operations on the same page
 - `screenshotWithLabels()` for an annotated screenshot and element metadata
+- `screenshotDiff({ baseline })` for changed-pixel metrics and a red-highlighted
+  PNG against a saved baseline; capture both at the same CSS viewport scale
 - `fillInput()` and `fillInputs()` when browser extensions interfere with
   Playwright's normal `locator.fill()`
 
@@ -334,6 +336,26 @@ browser-control recording start ./demo.webm --session github
 browser-control recording status --session github
 browser-control recording stop --session github
 ```
+
+Recording start/stop/status support `--json`. CDP quality receipts distinguish
+output fps from received/retained source frames and report coalescing, drops,
+dimensions, and screenshot fallback. These counters do not prove distinct motion.
+Explicit frame rates must be integers from 1 to 60; unsupported values are rejected.
+
+Visual comparison stays code-first:
+
+```ts
+await page.screenshot({ path: "/absolute/before.png", scale: "css" })
+// Make the intended UI change, keeping the viewport unchanged.
+return await screenshotDiff({ baseline: "/absolute/before.png" })
+```
+
+The result includes a diff image, `matches`, `changedPixels`, and `changedRatio`.
+Use `path` for a new absolute PNG output instead of inline media. `threshold`
+(default 0.1) controls pixel color tolerance, not allowed changed area. Different
+dimensions fail without resizing. Images are bounded to 32 MiB / 16 megapixels;
+existing output files are never overwritten. Review visible private content
+before sharing either screenshots or diffs.
 
 Automatic mode uses browser tab capture for user-owned tabs and CDP screencast
 for relay-created tabs. Tab capture writes WebM and can include audio. CDP mode

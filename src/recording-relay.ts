@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
 import crypto from "node:crypto"
 import { once } from "node:events"
 import fs from "node:fs/promises"
@@ -10,14 +10,15 @@ import type { ExtensionCommand, JsonObject } from "./protocol.ts"
 import { getObject } from "./relay-helpers.ts"
 import type { ConnectedTarget } from "./relay-types.ts"
 import { decodeRecordingFrame } from "./recording-protocol.ts"
+import type { RecordingQuality } from "./relay-schema.ts"
 
 const defaultMaxDurationMs = 15 * 60 * 1_000
-const defaultCdpFrameRate = 25
-const maxCdpFrameRate = 30
+const defaultCdpFrameRate = 60
+const maxRecordingFrameRate = 60
 const maxPendingCdpFrames = 30
-const maxCdpWidth = 1_280
-const maxCdpHeight = 720
-const cdpJpegQuality = 80
+const fallbackCdpWidth = 1_280
+const fallbackCdpHeight = 720
+const cdpJpegQuality = 100
 const maxPendingTabCaptureBytes = 16 * 1024 * 1024
 const maxTabCaptureOutputBytes = 1024 * 1024 * 1024
 
@@ -59,6 +60,7 @@ export type RecordingStartResult =
     readonly mimeType: string
     readonly mode: ActiveRecordingMode
     readonly artifactType: RecordingArtifactType
+    readonly frameRate?: number
   }
   | {
     readonly success: false
@@ -75,6 +77,7 @@ export type RecordingStopResult =
     readonly mode: ActiveRecordingMode
     readonly artifactType: RecordingArtifactType
     readonly frameCount?: number
+    readonly quality?: RecordingQuality
   }
   | {
     readonly success: false
@@ -90,6 +93,7 @@ export type RecordingStatusResult = {
   readonly mode?: ActiveRecordingMode
   readonly artifactType?: RecordingArtifactType
   readonly frameCount?: number
+  readonly quality?: RecordingQuality
 }
 
 export type RecordingCancelResult = {
@@ -152,10 +156,11 @@ type CdpRecording = ActiveRecordingBase & {
 type CdpVideoFrame = {
   readonly buffer: Buffer
   readonly frameNumber: number
+  readonly surfaceWidth?: number
 }
 
 export type VideoEncoder = {
-  readonly write: (frame: Buffer, timestampMs: number, durationMs: number) => Promise<void>
+  readonly write: (frame: Buffer, timestampMs: number, durationMs: number, surfaceWidth?: number) => Promise<void>
   readonly finish: () => Promise<void>
   readonly cancel: () => Promise<void>
 }
@@ -224,6 +229,9 @@ export class RecordingRelay {
   }
 
   async startRecording(options: RecordingStartOptions): Promise<RecordingStartResult> {
+    if (options.frameRate !== undefined && (!Number.isInteger(options.frameRate) || options.frameRate < 1 || options.frameRate > maxRecordingFrameRate)) {
+      return { success: false, error: "Recording frameRate must be an integer from 1 to 60" }
+    }
     if (!this.options.isExtensionConnected()) {
       return { success: false, error: "Browser Control extension is not connected" }
     }
@@ -321,6 +329,7 @@ export class RecordingRelay {
         path: recording.outputPath,
         mode: "cdp",
         artifactType: recording.artifactType,
+        quality: recordingQuality(recording, this.monotonicNow() - recording.startedMonotonicAt),
         frameCount: recording.stopping
           ? recording.frameCount
           : Math.max(0, Math.round(((this.monotonicNow() - recording.startedMonotonicAt) / 1_000) * recording.frameRate)),
@@ -483,7 +492,11 @@ export class RecordingRelay {
       } else if (recording.lastFrame) {
         recording.coalescedFrameCount += 1
       }
-      recording.lastFrame = { buffer, frameNumber }
+      recording.lastFrame = {
+        buffer,
+        frameNumber,
+        ...(typeof metadata?.deviceWidth === "number" ? { surfaceWidth: metadata.deviceWidth } : {}),
+      }
     }).catch((error: unknown) => {
       recording.writeError = error instanceof Error ? error : new Error(String(error))
     }).finally(() => {
@@ -687,6 +700,7 @@ export class RecordingRelay {
       success: true,
       tabId: result.tabId,
       startedAt: result.startedAt,
+      frameRate: options.frameRate ?? 30,
       path: options.outputPath,
       mimeType: result.mimeType ?? "video/webm",
       mode: "tab-capture",
@@ -704,11 +718,7 @@ export class RecordingRelay {
     }
     await fs.mkdir(path.dirname(options.outputPath), { recursive: true })
     if (starting.cancelled) return { success: false, error: "Recording was cancelled while starting" }
-    const requestedFrameRate = options.frameRate ?? defaultCdpFrameRate
-    if (requestedFrameRate <= 0 || !Number.isFinite(requestedFrameRate)) {
-      return { success: false, error: "Recording frameRate must be a positive finite number" }
-    }
-    const frameRate = Math.min(requestedFrameRate, maxCdpFrameRate)
+    const frameRate = options.frameRate ?? defaultCdpFrameRate
     let size: { readonly width: number; readonly height: number }
     try {
       await this.options.sendDebuggerCommand({
@@ -774,8 +784,6 @@ export class RecordingRelay {
         params: {
           format: "jpeg",
           quality: cdpJpegQuality,
-          maxWidth: size.width,
-          maxHeight: size.height,
           everyNthFrame: 1,
         },
       })
@@ -796,6 +804,7 @@ export class RecordingRelay {
       mimeType: artifactType === "mp4" ? "video/mp4" : "video/webm",
       mode: "cdp",
       artifactType,
+      frameRate,
     }
   }
 
@@ -863,6 +872,7 @@ export class RecordingRelay {
       await recording.encoder.finish()
 
       const stat = await fs.stat(recording.outputPath)
+      const quality = recordingQuality(recording, durationMs)
       const metadata = {
         mode: "cdp",
         artifactType: recording.artifactType,
@@ -871,17 +881,8 @@ export class RecordingRelay {
         startedAt: new Date(recording.startedAt).toISOString(),
         stoppedAt: new Date(stoppedAt).toISOString(),
         durationMs,
-        frameRate: recording.frameRate,
         frameCount: recording.frameCount,
-        sourceFrameCount: recording.sourceFrameCount,
-        encodedSourceFrameCount: recording.encodedSourceFrameCount,
-        coalescedFrameCount: recording.coalescedFrameCount,
-        droppedFrameCount: recording.droppedFrameCount,
-        achievedSourceFrameRate: recording.sourceFrameCount / Math.max(0.001, durationMs / 1_000),
-        width: recording.width,
-        height: recording.height,
-        ...(recording.sourceWidth === undefined ? {} : { sourceWidth: recording.sourceWidth }),
-        ...(recording.sourceHeight === undefined ? {} : { sourceHeight: recording.sourceHeight }),
+        ...quality,
         mimeType: recording.artifactType === "mp4" ? "video/mp4" : "video/webm",
       }
       await fs.writeFile(`${recording.outputPath}.json`, `${JSON.stringify(metadata, null, 2)}\n`, "utf8")
@@ -894,6 +895,7 @@ export class RecordingRelay {
         mode: "cdp",
         artifactType: recording.artifactType,
         frameCount: recording.frameCount,
+        quality,
       }
     } catch (error) {
       await recording.encoder.cancel().catch(() => {})
@@ -921,7 +923,7 @@ export class RecordingRelay {
   private async writeSourceFrame(recording: CdpRecording, frame: CdpVideoFrame, endFrameNumber: number): Promise<void> {
     const timestampMs = Math.round((frame.frameNumber * 1_000) / recording.frameRate)
     const durationMs = Math.max(1, Math.round(((endFrameNumber - frame.frameNumber) * 1_000) / recording.frameRate))
-    await recording.encoder.write(frame.buffer, timestampMs, durationMs)
+    await recording.encoder.write(frame.buffer, timestampMs, durationMs, frame.surfaceWidth)
     recording.encodedSourceFrameCount += 1
   }
 }
@@ -993,23 +995,69 @@ function cdpArtifactType(outputPath: string): "webm" | "mp4" | undefined {
   return undefined
 }
 
-function cdpRecordingSize(metrics: JsonObject): { readonly width: number; readonly height: number } {
-  const viewport = getObject(metrics.cssVisualViewport) ?? getObject(metrics.visualViewport)
-  const viewportWidth = typeof viewport?.clientWidth === "number" ? viewport.clientWidth : maxCdpWidth
-  const viewportHeight = typeof viewport?.clientHeight === "number" ? viewport.clientHeight : maxCdpHeight
-  const scale = Math.min(1, maxCdpWidth / viewportWidth, maxCdpHeight / viewportHeight)
+function recordingQuality(recording: CdpRecording, durationMs: number): RecordingQuality {
+  const seconds = Math.max(0.001, durationMs / 1_000)
   return {
-    width: Math.max(2, Math.floor(viewportWidth * scale) & ~1),
-    height: Math.max(2, Math.floor(viewportHeight * scale) & ~1),
+    width: recording.width,
+    height: recording.height,
+    frameRate: recording.frameRate,
+    sourceFrameCount: recording.sourceFrameCount,
+    encodedSourceFrameCount: recording.encodedSourceFrameCount,
+    coalescedFrameCount: recording.coalescedFrameCount,
+    droppedFrameCount: recording.droppedFrameCount,
+    achievedSourceFrameRate: recording.sourceFrameCount / seconds,
+    achievedEncodedSourceFrameRate: recording.encodedSourceFrameCount / seconds,
+    screenshotFallback: recording.sourceFrameCount === 0 && recording.encodedSourceFrameCount > 0,
+    ...(recording.sourceWidth === undefined ? {} : { sourceWidth: recording.sourceWidth }),
+    ...(recording.sourceHeight === undefined ? {} : { sourceHeight: recording.sourceHeight }),
   }
 }
 
-async function startFfmpegVideoEncoder(options: {
+function cdpRecordingSize(metrics: JsonObject): { readonly width: number; readonly height: number } {
+  const viewport = getObject(metrics.cssVisualViewport) ?? getObject(metrics.visualViewport)
+  const viewportWidth = typeof viewport?.clientWidth === "number" ? viewport.clientWidth : fallbackCdpWidth
+  const viewportHeight = typeof viewport?.clientHeight === "number" ? viewport.clientHeight : fallbackCdpHeight
+  return {
+    width: Math.max(2, Math.floor(viewportWidth) & ~1),
+    height: Math.max(2, Math.floor(viewportHeight) & ~1),
+  }
+}
+
+async function startFfmpegVideoEncoder(options: Parameters<StartVideoEncoder>[0]): Promise<VideoEncoder> {
+  // Preserve start-time dependency errors even though geometry arrives later.
+  await new Promise<void>((resolve, reject) => {
+    execFile("ffmpeg", ["-version"], { timeout: 5_000 }, (error) => error ? reject(error) : resolve())
+  })
+  // The first compositor frame supplies the backing surface's CSS width. It can
+  // differ from both the emulated viewport and the JPEG's Retina pixel width.
+  let acquisition: Promise<VideoEncoder> | undefined
+  let cancelled = false
+  return {
+    write: async (frame, timestampMs, durationMs, surfaceWidth) => {
+      if (cancelled) throw new Error("ffmpeg recording was cancelled")
+      acquisition ??= createFfmpegVideoEncoder({ ...options, surfaceWidth: surfaceWidth ?? options.width })
+      const encoder = await acquisition
+      if (cancelled) throw new Error("ffmpeg recording was cancelled")
+      await encoder.write(frame, timestampMs, durationMs)
+    },
+    finish: async () => {
+      if (!acquisition) throw new Error("No recording frames received")
+      await (await acquisition).finish()
+    },
+    cancel: async () => {
+      cancelled = true
+      if (acquisition) await (await acquisition).cancel()
+    },
+  }
+}
+
+async function createFfmpegVideoEncoder(options: {
   readonly outputPath: string
   readonly artifactType: "webm" | "mp4"
   readonly frameRate: number
   readonly width: number
   readonly height: number
+  readonly surfaceWidth: number
 }): Promise<VideoEncoder> {
   const temporaryOutputPath = `${options.outputPath}.partial-${process.pid}-${crypto.randomUUID()}`
   const outputArgs = options.artifactType === "webm"
@@ -1036,7 +1084,7 @@ async function startFfmpegVideoEncoder(options: {
     "-fps_mode",
     "cfr",
     "-vf",
-    `pad=${options.width}:${options.height}:0:0:gray,crop=${options.width}:${options.height}:0:0`,
+    `scale=min(iw\\,${options.surfaceWidth}):-1:flags=lanczos,pad=ceil(max(iw\\,${options.width})/2)*2:ceil(max(ih\\,${options.height})/2)*2:0:0:gray,crop=${options.width}:${options.height}:0:0`,
     ...outputArgs,
     "-f",
     options.artifactType,
@@ -1073,9 +1121,13 @@ async function startFfmpegVideoEncoder(options: {
     write: async (frame, timestampMs, durationMs) => {
       if (completed || finishingPromise || cancelPromise) throw new Error("ffmpeg input closed before recording finished")
       const envelope = mjpegMatroskaFrame(timestampMs, durationMs, frame.length)
-      await writeStreamChunk(child.stdin, envelope.header)
-      await writeStreamChunk(child.stdin, frame)
-      await writeStreamChunk(child.stdin, envelope.trailer)
+      try {
+        await writeStreamChunk(child.stdin, envelope.header)
+        await writeStreamChunk(child.stdin, frame)
+        await writeStreamChunk(child.stdin, envelope.trailer)
+      } catch (error) {
+        throw new Error(`${error instanceof Error ? error.message : String(error)}${stderr.trim() ? `: ${stderr.trim()}` : ""}`)
+      }
     },
     finish: async () => {
       if (completed) return

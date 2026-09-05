@@ -22,6 +22,7 @@ import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest, ExecuteAfterma
 import type { SessionTarget } from "./relay-types.ts"
 import { executionContextFailureDiagnostic, runtimeFailureKind } from "./runtime-diagnostics.ts"
 import { ariaSnapshotWithoutTextControlValues, registerAriaSnapshotSelector } from "./aria-snapshot.ts"
+import { createScreenshotDiff, type ScreenshotDiffOptions, type ScreenshotDiffResult } from "./screenshot-diff.ts"
 
 const nodeModules = { fs, path, os, crypto, url, util, events, stream, buffer, http, https, zlib }
 const nodeModuleAliases = Object.keys(nodeModules).join(", ")
@@ -235,6 +236,7 @@ type SandboxGlobals = {
   readonly fillInput: (target: InputTarget, value: string) => Promise<void>
   readonly fillInputs: (page: Page, fields: ReadonlyArray<InputField>) => Promise<void>
   readonly screenshotWithLabels: (options: ScreenshotWithLabelsOptions) => Promise<ScreenshotWithLabelsResult>
+  readonly screenshotDiff: (options: ScreenshotDiffOptions) => Promise<ScreenshotDiffResult>
   readonly ariaSnapshot: AriaSnapshotHelper
   readonly snapshot: SnapshotHelper
   readonly ref: SnapshotRefHelper
@@ -785,6 +787,7 @@ export class ExecuteSandbox {
       fillInput: (target, value) => fillInput({ page, target, value }),
       fillInputs,
       screenshotWithLabels,
+      screenshotDiff: createScreenshotDiff(page),
       ariaSnapshot,
       snapshot,
       ref,
@@ -2415,6 +2418,7 @@ export async function runUserCode({ code, globals }: { readonly code: string; re
       "fillInput",
       "fillInputs",
       "screenshotWithLabels",
+      "screenshotDiff",
       "ariaSnapshot",
       "snapshot",
       "ref",
@@ -2435,6 +2439,7 @@ export async function runUserCode({ code, globals }: { readonly code: string; re
       globals.fillInput,
       globals.fillInputs,
       globals.screenshotWithLabels,
+      globals.screenshotDiff,
       globals.ariaSnapshot,
       globals.snapshot,
       globals.ref,

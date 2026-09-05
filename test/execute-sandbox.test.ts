@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events"
+import { PNG } from "pngjs"
 import { Effect, Fiber, Latch } from "effect"
 import { TestClock } from "effect/testing"
 import { beforeEach, describe, expect, it, vi } from "vitest"
@@ -14,6 +15,7 @@ vi.mock("playwright-core", () => ({
 
 class FakePage extends EventEmitter {
   closed = false
+  readonly screenshot = vi.fn(async () => PNG.sync.write(new PNG({ width: 2, height: 2 })))
   readonly frame = { url: () => this.url() }
   readonly evaluate = vi.fn(async (): Promise<unknown> => {
     if (this.closed) throw new Error("Target page has been closed")
@@ -69,6 +71,20 @@ beforeEach(() => {
 })
 
 describe("ExecuteSandbox", () => {
+  it("binds screenshotDiff to the session page and returns its image as execute media", async () => {
+    const context = new FakeContext()
+    connect(context)
+    const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test" })
+    try {
+      const result = await Effect.runPromise(sandbox.execute("state.before = await page.screenshot(); return await screenshotDiff({ baseline: state.before })"))
+      expect(result).toMatchObject({ isError: false, value: { matches: true, changedPixels: 0, changedRatio: 0 } })
+      expect(result.media).toHaveLength(1)
+      expect(result.media?.[0]).toMatchObject({ mimeType: "image/png" })
+      expect(context.targets[0]?.screenshot).toHaveBeenLastCalledWith({ type: "png", scale: "css", fullPage: false })
+    } finally {
+      await Effect.runPromise(sandbox.closeSettled())
+    }
+  })
   it.each(["success", "failure"] as const)("awaits owned page close %s before disconnecting and cleans only its own listeners", async (outcome) => {
     await Effect.runPromise(Effect.gen(function* () {
       const context = new FakeContext()
