@@ -19,6 +19,8 @@ import { resolveExplicitSessionSelector } from "./cli-session-selector.ts"
 
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const sessionIdConfig = Config.option(Config.string("BROWSER_CONTROL_SESSION"))
+const profileIdConfig = Config.option(Config.string("BROWSER_CONTROL_PROFILE"))
+const profileFlag = Flag.string("profile").pipe(Flag.optional, Flag.withDescription("Browser profile id or unique label from status; required when multiple profiles are available"))
 const targetUrlConfig = Config.option(Config.string("BROWSER_CONTROL_TARGET_URL"))
 const targetIndexConfig = Config.option(Config.int("BROWSER_CONTROL_TARGET_INDEX"))
 const encodedCliOperandsMarker = "bc-cli-operands:v1"
@@ -93,7 +95,9 @@ const ensureSessionExists = Effect.fnUntraced(function* (id: string) {
 const recordingTarget = Effect.fnUntraced(function* (options: {
   readonly session: Option.Option<string>
   readonly tabId: Option.Option<number>
+  readonly profile: Option.Option<string>
 }) {
+  const profileId = Option.getOrUndefined(options.profile) ?? Option.getOrUndefined(yield* profileIdConfig)
   const sessionId = Option.getOrUndefined(options.session)
   const tabId = Option.getOrUndefined(options.tabId)
   if (sessionId && tabId !== undefined) {
@@ -101,6 +105,7 @@ const recordingTarget = Effect.fnUntraced(function* (options: {
   }
   return {
     ...(sessionId ? { sessionId } : {}),
+    ...(profileId ? { profileId } : {}),
     ...(tabId === undefined ? {} : { tabId }),
   }
 })
@@ -211,12 +216,13 @@ const execute = Command.make(
   {
     code: Argument.string("code").pipe(Argument.variadic({ min: 0 })),
     file: Flag.string("file").pipe(Flag.optional, Flag.withDescription("Read execute code from a file")),
+    profile: profileFlag,
     session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Continue an existing Browser Control session; omit to create a fresh one")),
     targetUrl: Flag.string("target-url").pipe(Flag.optional, Flag.withDescription("Use the attached page whose URL contains this text")),
     targetIndex: Flag.integer("target-index").pipe(Flag.optional, Flag.withDescription("Use the attached page at this zero-based index")),
     json: Flag.boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Print a machine-readable result envelope: { ok, isError, text, value, valueUnavailable, error?, logs, warnings, diagnostic?, aftermath, session }")),
   },
-  Effect.fn("Cli.execute")(function* ({ code, file, session, targetUrl, targetIndex, json }) {
+  Effect.fn("Cli.execute")(function* ({ code, file, session, profile, targetUrl, targetIndex, json }) {
     const run = Effect.gen(function* () {
       const relay = yield* RelayClient.Service
       const filePath = Option.getOrUndefined(file)
@@ -237,8 +243,10 @@ const execute = Command.make(
       if (targetUrlValue && targetIndexValue !== undefined) {
         return yield* Effect.fail(new Error("Use only one target selector: --target-url/BROWSER_CONTROL_TARGET_URL or --target-index/BROWSER_CONTROL_TARGET_INDEX"))
       }
+      const profileId = Option.getOrUndefined(profile) ?? Option.getOrUndefined(yield* profileIdConfig)
       const result = yield* relay.execute({
         ...(explicitSessionId ? { sessionId: explicitSessionId } : {}),
+        ...(profileId ? { profileId } : {}),
         code: executeCode,
         createIfMissing: !explicitSessionId,
         ...(targetUrlValue || targetIndexValue !== undefined
@@ -302,13 +310,15 @@ const sessionNew = Command.make(
   "new",
   {
     name: Argument.string("name").pipe(Argument.optional, Argument.withDescription("Optional lowercase session id")),
+    profile: profileFlag,
     readOnly: Flag.boolean("read-only").pipe(Flag.withDefault(false), Flag.withDescription("Create a read-only session: the relay rejects input-dispatching CDP so scripts can inspect but not click or type")),
   },
-  Effect.fn("Cli.sessionNew")(function* ({ name, readOnly }) {
+  Effect.fn("Cli.sessionNew")(function* ({ name, readOnly, profile }) {
     const relay = yield* RelayClient.Service
     yield* ensureCliRelay()
     const store = yield* SessionStore.Service
-    const result = yield* relay.sessionNew(Option.getOrUndefined(name), readOnly ? { readOnly: true } : {})
+    const profileId = Option.getOrUndefined(profile) ?? Option.getOrUndefined(yield* profileIdConfig)
+    const result = yield* relay.sessionNew(Option.getOrUndefined(name), { ...(readOnly ? { readOnly: true } : {}), ...(profileId ? { profileId } : {}) })
     yield* store.write(result.id)
     yield* Console.log(result.id)
   }),
@@ -338,7 +348,7 @@ const sessionList = Command.make(
       const page = item.pageUrl ?? "no page yet"
       const keys = item.stateKeys.length ? ` state=${item.stateKeys.join(",")}` : ""
       const readOnly = item.readOnly ? " read-only" : ""
-      return Console.log(`${marker} ${item.id} ${page}${keys}${readOnly}`)
+      return Console.log(`${marker} ${item.id} ${page}${keys}${readOnly}${item.profileId ? ` profile=${item.profileName ?? item.profileId}` : ""}`)
     })
   }),
 ).pipe(Command.withDescription("List Browser Control sessions"))
@@ -388,10 +398,11 @@ const sessionAdopt = Command.make(
   "adopt",
   {
     session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Adopt into an existing Browser Control session; omit to create a fresh one")),
+    profile: profileFlag,
     targetUrl: Flag.string("target-url").pipe(Flag.optional, Flag.withDescription("Adopt the attached page whose URL contains this text")),
     targetIndex: Flag.integer("target-index").pipe(Flag.optional, Flag.withDescription("Adopt the attached page at this zero-based target index")),
   },
-  Effect.fn("Cli.sessionAdopt")(function* ({ session, targetUrl, targetIndex }) {
+  Effect.fn("Cli.sessionAdopt")(function* ({ session, profile, targetUrl, targetIndex }) {
     const relay = yield* RelayClient.Service
     yield* ensureCliRelayAndExtension()
     const explicitSessionId = Option.getOrUndefined(session) ?? Option.getOrUndefined(yield* sessionIdConfig)
@@ -406,8 +417,10 @@ const sessionAdopt = Command.make(
     if (targetUrlValue && targetIndexValue !== undefined) {
       return yield* Effect.fail(new Error("Use only one target selector: --target-url or --target-index"))
     }
+    const profileId = Option.getOrUndefined(profile) ?? Option.getOrUndefined(yield* profileIdConfig)
     const result = yield* relay.sessionAdopt({
       ...(explicitSessionId ? { sessionId: explicitSessionId } : {}),
+      ...(profileId ? { profileId } : {}),
       createIfMissing: !explicitSessionId,
       targetSelection: {
         ...(targetUrlValue ? { urlIncludes: targetUrlValue } : {}),
@@ -452,6 +465,28 @@ const sessionDelete = Command.make(
 const session = Command.make("session").pipe(
   Command.withDescription("Manage Browser Control sessions"),
   Command.withSubcommands([sessionNew, sessionList, sessionCurrent, sessionUse, sessionReset, sessionAdopt, sessionDelete]),
+)
+
+const profileList = Command.make("list", {}, Effect.fn("Cli.profileList")(function* () {
+  const relay = yield* RelayClient.Service
+  const status = yield* relay.extensionStatus
+  yield* Effect.forEach(status.profiles ?? [], (profile) => Console.log(`${profile.id}\t${profile.name ?? "(unnamed)"}\t${profile.connected ? "connected" : "disconnected"}`))
+})).pipe(Command.withDescription("List known browser profiles without starting the relay"))
+
+const profileName = Command.make("name", {
+  id: Argument.string("id"),
+  name: Argument.string("name"),
+}, Effect.fn("Cli.profileName")(function* ({ id, name }) {
+  const relay = yield* RelayClient.Service
+  yield* ensureCliRelayAndExtension()
+  if (!relay.profileName) return yield* Effect.fail(new Error("Profile naming is unavailable"))
+  const result = yield* relay.profileName({ profileId: id, name })
+  yield* Console.log(`${result.id}\t${result.name}`)
+})).pipe(Command.withDescription("Give a connected browser profile a persistent label"))
+
+const profile = Command.make("profile").pipe(
+  Command.withDescription("List and name browser profiles"),
+  Command.withSubcommands([profileList, profileName]),
 )
 
 const status = Command.make(
@@ -522,13 +557,14 @@ const status = Command.make(
     }
     yield* Console.log(`Extension: ${extensionStatus.connected ? "connected" : "disconnected"}${extensionStatus.version ? ` (${extensionStatus.version})` : ""}`)
     if ((extensionStatus.rejectedConnections ?? 0) > 0) {
-      yield* Console.log(`Warning: ${extensionStatus.rejectedConnections} competing browser/profile connection attempt(s) rejected; the active connection was preserved. Use Browser Control in one browser/profile at a time.`)
+      yield* Console.log(`Warning: ${extensionStatus.rejectedConnections} duplicate or legacy connection attempt(s) rejected. Reload older extensions to enable distinct profile identities.`)
     }
     if (extensionStatus.protocolVersion !== undefined && extensionStatus.protocolVersion !== null) {
       const compatibility = extensionStatus.protocolCompatible === false ? "incompatible" : "compatible"
       const legacy = extensionStatus.protocolLegacy === true ? ", inferred from legacy hello" : ""
       yield* Console.log(`Extension protocol: ${extensionStatus.protocolVersion} (${compatibility}${legacy})`)
     }
+    yield* Effect.forEach(extensionStatus.profiles ?? [], (profile) => Console.log(`Profile: ${profile.id}${profile.name ? ` (${profile.name})` : ""} — ${profile.connected ? "connected" : "disconnected"}`))
     yield* Console.log(`Active targets: ${extensionStatus.activeTargets}`)
     if (extensionStatus.childTargets !== undefined) {
       yield* Console.log(`Child targets: ${extensionStatus.childTargets}`)
@@ -571,16 +607,17 @@ const recordingStart = Command.make(
   {
     outputPath: Argument.string("output-path").pipe(Argument.withDescription("Path to write the recording artifact; tabCapture requires .webm, CDP accepts .webm or .mp4")),
     session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Record the page for this Browser Control or CDP session id")),
+    profile: profileFlag,
     tabId: Flag.integer("tab-id").pipe(Flag.optional, Flag.withDescription("Record this attached Chrome tab id")),
     mode: Flag.string("mode").pipe(Flag.optional, Flag.withDescription("Recording mode: auto, tab-capture, or cdp. auto uses CDP for relay-owned tabs and tabCapture for user-owned tabs")),
     audio: Flag.boolean("audio").pipe(Flag.withDefault(false), Flag.withDescription("Include tab audio")),
     frameRate: Flag.integer("frame-rate").pipe(Flag.optional, Flag.withDescription("Output frame rate, defaults to 30 for tab-capture and 25 for CDP")),
     maxDurationMs: Flag.integer("max-duration-ms").pipe(Flag.optional, Flag.withDescription("Auto-stop guard in milliseconds, defaults to 900000")),
   },
-  Effect.fn("Cli.recordingStart")(function* ({ outputPath, session, tabId, mode, audio, frameRate, maxDurationMs }) {
+  Effect.fn("Cli.recordingStart")(function* ({ outputPath, session, profile, tabId, mode, audio, frameRate, maxDurationMs }) {
     const relay = yield* RelayClient.Service
     yield* ensureCliRelayAndExtension()
-    const target = yield* recordingTarget({ session, tabId })
+    const target = yield* recordingTarget({ session, profile, tabId })
     const modeValue = yield* parseRecordingModeOption(Option.getOrUndefined(mode))
     const frameRateValue = Option.getOrUndefined(frameRate)
     const maxDurationMsValue = Option.getOrUndefined(maxDurationMs)
@@ -604,12 +641,13 @@ const recordingStop = Command.make(
   "stop",
   {
     session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Stop recording for this CDP session id")),
+    profile: profileFlag,
     tabId: Flag.integer("tab-id").pipe(Flag.optional, Flag.withDescription("Stop recording for this Chrome tab id")),
   },
-  Effect.fn("Cli.recordingStop")(function* ({ session, tabId }) {
+  Effect.fn("Cli.recordingStop")(function* ({ session, profile, tabId }) {
     const relay = yield* RelayClient.Service
     yield* ensureCliRelay()
-    const target = yield* recordingTarget({ session, tabId })
+    const target = yield* recordingTarget({ session, profile, tabId })
     const result = yield* relay.recordingStop(target)
     if (!result.success) {
       return yield* Effect.fail(new Error(result.error ?? "Failed to stop recording"))
@@ -623,13 +661,14 @@ const recordingStatus = Command.make(
   "status",
   {
     session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Check recording for this CDP session id")),
+    profile: profileFlag,
     tabId: Flag.integer("tab-id").pipe(Flag.optional, Flag.withDescription("Check recording for this Chrome tab id")),
     json: Flag.boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Print machine-readable JSON")),
   },
-  Effect.fn("Cli.recordingStatus")(function* ({ session, tabId, json }) {
+  Effect.fn("Cli.recordingStatus")(function* ({ session, profile, tabId, json }) {
     const relay = yield* RelayClient.Service
     yield* ensureCliRelay()
-    const target = yield* recordingTarget({ session, tabId })
+    const target = yield* recordingTarget({ session, profile, tabId })
     const result = yield* relay.recordingStatus(target)
     if (json) {
       yield* Console.log(JSON.stringify(result, null, 2))
@@ -648,12 +687,13 @@ const recordingCancel = Command.make(
   "cancel",
   {
     session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Cancel recording for this CDP session id")),
+    profile: profileFlag,
     tabId: Flag.integer("tab-id").pipe(Flag.optional, Flag.withDescription("Cancel recording for this Chrome tab id")),
   },
-  Effect.fn("Cli.recordingCancel")(function* ({ session, tabId }) {
+  Effect.fn("Cli.recordingCancel")(function* ({ session, profile, tabId }) {
     const relay = yield* RelayClient.Service
     yield* ensureCliRelay()
-    const target = yield* recordingTarget({ session, tabId })
+    const target = yield* recordingTarget({ session, profile, tabId })
     const result = yield* relay.recordingCancel(target)
     if (!result.success) {
       return yield* Effect.fail(new Error(result.error ?? "Failed to cancel recording"))
@@ -931,7 +971,7 @@ const mcp = Command.make(
 
 const browserControl = Command.make("browser-control").pipe(
   Command.withDescription("Control the user's existing browser through the Browser Control extension"),
-  Command.withSubcommands([serve, execute, session, status, network, secrets, recording, journal, doctor, skill, mcp]),
+  Command.withSubcommands([serve, execute, session, profile, status, network, secrets, recording, journal, doctor, skill, mcp]),
 )
 
 const mainLayer = Layer.mergeAll(RelayClient.layerFetch, SessionStore.layer).pipe(

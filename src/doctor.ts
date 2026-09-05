@@ -564,7 +564,7 @@ function buildDoctorRecommendations(options: {
     return !artifact.exists
   }) ? ["Run `pnpm build` to regenerate missing CLI or extension artifacts."] : []
   const connectionConflictRecommendations = options.extensionResult.ok && (options.extensionResult.value.rejectedConnections ?? 0) > 0
-    ? ["Keep Browser Control enabled in one browser/profile. To switch, disable it in the current browser before connecting the other; new sessions do not change the active browser."]
+    ? ["Reload older Browser Control extensions so each profile advertises its own persistent identity. Use `browser-control profile list` and select a profile with `--profile`; existing sessions remain pinned."]
     : []
   const staleSessionRecommendations = options.staleCurrent && options.current ? [
     `Current session ${options.current} is stale; run \`browser-control session new\` or \`browser-control session use <id>\` after the relay is running.`,

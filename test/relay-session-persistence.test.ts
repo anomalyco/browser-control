@@ -9,13 +9,14 @@ import { startRelay } from "../src/relay.ts"
 import { SessionCatalog } from "../src/session-catalog.ts"
 
 const temporaryDirectories: string[] = []
+const profileId = "11111111-1111-4111-8111-111111111111"
 
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) fs.rmSync(directory, { recursive: true, force: true })
 })
 
 describe("relay session persistence", () => {
-  it("restores a named session after a clean relay restart", async () => {
+  it("creates no phantom profile and restores a named session after a clean relay restart", async () => {
     const port = await freePort()
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "browser-control-relay-sessions-"))
     temporaryDirectories.push(directory)
@@ -24,12 +25,23 @@ describe("relay session persistence", () => {
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const relay = yield* startRelay({ port, sessionCatalogPath })
       yield* Effect.tryPromise(async () => {
-        const response = await fetch(new URL("/cli/session/new", relay.url), {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ id: "restart-proof", readOnly: true }),
-        })
-        expect(response.status).toBe(200)
+        const absent = await fetch(`${relay.url}/cli/session/new`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "restart-proof" }) })
+        expect(absent.status).toBe(404)
+        expect(await absent.json()).toMatchObject({ code: "profile-not-found" })
+        expect(await fetch(`${relay.url}/extension/status`).then((response) => response.json())).toMatchObject({ profiles: [] })
+        expect(await fetch(`${relay.url}/cli/sessions`).then((response) => response.json())).toMatchObject({ sessions: [] })
+        const extension = await openProtocolExtension(relay.url)
+        try {
+          await waitFor(async () => (await fetch(`${relay.url}/extension/status`).then((response) => response.json())).connected)
+          const response = await fetch(new URL("/cli/session/new", relay.url), {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ id: "restart-proof", readOnly: true }),
+          })
+          expect(response.status).toBe(200)
+        } finally {
+          extension.close()
+        }
       })
     })))
 
@@ -45,6 +57,242 @@ describe("relay session persistence", () => {
     })))
   })
 
+  it("durably restores profile pins and names without switching to the only connected profile", async () => {
+    const port = await freePort()
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "browser-control-relay-sessions-"))
+    temporaryDirectories.push(directory)
+    const sessionCatalogPath = path.join(directory, "sessions.json")
+    const otherProfileId = "22222222-2222-4222-8222-222222222222"
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port, sessionCatalogPath })
+      yield* Effect.tryPromise(async () => {
+        const personal = await openProtocolExtension(relay.url)
+        const work = await openProtocolExtension(relay.url, undefined, { profileId: otherProfileId, profileName: "Work" })
+        try {
+          await waitFor(async () => {
+            const status = await fetch(`${relay.url}/extension/status`).then((response) => response.json())
+            return status.profiles?.filter((profile: { connected: boolean }) => profile.connected).length === 2
+          })
+          for (const [id, selectedProfileId] of [["personal", profileId], ["work", otherProfileId]]) {
+            const response = await fetch(`${relay.url}/cli/session/new`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id, profileId: selectedProfileId }) })
+            expect(response.status).toBe(200)
+          }
+          expect(await new SessionCatalog(sessionCatalogPath).load()).toEqual(expect.arrayContaining([
+            expect.objectContaining({ id: "personal", profileId, profileName: "Personal" }),
+            expect.objectContaining({ id: "work", profileId: otherProfileId, profileName: "Work" }),
+          ]))
+        } finally {
+          personal.close()
+          work.close()
+        }
+      })
+    })))
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port, sessionCatalogPath })
+      yield* Effect.tryPromise(async () => {
+        expect(await fetch(`${relay.url}/cli/sessions`).then((response) => response.json())).toMatchObject({ sessions: expect.arrayContaining([
+          expect.objectContaining({ id: "personal", profileId, profileName: "Personal", connected: false }),
+          expect.objectContaining({ id: "work", profileId: otherProfileId, profileName: "Work", connected: false }),
+        ]) })
+        const work = await openProtocolExtension(relay.url, undefined, { profileId: otherProfileId, profileName: "Work" })
+        try {
+          await waitFor(async () => (await fetch(`${relay.url}/extension/status`).then((response) => response.json())).connected)
+          const ensured = await fetch(`${relay.url}/v1/sessions/ensure`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "personal" }) })
+          expect(ensured.status).toBe(200)
+          expect(await ensured.json()).toMatchObject({ session: { id: "personal", profileId, profileName: "Personal" } })
+          const mismatch = await fetch(`${relay.url}/v1/sessions/ensure`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "personal", profileId: otherProfileId }) })
+          expect(mismatch.status).toBe(409)
+        } finally {
+          work.close()
+        }
+      })
+    })))
+  })
+
+  it("restores colliding target identities only to their persisted profile owners", async () => {
+    const port = await freePort()
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "browser-control-relay-sessions-"))
+    temporaryDirectories.push(directory)
+    const sessionCatalogPath = path.join(directory, "sessions.json")
+    const otherProfileId = "22222222-2222-4222-8222-222222222222"
+    await new SessionCatalog(sessionCatalogPath).save([profileId, otherProfileId].map((id, index) => ({
+      id: index === 0 ? "personal" : "work",
+      profileId: id,
+      createdAt: "2026-09-05T00:00:00.000Z",
+      updatedAt: "2026-09-05T00:01:00.000Z",
+      readOnly: false,
+      target: { id: "shared-target", owner: "user" as const },
+    })))
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port, sessionCatalogPath })
+      yield* Effect.tryPromise(async () => {
+        const work = await openProtocolExtension(relay.url, "shared-target", { profileId: otherProfileId, profileName: "Work" })
+        const personal = await openProtocolExtension(relay.url, "shared-target")
+        try {
+          let targets: unknown
+          await waitFor(async () => {
+            targets = await fetch(`${relay.url}/json/list`).then((response) => response.json())
+            return Array.isArray(targets) && targets.length === 2
+          })
+          expect(targets).toEqual(expect.arrayContaining([
+            expect.objectContaining({ id: "shared-target", profileId, browserControlSessionId: "personal", owner: "user" }),
+            expect.objectContaining({ id: "shared-target", profileId: otherProfileId, browserControlSessionId: "work", owner: "user" }),
+          ]))
+          personal.close()
+          await waitFor(async () => (await fetch(`${relay.url}/json/list`).then((response) => response.json())).length === 1)
+          expect(await fetch(`${relay.url}/json/list`).then((response) => response.json())).toMatchObject([
+            { id: "shared-target", profileId: otherProfileId, browserControlSessionId: "work", owner: "user" },
+          ])
+        } finally {
+          work.close()
+          personal.close()
+        }
+      })
+    })))
+  })
+
+  it.each([undefined, "legacy"])("binds a legacy target (%s) only to its matching ready profile and never switches that pin", async (previousProfileId) => {
+    const port = await freePort()
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "browser-control-relay-sessions-"))
+    temporaryDirectories.push(directory)
+    const sessionCatalogPath = path.join(directory, "sessions.json")
+    const catalog = new SessionCatalog(sessionCatalogPath)
+    const otherProfileId = "22222222-2222-4222-8222-222222222222"
+    await catalog.save([{
+      id: "legacy-target-session",
+      ...(previousProfileId ? { profileId: previousProfileId } : {}),
+      createdAt: "2026-09-05T00:00:00.000Z",
+      updatedAt: "2026-09-05T00:01:00.000Z",
+      readOnly: true,
+      target: { id: "legacy-target", owner: "user" },
+    }])
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port, sessionCatalogPath })
+      yield* Effect.tryPromise(async () => {
+        const wrong = await openProtocolExtension(relay.url, "unrelated-target", { profileId: otherProfileId, profileName: "Work" })
+        let matching: WebSocket | undefined
+        let reconnectedWrong: WebSocket | undefined
+        try {
+          await waitFor(async () => (await fetch(`${relay.url}/extension/status`).then((response) => response.json())).connected)
+          const before = await fetch(`${relay.url}/cli/sessions`).then((response) => response.json())
+          expect(before.sessions).toHaveLength(1)
+          expect(before.sessions[0].profileId).not.toBe(otherProfileId)
+          expect(await fetch(`${relay.url}/json/list`).then((response) => response.json())).toEqual([
+            expect.objectContaining({ id: "unrelated-target", profileId: otherProfileId }),
+          ])
+          expect((await catalog.load())[0]?.profileId).not.toBe(otherProfileId)
+          const wrongEnsure = await fetch(`${relay.url}/v1/sessions/ensure`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "legacy-target-session" }) })
+          expect(wrongEnsure.status).toBe(409)
+          expect(await wrongEnsure.json()).toMatchObject({ code: "profile-mismatch" })
+          const wrongExplicit = await fetch(`${relay.url}/v1/sessions/ensure`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "legacy-target-session", profileId: otherProfileId }) })
+          expect(wrongExplicit.status).toBe(409)
+          expect((await catalog.load())[0]?.profileId).not.toBe(otherProfileId)
+          matching = await openProtocolExtension(relay.url, "legacy-target", { profileId, profileName: "Personal" }, false)
+          await waitFor(async () => (await fetch(`${relay.url}/json/list`).then((response) => response.json())).some((target: { id: string; profileId?: string }) => target.id === "legacy-target" && target.profileId === profileId))
+          expect((await catalog.load())[0]?.profileId).not.toBe(profileId)
+          const premature = await fetch(`${relay.url}/v1/sessions/ensure`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "legacy-target-session" }) })
+          expect(premature.status).toBe(409)
+          matching.send(JSON.stringify({ method: "ready" }))
+          await waitFor(async () => (await fetch(`${relay.url}/extension/status`).then((response) => response.json())).profiles.some((profile: { id: string; connected: boolean }) => profile.id === profileId && profile.connected))
+          const ensured = await fetch(`${relay.url}/v1/sessions/ensure`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "legacy-target-session" }) })
+          expect(ensured.status).toBe(200)
+          expect(await ensured.json()).toMatchObject({ session: { id: "legacy-target-session", profileId } })
+          expect(await fetch(`${relay.url}/json/list`).then((response) => response.json())).toEqual(expect.arrayContaining([
+            expect.objectContaining({ id: "legacy-target", profileId, browserControlSessionId: "legacy-target-session", owner: "user" }),
+          ]))
+          await waitFor(async () => (await catalog.load())[0]?.profileId === profileId)
+          expect(await catalog.load()).toMatchObject([{ id: "legacy-target-session", profileId, readOnly: true, target: { id: "legacy-target", owner: "user" } }])
+          matching.close()
+          wrong.close()
+          await waitFor(async () => (await fetch(`${relay.url}/json/list`).then((response) => response.json())).length === 0)
+          reconnectedWrong = await openProtocolExtension(relay.url, "legacy-target", { profileId: otherProfileId, profileName: "Work" })
+          await waitFor(async () => (await fetch(`${relay.url}/extension/status`).then((response) => response.json())).connected)
+          const wrongTargets = await fetch(`${relay.url}/json/list`).then((response) => response.json())
+          expect(wrongTargets).toHaveLength(1)
+          expect(wrongTargets[0]).toMatchObject({ id: "legacy-target", profileId: otherProfileId })
+          expect(wrongTargets[0].browserControlSessionId).toBeUndefined()
+          expect(await catalog.load()).toMatchObject([{ id: "legacy-target-session", profileId }])
+        } finally {
+          wrong.close()
+          matching?.close()
+          reconnectedWrong?.close()
+        }
+      })
+    })))
+  })
+
+  it("does not infer a legacy profile from target ids shared by two ready inventories", async () => {
+    const port = await freePort()
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "browser-control-relay-sessions-"))
+    temporaryDirectories.push(directory)
+    const sessionCatalogPath = path.join(directory, "sessions.json")
+    const catalog = new SessionCatalog(sessionCatalogPath)
+    const otherProfileId = "22222222-2222-4222-8222-222222222222"
+    await catalog.save([{
+      id: "legacy-collision",
+      createdAt: "2026-09-05T00:00:00.000Z",
+      updatedAt: "2026-09-05T00:01:00.000Z",
+      readOnly: false,
+      target: { id: "shared-target", owner: "user" },
+    }])
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port, sessionCatalogPath })
+      yield* Effect.tryPromise(async () => {
+        const personal = await openProtocolExtension(relay.url, "shared-target")
+        const work = await openProtocolExtension(relay.url, "shared-target", { profileId: otherProfileId, profileName: "Work" })
+        try {
+          await waitFor(async () => (await fetch(`${relay.url}/extension/status`).then((response) => response.json())).profiles.filter((profile: { connected: boolean }) => profile.connected).length === 2)
+          const ambiguous = await fetch(`${relay.url}/v1/sessions/ensure`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "legacy-collision" }) })
+          expect(ambiguous.status).toBe(409)
+          expect(await ambiguous.json()).toMatchObject({ code: "profile-ambiguous" })
+          expect([profileId, otherProfileId]).not.toContain((await catalog.load())[0]?.profileId)
+          const targets = await fetch(`${relay.url}/json/list`).then((response) => response.json())
+          expect(targets).toHaveLength(2)
+          expect(targets.every((target: { browserControlSessionId?: string }) => target.browserControlSessionId === undefined)).toBe(true)
+        } finally {
+          personal.close()
+          work.close()
+        }
+      })
+    })))
+  })
+
+  it("requires explicit profile selection before binding a targetless legacy session", async () => {
+    const port = await freePort()
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "browser-control-relay-sessions-"))
+    temporaryDirectories.push(directory)
+    const sessionCatalogPath = path.join(directory, "sessions.json")
+    const catalog = new SessionCatalog(sessionCatalogPath)
+    await catalog.save([{
+      id: "legacy-targetless",
+      createdAt: "2026-09-05T00:00:00.000Z",
+      updatedAt: "2026-09-05T00:01:00.000Z",
+      readOnly: true,
+    }])
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port, sessionCatalogPath })
+      yield* Effect.tryPromise(async () => {
+        const extension = await openProtocolExtension(relay.url)
+        try {
+          await waitFor(async () => (await fetch(`${relay.url}/extension/status`).then((response) => response.json())).connected)
+          const implicit = await fetch(`${relay.url}/v1/sessions/ensure`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "legacy-targetless" }) })
+          expect(implicit.status).toBe(409)
+          expect(await implicit.json()).toMatchObject({ error: expect.stringMatching(/profile/i) })
+          expect((await catalog.load())[0]?.profileId).not.toBe(profileId)
+          const explicit = await fetch(`${relay.url}/v1/sessions/ensure`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "legacy-targetless", profileId }) })
+          expect(explicit.status).toBe(200)
+          expect(await explicit.json()).toMatchObject({ session: { id: "legacy-targetless", profileId, profileName: "Personal", readOnly: true } })
+          expect(await catalog.load()).toMatchObject([{ id: "legacy-targetless", profileId, profileName: "Personal", readOnly: true }])
+          const automatic = await fetch(`${relay.url}/v1/sessions/ensure`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "legacy-targetless" }) })
+          expect(automatic.status).toBe(200)
+          expect(await automatic.json()).toMatchObject({ session: { id: "legacy-targetless", profileId } })
+        } finally {
+          extension.close()
+        }
+      })
+    })))
+  })
+
   it("reclaims persisted target ownership when the extension re-announces the tab", async () => {
     const port = await freePort()
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "browser-control-relay-sessions-"))
@@ -52,6 +300,7 @@ describe("relay session persistence", () => {
     const sessionCatalogPath = path.join(directory, "sessions.json")
     await new SessionCatalog(sessionCatalogPath).save([{
       id: "restored",
+      profileId,
       createdAt: "2026-07-19T00:00:00.000Z",
       updatedAt: "2026-07-19T00:01:00.000Z",
       readOnly: false,
@@ -139,6 +388,7 @@ describe("relay session persistence", () => {
     const catalog = new SessionCatalog(sessionCatalogPath)
     await catalog.save([{
       id: "restored",
+      profileId,
       createdAt: "2026-07-19T00:00:00.000Z",
       updatedAt: "2026-07-19T00:01:00.000Z",
       readOnly: false,
@@ -166,6 +416,7 @@ describe("relay session persistence", () => {
         expect(extension.commands.some((command) => command.method === "tabs.remove" && command.params?.tabId === 7)).toBe(true)
         await expect(catalog.load()).resolves.toMatchObject([{
           id: "restored",
+          profileId,
         }])
         expect((await catalog.load())[0]?.target).toBeUndefined()
         extension.close()
@@ -182,6 +433,7 @@ describe("relay session persistence", () => {
       const catalog = new SessionCatalog(sessionCatalogPath)
       await catalog.save([{
         id: "restored",
+        profileId,
         createdAt: "2026-07-19T00:00:00.000Z",
         updatedAt: "2026-07-19T00:01:00.000Z",
         readOnly: false,
@@ -222,6 +474,7 @@ describe("relay session persistence", () => {
     const catalog = new SessionCatalog(sessionCatalogPath)
     await catalog.save([{
       id: "restored",
+      profileId,
       createdAt: "2026-07-19T00:00:00.000Z",
       updatedAt: "2026-07-19T00:01:00.000Z",
       readOnly: false,
@@ -249,7 +502,7 @@ type FakeExtensionCommand = {
   readonly params?: { readonly method?: string; readonly tabId?: number }
 }
 
-async function openProtocolExtension(relayUrl: string, targetId?: string): Promise<WebSocket & { readonly commands: FakeExtensionCommand[] }> {
+async function openProtocolExtension(relayUrl: string, targetId?: string, identity = { profileId, profileName: "Personal" }, ready = true): Promise<WebSocket & { readonly commands: FakeExtensionCommand[] }> {
   const commands: FakeExtensionCommand[] = []
   const extension = await openSocket(`${relayUrl.replace("http://", "ws://")}/extension`)
   extension.on("message", (data) => {
@@ -260,9 +513,9 @@ async function openProtocolExtension(relayUrl: string, targetId?: string): Promi
       : {}
     extension.send(JSON.stringify({ id: command.id, result }))
   })
-  extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2 } }))
+  extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2, ...identity } }))
   if (targetId) extension.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 7 } }))
-  extension.send(JSON.stringify({ method: "ready" }))
+  if (ready) extension.send(JSON.stringify({ method: "ready" }))
   return Object.assign(extension, { commands })
 }
 
@@ -275,7 +528,7 @@ async function openFakeExtension(relayUrl: string, targetId: string): Promise<We
       : {}
     extension.send(JSON.stringify({ id: command.id, result }))
   })
-  extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2 } }))
+  extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2, profileId } }))
   extension.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 7 } }))
   return extension
 }

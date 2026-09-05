@@ -78,6 +78,8 @@ export interface ExecuteSandboxLike {
 
 export type BrowserControlSession = {
   readonly id: string
+  readonly profileId?: string
+  profileName?: string
   readonly createdAt: string
   readonly readOnly: boolean
   readonly sandbox: ExecuteSandboxLike

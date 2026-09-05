@@ -97,8 +97,9 @@ local Node relay.
   sandbox before releasing its execute permit, preventing a non-settling prompt
   action from mutating the page later. Cancel the waiter if WAIT presentation or
   action startup fails.
-- `TargetRegistry` is the sole production live target-ownership authority.
-  Session state keeps one durable default-target identity and owner. Adoption reserves,
+- Each browser profile has an isolated `TargetRegistry`, the sole live
+  target-ownership authority for that profile. Session state keeps one durable
+  profile ID, default-target identity, and owner. Adoption reserves,
   commits, or rolls back registry ownership transactionally and reconciles CDP
   visibility, grouping, and page status for every changed target.
 - Same-tab root target generations are explicit replacements, never map
@@ -260,7 +261,7 @@ browser-control skill
 
 - Load `extension/dist` as the unpacked extension.
 - The relay listens on `127.0.0.1:19989` by default.
-- Current shim version is `0.0.24` and extension protocol version is `2`.
+- Current shim version is `0.0.25` and extension protocol version is `2`.
 - Store and npm versions may differ while their extension protocol versions remain compatible.
 - The source and unpacked-build manifest carries the public key for stable id
   `eibhgjafffkigblngnhafgbcipofaeon`. Store packaging must strip that key so the

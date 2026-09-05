@@ -1,4 +1,5 @@
 import http from "node:http"
+import { AsyncLocalStorage } from "node:async_hooks"
 import stream from "node:stream"
 import crypto from "node:crypto"
 import fs from "node:fs"
@@ -30,6 +31,7 @@ import {
   getObject,
   getTargetInfo,
   headerValue,
+  HttpRouteError,
   isRestrictedTarget,
   listenHttpServer,
   logCloseError,
@@ -52,13 +54,14 @@ import {
 import { ExecuteSandbox, type HandoffPageTarget } from "./execute.ts"
 import { makePageStatus } from "./page-status.ts"
 import { appendJournalEntry, defaultJournalBaseDir, makeJournalEntry } from "./session-journal.ts"
-import { defaultSessionCatalogPath, SessionCatalog } from "./session-catalog.ts"
+import { defaultSessionCatalogPath, SessionCatalog, type PersistedSession } from "./session-catalog.ts"
 import { BrowserControlSessions } from "./session-manager.ts"
 import { RecordingRelay } from "./recording-relay.ts"
 import { appendManagedRelayProcessLog } from "./relay-log.ts"
 import { boundedToken, runtimeFailureKind, summarizeDiagnosticUrl, summarizeRuntimeEvaluate } from "./runtime-diagnostics.ts"
 import { shouldExposeChildTarget, TargetRegistry, type RootTargetChange, type TargetOwnershipChange } from "./target-registry.ts"
 import { browserControlVersion } from "./version.ts"
+import type { BrowserProfileSummary } from "./relay-schema.ts"
 
 export type { RelayServer } from "./relay-types.ts"
 
@@ -156,19 +159,303 @@ const makeRelay = Effect.fnUntraced(function* (options: {
 } = {}) {
   const host = defaultHost
   const port = options.port ?? defaultPort
-  const releaseTargetGraceMs = Math.max(0, options.releaseTargetGraceMs ?? 10_000)
   const browserId = crypto.randomUUID()
   const endpointUrl = `http://${formatHostForUrl(host)}:${port}`
+  const debugEnabled = yield* Config.boolean("BROWSER_CONTROL_DEBUG").pipe(Config.withDefault(false))
+  const managed = options.shutdown !== undefined
+    && (yield* Config.boolean("BROWSER_CONTROL_MANAGED_RELAY").pipe(Config.withDefault(false)))
   const allowAnyChromeExtension = browserControlVersion === "0.0.0-dev"
-  const bundledUnpackedExtensionOrigin = getBundledUnpackedExtensionOrigin()
+  const bundledOrigin = getBundledUnpackedExtensionOrigin()
   const additionalChromeExtensionOrigins = new Set([
-    ...(bundledUnpackedExtensionOrigin ? [bundledUnpackedExtensionOrigin] : []),
+    ...(bundledOrigin ? [bundledOrigin] : []),
     ...(options.additionalExtensionOrigins ?? []),
   ])
   const sessionCatalog = options.sessionCatalogPath === null
     ? undefined
     : new SessionCatalog(options.sessionCatalogPath ?? defaultSessionCatalogPath(port))
-  let catalogWritesEnabled = false
+  const runtimes = new Map<string, ProfileRuntime>()
+  const persisted = new Map<string, readonly PersistedSession[]>()
+  let persistenceTail = Promise.resolve()
+  let relayReady = false
+  let relayClosing = false
+  let catalogClosing = false
+  const bindSemaphore = Semaphore.makeUnsafe(1)
+  const persistAll = (): Promise<void> => {
+    if (!relayReady) return Promise.resolve()
+    // closeAll clears each manager independently. During shutdown use its final
+    // descriptor snapshots, still updated by draining executes, not cleared maps.
+    const snapshot = catalogClosing
+      ? Array.from(persisted.values()).flat()
+      : Array.from(runtimes.values()).flatMap((runtime) => runtime.sessions.persistedSessions())
+    const write = persistenceTail.catch(() => {}).then(() => sessionCatalog?.save(snapshot))
+    persistenceTail = write
+    return write
+  }
+  const createProfile = (profileId: string, profileName?: string): ProfileRuntime => {
+    const existing = runtimes.get(profileId)
+    if (existing) return existing
+    const runtime = makeProfileRuntime({
+      endpointUrl,
+      profileId,
+      ...(profileName ? { profileName } : {}),
+      releaseTargetGraceMs: Math.max(0, options.releaseTargetGraceMs ?? 10_000),
+      debugEnabled,
+      restoredSessions: persisted.get(profileId) ?? [],
+      isSessionIdTaken: (id) => Array.from(runtimes.values()).some((profile) => profile.sessions.sessions.has(id)),
+      onSessionsChanged: (entries) => {
+        persisted.set(profileId, entries)
+        return persistAll()
+      },
+    })
+    runtimes.set(profileId, runtime)
+    return runtime
+  }
+  const profiles: RelayProfiles = {
+    list: () => Array.from(runtimes.values()),
+    get: (profileId) => runtimes.get(profileId),
+    bind: (selection) => bindSemaphore.withPermit(Effect.gen(function* () {
+      if (relayClosing) return yield* Effect.fail(new Error("Browser Control relay is closing"))
+      const source = selection.sessionId ? Array.from(runtimes.values()).find((runtime) =>
+        runtime.sessions.sessions.has(selection.sessionId!) && (runtime.profileId === "unbound"
+          || (runtime.profileId === "legacy" && !runtime.extensionStatus().connected && !runtime.isInventoryPending()))) : undefined
+      const session = selection.sessionId ? source?.sessions.sessions.get(selection.sessionId) : undefined
+      if (!source || !session) return profiles.select(selection)
+      const selected = selection.profileId !== undefined ? profiles.select({ profileId: selection.profileId }) : undefined
+      let destination: RelayProfileRuntime | undefined
+      if (session.target) {
+        const targetId = session.target.id
+        if (!selected && Array.from(runtimes.values()).some((runtime) => runtime.isInventoryPending())) throw new HttpRouteError({ message: `Legacy session ${session.id} is waiting for all connected browser profile inventories to finish`, status: 409, code: "profile-mismatch" })
+        const matches = Array.from(runtimes.values()).filter((runtime) => runtime.profileId !== "unbound"
+          && runtime.extensionStatus().connected && runtime.registry.targetsByTargetId.has(targetId))
+        if (selected) {
+          if (!matches.includes(selected as ProfileRuntime)) throw new HttpRouteError({ message: `Legacy session ${session.id} can only bind where its exact target ${targetId} is attached`, status: 409, code: "profile-mismatch" })
+          destination = selected
+        } else {
+          if (matches.length > 1) throw new HttpRouteError({ message: `Legacy session ${session.id} target exists in multiple browser profiles; provide profileId`, status: 409, code: "profile-ambiguous" })
+          destination = matches[0]
+          if (!destination) throw new HttpRouteError({ message: `Legacy session ${session.id} is waiting for its exact target to appear in a connected browser profile`, status: 409, code: "profile-mismatch" })
+        }
+      } else {
+        if (!selected || selected.profileId === "unbound" || !selected.extensionStatus().connected) throw new HttpRouteError({ message: `Legacy session ${session.id} has no target; provide the profileId of a connected browser profile`, status: 409, code: "profile-mismatch" })
+        destination = selected
+      }
+      yield* source.sessions.transferTo(session.id, destination.sessions, persistAll)
+      ;(destination as ProfileRuntime).reconcileTransferredTarget(session.id)
+      return destination
+    })),
+    select: ({ profileId, sessionId }) => {
+      const all = Array.from(runtimes.values())
+      const owners = sessionId ? all.filter((profile) => profile.sessions.sessions.has(sessionId)) : []
+      if (owners.length > 1) throw new HttpRouteError({ message: `Session ${sessionId} exists in multiple profiles`, status: 409, code: "profile-ambiguous" })
+      let selected: ProfileRuntime | undefined
+      if (profileId !== undefined) {
+        const matches = runtimes.has(profileId) ? [runtimes.get(profileId)!] : all.filter((profile) => profile.profileName === profileId)
+        if (matches.length > 1) throw new HttpRouteError({ message: `Multiple profiles are named ${profileId}; use the exact profileId`, status: 409, code: "profile-ambiguous" })
+        selected = matches[0]
+        if (!selected) throw new HttpRouteError({ message: `Browser profile not found: ${profileId}`, status: 404, code: "profile-not-found" })
+      }
+      const owner = owners[0]
+      if (owner) {
+        if (selected && selected !== owner) throw new HttpRouteError({ message: `Session ${sessionId} is pinned to profile ${owner.profileId}`, status: 409, code: "profile-mismatch" })
+        return owner
+      }
+      if (selected) return selected
+      const connected = all.filter((profile) => profile.extensionStatus().connected)
+      if (connected.length === 1) return connected[0]!
+      if (connected.length > 1 || all.length > 1) throw new HttpRouteError({ message: "Multiple browser profiles are available; provide profileId", status: 409, code: "profile-ambiguous" })
+      if (all[0] && all[0].profileId !== "unbound") return all[0]
+      if (all.length === 0) throw new HttpRouteError({ message: "No browser profile is connected; connect the Browser Control extension first", status: 404, code: "profile-not-found" })
+      throw new HttpRouteError({ message: "Legacy sessions have no verified browser profile; connect a profile and select its profileId", status: 409, code: "profile-mismatch" })
+    },
+  }
+  const relayRequestHandler = createHttpRequestHandler({
+    host, port, browserId,
+    relayInstance: { id: browserId, startedAt: new Date().toISOString(), pid: process.pid, managed },
+    shutdown: options.shutdown ?? (() => {}),
+    profiles,
+    extensionStatus: () => {
+      const all = profiles.list()
+      const statuses = all.map((runtime) => runtime.extensionStatus())
+      const connected = statuses.filter((status) => status.connected)
+      const representative = connected.length > 0 ? connected : statuses.filter((status) => status.protocolCompatible !== null)
+      const shared = <K extends "version" | "protocolVersion" | "protocolCompatible" | "protocolLegacy">(key: K) => {
+        const value = representative[0]?.[key] ?? null
+        return representative.every((status) => status[key] === value) ? value : null
+      }
+      return {
+        connected: connected.length > 0,
+        version: shared("version"),
+        protocolVersion: shared("protocolVersion"),
+        protocolCompatible: shared("protocolCompatible"),
+        protocolLegacy: shared("protocolLegacy"),
+        rejectedConnections: statuses.reduce((count, status) => count + status.rejectedConnections, 0),
+        cdpClients: statuses.reduce((count, status) => count + status.cdpClients, 0),
+        profiles: all.map((runtime) => ({
+          id: runtime.profileId,
+          ...(runtime.profileName ? { name: runtime.profileName } : {}),
+          connected: runtime.extensionStatus().connected,
+          version: runtime.extensionStatus().version,
+          activeTargets: runtime.registry.rootTargetCount(),
+        })),
+      }
+    },
+  })
+  const httpServer = http.createServer((request, response) => {
+    if (!relayReady || relayClosing) {
+      response.writeHead(503, { "content-type": "application/json; charset=utf-8", "retry-after": "1" })
+      response.end(JSON.stringify({ error: "Browser Control relay is starting or stopping", code: "relay-starting" }))
+      return
+    }
+    relayRequestHandler(request, response)
+  })
+  const websocketServer = new WebSocketServer({ noServer: true })
+  const cleanup = Effect.fnUntraced(function* () {
+    relayClosing = true
+    // Drain migration before freezing manager identities; draining session work
+    // may still update these cached descriptors through onSessionsChanged.
+    yield* bindSemaphore.withPermit(Effect.sync(() => {
+      if (catalogClosing) return
+      for (const [profileId, runtime] of runtimes) persisted.set(profileId, runtime.sessions.persistedSessions())
+      catalogClosing = true
+    }))
+    yield* Effect.forEach(Array.from(runtimes.values()), (runtime) => runtime.close(), { concurrency: "unbounded" })
+    for (const socket of websocketServer.clients) socket.close()
+    yield* Effect.promise(() => persistenceTail.catch(() => {}))
+    yield* closeWebSocketServer(websocketServer).pipe(logCloseError("Failed to close websocket server"))
+    yield* closeHttpServer(httpServer).pipe(logCloseError("Failed to close http server"))
+  })
+  httpServer.on("upgrade", (request, socket, head) => {
+    if (!relayReady || relayClosing) {
+      sendUpgradeError({ socket, status: 404, message: "Browser Control relay is starting or stopping" })
+      return
+    }
+    const hostError = validateHostHeader({ hostHeader: request.headers.host, host, port })
+    if (hostError) {
+      sendUpgradeError({ socket, status: 403, message: hostError })
+      return
+    }
+    const requestUrl = new URL(request.url ?? "/", endpointUrl)
+    const extension = requestUrl.pathname === "/extension"
+    if (!extension && !requestUrl.pathname.startsWith("/devtools/browser/")) {
+      socket.destroy()
+      return
+    }
+    const origin = headerValue(request.headers.origin)
+    const originError = validateWebSocketOrigin({ origin, requireChromeExtension: extension, allowAnyChromeExtension, additionalChromeExtensionOrigins })
+    if (originError) {
+      sendUpgradeError({ socket, status: 403, message: originError })
+      return
+    }
+    let selected: ProfileRuntime | undefined
+    const sessionId = requestUrl.searchParams.get("browserControlSessionId") ?? headerValue(request.headers["browser-control-session-id"])
+    if (!extension) {
+      try {
+        const profileId = requestUrl.searchParams.get("profileId") ?? headerValue(request.headers["browser-control-profile-id"])
+        selected = profiles.select({ ...(profileId !== undefined ? { profileId } : {}), ...(sessionId ? { sessionId } : {}) }) as ProfileRuntime
+      } catch (error) {
+        sendUpgradeError({ socket, status: error instanceof HttpRouteError && error.status === 404 ? 404 : 409, message: error instanceof Error ? error.message : String(error) })
+        return
+      }
+    }
+    websocketServer.handleUpgrade(request, socket, head, (websocket) => {
+      if (selected) {
+        selected.acceptCdp(websocket, sessionId)
+        return
+      }
+      const helloTimeout = setTimeout(() => websocket.close(4002, "Extension hello required"), 10_000)
+      websocket.once("close", () => clearTimeout(helloTimeout))
+      websocket.once("message", (data, isBinary) => {
+        clearTimeout(helloTimeout)
+        const raw = data.toString()
+        const hello = isBinary ? undefined : parseJsonObject(raw)
+        if (!hello || !isExtensionEvent(hello) || hello.method !== "hello") {
+          websocket.close(4002, "Extension hello required")
+          return
+        }
+        const identity = hello.params?.profileId
+        if (identity !== undefined && (typeof identity !== "string" || !/^[a-zA-Z0-9._-]{1,128}$/.test(identity) || identity === "legacy" || identity === "unbound")) {
+          websocket.close(4002, "Invalid browser profile identity")
+          return
+        }
+        const profileId = typeof identity === "string" ? identity : "legacy"
+        const name = typeof hello.params?.profileName === "string" ? hello.params.profileName.trim().slice(0, 200) : undefined
+        createProfile(profileId, name).acceptExtension(websocket, raw)
+      })
+    })
+  })
+  yield* Effect.catch(Effect.gen(function* () {
+    // Win the port before reading or writing any durable session state.
+    yield* listenHttpServer({ server: httpServer, host, port })
+    const restoredSessions = yield* Effect.tryPromise({
+      try: () => sessionCatalog?.load() ?? Promise.resolve([]),
+      catch: (cause) => cause instanceof Error ? cause : new Error("Load Browser Control session catalog", { cause }),
+    })
+    yield* Effect.try({
+      try: () => {
+        const ids = new Set<string>()
+        for (const entry of restoredSessions) {
+          if (ids.has(entry.id)) throw new Error(`Duplicate persisted session: ${entry.id}`)
+          ids.add(entry.id)
+          const profileId = entry.profileId ?? "unbound"
+          persisted.set(profileId, [...(persisted.get(profileId) ?? []), { ...entry, profileId }])
+        }
+        for (const [profileId, entries] of persisted) createProfile(profileId, entries.find((entry) => entry.profileName)?.profileName)
+      },
+      catch: (cause) => cause instanceof Error ? cause : new Error("Restore Browser Control sessions", { cause }),
+    })
+    relayReady = true
+  }), (error) => Effect.gen(function* () {
+    yield* cleanup()
+    return yield* Effect.fail(error)
+  }))
+  return { url: endpointUrl, close: () => cleanup() }
+})
+
+export type RelayProfileRuntime = {
+  readonly profileId: string
+  readonly profileName: string | undefined
+  readonly registry: TargetRegistry
+  readonly sessions: BrowserControlSessions
+  readonly recordingRelay: RecordingRelay
+  readonly renameProfile: (name: string) => Promise<BrowserProfileSummary>
+  readonly extensionStatus: () => {
+    readonly connected: boolean
+    readonly version: string | null
+    readonly protocolVersion: number | null
+    readonly protocolCompatible: boolean | null
+    readonly protocolLegacy: boolean | null
+    readonly rejectedConnections: number
+    readonly cdpClients: number
+  }
+}
+
+export type RelayProfiles = {
+  readonly list: () => readonly RelayProfileRuntime[]
+  readonly get: (profileId: string) => RelayProfileRuntime | undefined
+  readonly bind: (options: { readonly profileId?: string; readonly sessionId?: string }) => Effect.Effect<RelayProfileRuntime, Error>
+  readonly select: (options: { readonly profileId?: string; readonly sessionId?: string }) => RelayProfileRuntime
+}
+
+type ProfileRuntime = RelayProfileRuntime & {
+  readonly acceptExtension: (socket: WebSocket, rawHello: string) => void
+  readonly acceptCdp: (socket: WebSocket, sessionId: string | undefined) => void
+  readonly reconcileTransferredTarget: (sessionId: string) => void
+  readonly isInventoryPending: () => boolean
+  readonly close: () => Effect.Effect<void>
+}
+
+function makeProfileRuntime(options: {
+  readonly endpointUrl: string
+  readonly profileId: string
+  readonly profileName?: string
+  readonly releaseTargetGraceMs: number
+  readonly debugEnabled: boolean
+  readonly restoredSessions: readonly PersistedSession[]
+  readonly onSessionsChanged: (entries: readonly PersistedSession[]) => Promise<void>
+  readonly isSessionIdTaken: (id: string) => boolean
+}): ProfileRuntime {
+  const { endpointUrl, releaseTargetGraceMs } = options
+  let profileName = options.profileName
   const registry = new TargetRegistry()
   const rootLifecycleSemaphores = new Map<number, Semaphore.Semaphore>()
   type RootReconciliationWorker = {
@@ -186,8 +473,19 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   let extensionGeneration = 0
   let rejectedExtensionConnections = 0
   const extensionRpc = new ExtensionRpc()
+  // An old socket's asynchronous work must never issue commands on its successor.
+  const connectionEpoch = new AsyncLocalStorage<number>()
   const sendToExtension = Effect.fnUntraced(function* (command: Parameters<ExtensionRpc["send"]>[0]) {
-    return yield* extensionRpc.send(command)
+    const epoch = connectionEpoch.getStore()
+    if (epoch !== undefined && epoch !== extensionGeneration) {
+      return yield* Effect.fail(new Error("Extension connection changed before command completed"))
+    }
+    const generation = extensionGeneration
+    const result = yield* extensionRpc.send(command)
+    if (generation !== extensionGeneration) {
+      return yield* Effect.fail(new Error("Extension connection changed while command was in flight"))
+    }
+    return result
   })
   const sendDebuggerCommand = Effect.fnUntraced(function* (options: {
     readonly tabId: number
@@ -205,9 +503,26 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       },
     })
   })
-  const recordingRelay = new RecordingRelay({
+  class ProfileRecordingRelay extends RecordingRelay {
+    override startRecording(...args: Parameters<RecordingRelay["startRecording"]>) {
+      return connectionEpoch.run(connectionEpoch.getStore() ?? extensionGeneration, () => super.startRecording(...args))
+    }
+    override stopRecording(...args: Parameters<RecordingRelay["stopRecording"]>) {
+      return connectionEpoch.run(connectionEpoch.getStore() ?? extensionGeneration, () => super.stopRecording(...args))
+    }
+    override statusRecording(...args: Parameters<RecordingRelay["statusRecording"]>) {
+      return connectionEpoch.run(connectionEpoch.getStore() ?? extensionGeneration, () => super.statusRecording(...args))
+    }
+    override cancelRecording(...args: Parameters<RecordingRelay["cancelRecording"]>) {
+      return connectionEpoch.run(connectionEpoch.getStore() ?? extensionGeneration, () => super.cancelRecording(...args))
+    }
+    override cleanupAll(...args: Parameters<RecordingRelay["cleanupAll"]>) {
+      return connectionEpoch.run(connectionEpoch.getStore() ?? extensionGeneration, () => super.cleanupAll(...args))
+    }
+  }
+  const recordingRelay = new ProfileRecordingRelay({
     sendToExtension: (command) => {
-      return Effect.runPromise(extensionRpc.send(command))
+      return Effect.runPromise(sendToExtension(command))
     },
     sendDebuggerCommand: (command) => {
       return Effect.runPromise(sendDebuggerCommand(command))
@@ -218,8 +533,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   })
   const handoffs = new HandoffRegistry()
   const activeHandoffTabs = new Map<string, Set<number>>()
-  const clearLiveExtensionState = (reason: string) => {
-    void recordingRelay.cleanupAll(reason).catch(() => {})
+  const clearLiveExtensionState = (reason: string, retiringGeneration = extensionGeneration) => {
+    void connectionEpoch.run(retiringGeneration, () => recordingRelay.cleanupAll(reason)).catch(() => {})
     pendingTabGrouping.clear()
     for (const target of [...registry.listRootTargets()]) {
       detachTargetState(target.tabId, { preserveSessionTarget: true, updateExtension: false })
@@ -374,6 +689,12 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         }),
       }),
     {
+      profileId: options.profileId,
+      ...(profileName ? { profileName } : {}),
+      isSessionIdTaken: options.isSessionIdTaken,
+      getUserAttachedPageUrls: () => registry.listRootTargets()
+        .filter((target) => target.owner === "user")
+        .map((target) => target.targetInfo.url || "about:blank"),
       onExecuteStateChange: (sessionId, executing) => {
         setActivityForSessionTabs(sessionId, executing ? "running" : "attached", executionBadge(sessionId, executing))
         if (!executing) {
@@ -407,9 +728,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         reconcileTargetOwnership(change)
       },
       onReleaseRelayTarget: (targetId) => releaseRelayTarget(targetId),
-      onSessionsChanged: async (entries) => {
-        if (catalogWritesEnabled) await sessionCatalog?.save(entries)
-      },
+      onSessionsChanged: options.onSessionsChanged,
     },
     registry,
   )
@@ -506,43 +825,17 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     refreshPageStatus(tabId)
     refreshTabGrouping(tabId)
   }
-  const managed = options.shutdown !== undefined
-    && (yield* Config.boolean("BROWSER_CONTROL_MANAGED_RELAY").pipe(Config.withDefault(false)))
-  const relayRequestHandler = createHttpRequestHandler({
-    host,
-    port,
-    browserId,
-    relayInstance: { id: browserId, startedAt: new Date().toISOString(), pid: process.pid, managed },
-    shutdown: options.shutdown ?? (() => {}),
-    registry,
-    recordingRelay,
-    sessions,
-    extensionStatus: () => {
-      return {
-        connected: extensionRpc.connected,
-        version: extensionRpc.version ?? null,
-        protocolVersion: extensionRpc.protocolVersion ?? null,
-        protocolCompatible: extensionRpc.protocolCompatible ?? null,
-        protocolLegacy: extensionRpc.protocolLegacy ?? null,
-        rejectedConnections: rejectedExtensionConnections,
-        cdpClients: cdpClients.size,
-      }
-    },
+  const extensionStatus = () => ({
+    connected: extensionRpc.connected,
+    version: extensionRpc.version ?? null,
+    protocolVersion: extensionRpc.protocolVersion ?? null,
+    protocolCompatible: extensionRpc.protocolCompatible ?? null,
+    protocolLegacy: extensionRpc.protocolLegacy ?? null,
+    rejectedConnections: rejectedExtensionConnections,
+    cdpClients: cdpClients.size,
   })
-  let relayReady = false
-  const httpServer = http.createServer((request, response) => {
-    if (!relayReady) {
-      response.writeHead(503, { "content-type": "application/json; charset=utf-8", "retry-after": "1" })
-      response.end(JSON.stringify({ error: "Browser Control relay is starting", code: "relay-starting" }))
-      return
-    }
-    relayRequestHandler(request, response)
-  })
-
-  const debugEnabled = yield* Config.boolean("BROWSER_CONTROL_DEBUG").pipe(Config.withDefault(false))
-  const debugLog = debugEnabled ? (line: string) => console.error(`[bc ${new Date().toISOString().slice(11, 23)}] ${line}`) : undefined
+  const debugLog = options.debugEnabled ? (line: string) => console.error(`[bc ${new Date().toISOString().slice(11, 23)} profile=${options.profileId}] ${line}`) : undefined
   const contextDebugLog = debugLog ? (line: string) => debugLog(`[bc:ctx] ${line}`) : undefined
-  const websocketServer = new WebSocketServer({ noServer: true })
   const cdpClients = new CdpClientPool<WebSocket>()
   const cdpRouter = new CdpRouter(cdpClients, registry)
   const runtimeContextWaiters = new Set<(event: CdpEvent) => void>()
@@ -627,100 +920,46 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     extensionRpc.close()
     rootLifecycleSemaphores.clear()
-    yield* closeWebSocketServer(websocketServer).pipe(logCloseError("Failed to close websocket server"))
-    yield* closeHttpServer(httpServer).pipe(logCloseError("Failed to close http server"))
   })
 
-  httpServer.on("upgrade", (request, socket, head) => {
-    if (!relayReady) {
-      sendUpgradeError({ socket, status: 404, message: "Browser Control relay is starting" })
+  function acceptExtension(socket: WebSocket, rawHello: string): void {
+    const socketGeneration = acceptExtensionHello(socket, rawHello)
+    if (socketGeneration === undefined) {
+      socket.close(4002, "Extension hello required")
       return
     }
-    const hostError = validateHostHeader({ hostHeader: request.headers.host, host, port })
-    if (hostError) {
-      sendUpgradeError({ socket, status: 403, message: hostError })
-      return
-    }
-    const requestUrl = new URL(request.url ?? "/", endpointUrl)
-    const origin = Array.isArray(request.headers.origin) ? request.headers.origin[0] : request.headers.origin
-    if (requestUrl.pathname === "/extension") {
-      const originError = validateWebSocketOrigin({
-        origin,
-        requireChromeExtension: true,
-        allowAnyChromeExtension,
-        additionalChromeExtensionOrigins,
-      })
-      if (originError) {
-        sendUpgradeError({ socket, status: 403, message: originError })
-        return
-      }
-      websocketServer.handleUpgrade(request, socket, head, (websocket) => {
-        websocketServer.emit("connection", websocket, request)
-      })
-      return
-    }
-    if (requestUrl.pathname.startsWith("/devtools/browser/")) {
-      const originError = validateWebSocketOrigin({ origin, allowAnyChromeExtension, additionalChromeExtensionOrigins })
-      if (originError) {
-        sendUpgradeError({ socket, status: 403, message: originError })
-        return
-      }
-      websocketServer.handleUpgrade(request, socket, head, (websocket) => {
-        websocketServer.emit("connection", websocket, request)
-      })
-      return
-    }
-    socket.destroy()
-  })
-
-  websocketServer.on("connection", (socket, request) => {
-    const requestUrl = new URL(request.url ?? "/", endpointUrl)
-    if (requestUrl.pathname === "/extension") {
-      let handshaken = false
-      let socketGeneration = 0
-      const announcedRootTabIds = new Set<number>()
-      socket.on("message", (data, isBinary) => {
-        try {
-          if (!handshaken) {
-            const acceptedGeneration = isBinary ? undefined : acceptExtensionHello(socket, data.toString())
-            if (acceptedGeneration === undefined) {
-              socket.close(4002, "Extension hello required")
-              return
-            }
-            socketGeneration = acceptedGeneration
-            handshaken = true
-            return
+    const announcedRootTabIds = new Set<number>()
+    socket.on("message", (data, isBinary) => {
+      try {
+        if (!extensionRpc.isCurrent(socket) || !extensionRpc.acceptsEvents) return
+        if (isBinary) {
+          try {
+            recordingRelay.handleBinaryData(rawDataToBuffer(data))
+          } catch {
+            socket.close(1002, "Invalid recording frame")
           }
-          if (!extensionRpc.isCurrent(socket) || !extensionRpc.acceptsEvents) {
-            return
-          }
-          if (isBinary) {
-            try {
-              recordingRelay.handleBinaryData(rawDataToBuffer(data))
-            } catch {
-              socket.close(1002, "Invalid recording frame")
-            }
-            return
-          }
-          handleExtensionMessage(socket, data.toString(), socketGeneration, announcedRootTabIds)
-        } catch (error) {
-          console.error("Extension message handling failed", error)
+          return
         }
-      })
-      socket.on("close", () => {
-        if (extensionRpc.disconnectIfCurrent(socket)) {
-          rejectedExtensionConnections = 0
-          clearLiveExtensionState("Extension disconnected")
-        }
-      })
-      return
-    }
+        connectionEpoch.run(socketGeneration, () => handleExtensionMessage(socket, data.toString(), socketGeneration, announcedRootTabIds))
+      } catch (error) {
+        console.error("Extension message handling failed", error)
+      }
+    })
+    socket.on("close", () => {
+      if (extensionRpc.disconnectIfCurrent(socket)) {
+        const retiringGeneration = extensionGeneration
+        extensionGeneration += 1
+        rejectedExtensionConnections = 0
+        clearLiveExtensionState("Extension disconnected", retiringGeneration)
+      }
+    })
+  }
 
-    const browserControlSessionId = requestUrl.searchParams.get("browserControlSessionId") ?? headerValue(request.headers["browser-control-session-id"])
+  function acceptCdp(socket: WebSocket, browserControlSessionId: string | undefined): void {
     cdpClients.register(socket, browserControlSessionId)
     debugLog?.(`client+ ${browserControlSessionId ?? "raw"} total=${cdpClients.size}`)
     socket.on("message", (data) => {
-      Effect.runPromise(handleCdpMessage(socket, data.toString())).catch((error: unknown) => {
+      connectionEpoch.run(extensionGeneration, () => Effect.runPromise(handleCdpMessage(socket, data.toString()))).catch((error: unknown) => {
         sendCdpResponse(socket, {
           id: 0,
           error: { message: error instanceof Error ? error.message : String(error) },
@@ -736,7 +975,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         })
       }
     })
-  })
+  }
 
   const close = cleanup()
 
@@ -764,17 +1003,23 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (extensionRpc.acceptsEvents) {
       rejectedExtensionConnections += 1
       extensionRpc.probeLiveness()
-      socket.close(4004, "Another browser or profile is already connected")
+      socket.close(4004, "Another connection for this browser profile is already active")
       return extensionGeneration
     }
+    const retiringGeneration = extensionGeneration
     extensionGeneration += 1
     rejectedExtensionConnections = 0
-    clearLiveExtensionState("Extension replaced")
+    clearLiveExtensionState("Extension replaced", retiringGeneration)
     extensionRpc.replaceSocket(socket)
     extensionRpc.markHandshake(
       typeof message.params?.version === "string" ? message.params.version : undefined,
       message.params?.protocolVersion,
     )
+    const announcedName = typeof message.params?.profileName === "string" ? message.params.profileName.trim().slice(0, 100) : undefined
+    if (announcedName && announcedName !== profileName) {
+      profileName = announcedName
+      void Effect.runPromise(sessions.setProfileName(announcedName)).catch((error) => console.error("Persist browser profile name failed", error))
+    }
     if (protocol.legacy) {
       extensionRpc.markReady()
     }
@@ -1585,10 +1830,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
               expectedExtensionGeneration: generation,
             }))
           }
-          if (generation !== extensionGeneration) {
-            detachTargetState(tabId, { preserveSessionTarget: true, updateExtension: false })
-            return false
-          }
+          if (generation !== extensionGeneration) return false
           retries = 0
           if (worker.verificationRetries > 0 && !relayClosing) {
             const retryDelayMs = 50 * (4 - worker.verificationRetries)
@@ -1599,7 +1841,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         } catch (error) {
           console.error(errorMessage, error)
           if (generation !== extensionGeneration) {
-            detachTargetState(tabId, { preserveSessionTarget: true, updateExtension: false })
             reconciled = false
           } else if (retries < 2 && !relayClosing) {
             retries += 1
@@ -1879,46 +2120,45 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
   }
 
-  yield* Effect.catch(listenHttpServer({ server: httpServer, host, port }), (error) => {
-    return Effect.gen(function* () {
-      yield* cleanup()
-      return yield* Effect.fail(error)
-    })
-  })
-
-  yield* Effect.catch(
-    Effect.gen(function* () {
-      const restoredSessions = yield* Effect.tryPromise({
-        try: () => sessionCatalog?.load() ?? Promise.resolve([]),
-        catch: (cause) => cause instanceof Error ? cause : new Error("Load Browser Control session catalog", { cause }),
-      })
-      yield* Effect.try({
-        try: () => sessions.restore(restoredSessions),
-        catch: (cause) => cause instanceof Error ? cause : new Error("Restore Browser Control sessions", { cause }),
-      })
-      catalogWritesEnabled = true
-      relayReady = true
-    }),
-    (error) => Effect.gen(function* () {
-      yield* cleanup()
-      return yield* Effect.fail(error)
-    }),
-  )
-
+  sessions.restore(options.restoredSessions)
   return {
-    url: endpointUrl,
-    close: () => {
-      return close
+    profileId: options.profileId,
+    get profileName() { return profileName },
+    registry,
+    sessions,
+    recordingRelay,
+    renameProfile: async (name) => {
+      const normalized = name.trim()
+      if (!normalized || normalized.length > 100) throw new HttpRouteError({ message: "Browser profile name must be 1–100 characters", status: 400, code: "invalid-request" })
+      if (!extensionRpc.connected) throw new HttpRouteError({ message: `Browser profile ${options.profileId} is not connected`, status: 409, code: "profile-not-found" })
+      const generation = extensionGeneration
+      await connectionEpoch.run(generation, () => Effect.runPromise(sendToExtension({ method: "profile.rename", params: { name: normalized } })))
+      if (generation !== extensionGeneration) throw new Error("Extension changed while renaming browser profile")
+      profileName = normalized
+      await Effect.runPromise(sessions.setProfileName(normalized))
+      return { id: options.profileId, name: normalized, connected: extensionRpc.connected, version: extensionRpc.version ?? null, activeTargets: registry.rootTargetCount() }
     },
+    extensionStatus,
+    isInventoryPending: () => extensionRpc.acceptsEvents && !extensionRpc.connected,
+    acceptExtension,
+    acceptCdp,
+    reconcileTransferredTarget: (sessionId) => {
+      const durable = sessions.sessions.get(sessionId)?.target
+      const target = durable ? registry.targetsByTargetId.get(durable.id) : undefined
+      if (!durable || !target || target.browserControlSessionId !== sessionId) return
+      registry.addRootTarget({ ...target, owner: durable.owner })
+      reconcileTargetOwnership({ targetIds: [durable.id], tabIds: [target.tabId] })
+    },
+    close: () => close,
   }
-})
+}
 
 function sendUpgradeError(options: {
   readonly socket: stream.Duplex
-  readonly status: 400 | 403 | 404
+  readonly status: 400 | 403 | 404 | 409
   readonly message: string
 }): void {
-  const statusText = options.status === 400 ? "Bad Request" : options.status === 403 ? "Forbidden" : "Not Found"
+  const statusText = options.status === 400 ? "Bad Request" : options.status === 403 ? "Forbidden" : options.status === 409 ? "Conflict" : "Not Found"
   options.socket.write(
     `HTTP/1.1 ${options.status} ${statusText}\r\ncontent-type: text/plain; charset=utf-8\r\nconnection: close\r\n\r\n${options.message}`,
   )

@@ -160,7 +160,7 @@ describe("createDoctorReport", () => {
       const conflict = report.checks.find((check) => check.id === "extension-connection-conflicts")
       if (rejectedConnections === undefined) expect(conflict).toBeUndefined()
       else expect(conflict?.status).toBe(rejectedConnections > 0 ? "warn" : "ok")
-      expect(report.recommendations.some((message) => message.includes("one browser/profile"))).toBe((rejectedConnections ?? 0) > 0)
+      expect(report.recommendations.some((message) => message.includes("persistent identity"))).toBe((rejectedConnections ?? 0) > 0)
     } finally {
       await fs.rm(packageRoot, { recursive: true, force: true })
     }

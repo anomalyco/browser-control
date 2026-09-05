@@ -7,6 +7,8 @@ import { isValidSessionId } from "./relay-helpers.ts"
 
 export const PersistedSession = Schema.Struct({
   id: Schema.String,
+  profileId: Schema.optionalKey(Schema.String),
+  profileName: Schema.optionalKey(Schema.String),
   createdAt: Schema.String,
   updatedAt: Schema.String,
   readOnly: Schema.Boolean,

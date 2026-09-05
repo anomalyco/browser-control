@@ -32,6 +32,13 @@ The user's already-running Chromium-family browser with the Browser Control
 extension installed.
 _Avoid_: Chrome-only, managed browser
 
+**Browser Profile**:
+One extension installation, identified by a persistent locally generated profile
+ID. Each profile has isolated live transport, targets, and sessions within the
+same daemon. An optional user-chosen label is not a detected account identity.
+Browser profiles are distinct from secret profiles used for captured credentials.
+_Avoid_: Browser Control session, secret profile, Google account
+
 **Local Driver Daemon**:
 The persistent Node process that owns Playwright execution, Browser Control
 sessions, target ownership, cross-process serialization, artifacts, and the

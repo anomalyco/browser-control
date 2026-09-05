@@ -1,4 +1,5 @@
 import http from "node:http"
+import { Effect } from "effect"
 import { describe, expect, it } from "vitest"
 import { createHttpRequestHandler } from "../src/http-api.ts"
 import { RecordingRelay } from "../src/recording-relay.ts"
@@ -36,6 +37,19 @@ describe("HTTP request schemas", () => {
     })
     const sessions = new BrowserControlSessions(`http://127.0.0.1:${port}`, undefined, undefined, registry)
     sessions.createNew("beta")
+    const runtime = {
+      profileId: "11111111-1111-4111-8111-111111111111",
+      profileName: undefined,
+      renameProfile: async (name: string) => ({ id: "11111111-1111-4111-8111-111111111111", name, connected: false }),
+      registry,
+      sessions,
+      extensionStatus: () => ({ connected: true, version: "9.4.2", protocolVersion: 2, protocolCompatible: true, protocolLegacy: false, rejectedConnections: 0, cdpClients: 0 }),
+      recordingRelay: new RecordingRelay({
+        isExtensionConnected: () => true,
+        sendToExtension: async () => ({}),
+        sendDebuggerCommand: async () => ({}),
+      }),
+    }
     handler = createHttpRequestHandler({
       relayInstance: { id: "relay-test", startedAt: "2026-07-19T00:00:00.000Z", pid: 123, managed: false },
       shutdown: () => {},
@@ -49,13 +63,7 @@ describe("HTTP request schemas", () => {
         protocolCompatible: true,
         protocolLegacy: false,
       }),
-      recordingRelay: new RecordingRelay({
-        isExtensionConnected: () => true,
-        sendToExtension: async () => ({}),
-        sendDebuggerCommand: async () => ({}),
-      }),
-      registry,
-      sessions,
+      profiles: { list: () => [runtime], get: () => runtime, select: () => runtime, bind: () => Effect.succeed(runtime) },
     })
 
     try {
@@ -166,6 +174,19 @@ describe("HTTP request schemas", () => {
     if (!address || typeof address === "string") throw new Error("test server did not bind a TCP port")
     const port = address.port
     const registry = new TargetRegistry()
+    const runtime = {
+      profileId: "11111111-1111-4111-8111-111111111111",
+      profileName: undefined,
+      renameProfile: async (name: string) => ({ id: "11111111-1111-4111-8111-111111111111", name, connected: false }),
+      registry,
+      sessions: new BrowserControlSessions(`http://127.0.0.1:${port}`, undefined, undefined, registry),
+      extensionStatus: () => ({ connected: false, version: null, protocolVersion: null, protocolCompatible: null, protocolLegacy: null, rejectedConnections: 0, cdpClients: 0 }),
+      recordingRelay: new RecordingRelay({
+        isExtensionConnected: () => false,
+        sendToExtension: async () => ({}),
+        sendDebuggerCommand: async () => ({}),
+      }),
+    }
     handler = createHttpRequestHandler({
       relayInstance: { id: "managed-relay", startedAt: "2026-08-23T00:00:00.000Z", pid: 456, managed: true },
       shutdown: () => { shutdowns++ },
@@ -173,13 +194,7 @@ describe("HTTP request schemas", () => {
       port,
       browserId: "test-browser",
       extensionStatus: () => ({ connected: false, version: null, protocolVersion: null, protocolCompatible: null, protocolLegacy: null }),
-      recordingRelay: new RecordingRelay({
-        isExtensionConnected: () => false,
-        sendToExtension: async () => ({}),
-        sendDebuggerCommand: async () => ({}),
-      }),
-      registry,
-      sessions: new BrowserControlSessions(`http://127.0.0.1:${port}`, undefined, undefined, registry),
+      profiles: { list: () => [runtime], get: () => runtime, select: () => runtime, bind: () => Effect.succeed(runtime) },
     })
 
     try {

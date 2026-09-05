@@ -77,6 +77,7 @@ describe("relay extension handshake", () => {
     const sessionCatalogPath = path.join(directory, "sessions.json")
     await new SessionCatalog(sessionCatalogPath).save([{
       id: "restored",
+      profileId: "11111111-1111-4111-8111-111111111111",
       createdAt: "2026-08-21T00:00:00.000Z",
       updatedAt: "2026-08-21T00:01:00.000Z",
       readOnly: false,
@@ -89,7 +90,7 @@ describe("relay extension handshake", () => {
         targetId: "restored-target",
         suspendedMethod: "tabs.group",
       }))
-      extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2 } }))
+      extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2, profileId: "11111111-1111-4111-8111-111111111111" } }))
       extension.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 7 } }))
       extension.send(JSON.stringify({ method: "ready" }))
 
@@ -198,6 +199,139 @@ describe("relay extension handshake", () => {
     })))
   })
 
+  it("isolates colliding tab and target ids across simultaneous profiles and disconnects", async () => {
+    const port = 24_000 + Math.floor(Math.random() * 10_000)
+    const profileA = "11111111-1111-4111-8111-111111111111"
+    const profileB = "22222222-2222-4222-8222-222222222222"
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port, sessionCatalogPath: null })
+      const first = yield* Effect.promise(() => connectRespondingExtension(relay.url, { targetId: "shared-target" }))
+      const secondOptions: { targetId: string; suspendedMethod?: ExtensionCommand["method"] } = { targetId: "shared-target" }
+      const second = yield* Effect.promise(() => connectRespondingExtension(relay.url, secondOptions))
+      let clientA: Awaited<ReturnType<typeof connectCdpClient>> | undefined
+      let clientB: Awaited<ReturnType<typeof connectCdpClient>> | undefined
+      try {
+        for (const [socket, profileId, profileName] of [[first, profileA, "Personal"], [second, profileB, "Work"]] as const) {
+          socket.send(JSON.stringify({ method: "hello", params: { version: "0.0.24", protocolVersion: 2, profileId, profileName } }))
+          socket.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 7 } }))
+          socket.send(JSON.stringify({ method: "ready" }))
+        }
+        const status = yield* Effect.promise(() => waitForStatus(relay.url, (candidate) => candidate.profiles?.filter((profile) => profile.connected).length === 2))
+        expect(status).toMatchObject({ connected: true, activeTargets: 2 })
+        expect(status.profiles).toEqual(expect.arrayContaining([
+          expect.objectContaining({ id: profileA, name: "Personal", connected: true, activeTargets: 1 }),
+          expect.objectContaining({ id: profileB, name: "Work", connected: true, activeTargets: 1 }),
+        ]))
+        clientA = yield* Effect.promise(() => connectCdpClient(relay.url, profileA))
+        clientB = yield* Effect.promise(() => connectCdpClient(relay.url, profileB))
+        for (const client of [clientA, clientB]) {
+          yield* Effect.promise(() => sendCdp(client, { id: 1, method: "Target.setAutoAttach", params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true } }))
+          expect(client.events.filter((event) => event.method === "Target.attachedToTarget")).toHaveLength(1)
+        }
+        const sessionA = clientA.events.find((event) => event.method === "Target.attachedToTarget")?.params?.sessionId as string
+        const sessionB = clientB.events.find((event) => event.method === "Target.attachedToTarget")?.params?.sessionId as string
+        yield* Effect.promise(() => sendCdp(clientA!, { id: 2, method: "Runtime.evaluate", sessionId: sessionA, params: { expression: "personalOnly" } }))
+        expect(first.commands.some((command) => (command.params?.params as { expression?: string } | undefined)?.expression === "personalOnly")).toBe(true)
+        expect(second.commands.some((command) => (command.params?.params as { expression?: string } | undefined)?.expression === "personalOnly")).toBe(false)
+
+        for (const socket of [first, second]) {
+          socket.send(JSON.stringify({ method: "debugger.event", params: {
+            tabId: 7,
+            method: "Target.attachedToTarget",
+            params: { sessionId: "shared-child-session", targetInfo: { targetId: "shared-worker", type: "worker", title: "Worker", url: "https://example.com/worker.js", attached: true, canAccessOpener: false }, waitingForDebugger: false },
+          } }))
+        }
+        yield* Effect.promise(() => waitFor(() => [clientA!, clientB!].every((client) => client.events.filter((event) => event.method === "Target.attachedToTarget").length === 2)))
+        const childB = clientB.events.find((event) => event.method === "Target.attachedToTarget" && (event.params?.targetInfo as { targetId?: string } | undefined)?.targetId === "shared-worker")?.params?.sessionId as string
+        yield* Effect.promise(() => sendCdp(clientB!, { id: 3, method: "Runtime.evaluate", sessionId: childB, params: { expression: "workChildOnly" } }))
+        expect(second.commands).toContainEqual(expect.objectContaining({ method: "debugger.sendCommand", params: expect.objectContaining({ tabId: 7, sessionId: "shared-child-session", params: { expression: "workChildOnly" } }) }))
+        expect(first.commands.some((command) => (command.params?.params as { expression?: string } | undefined)?.expression === "workChildOnly")).toBe(false)
+
+        secondOptions.suspendedMethod = "debugger.sendCommand"
+        const evaluation = () => second.commands.find((command) => (command.params?.params as { expression?: string } | undefined)?.expression === "workOnly")
+        const pending = sendCdp(clientB, { id: 2, method: "Runtime.evaluate", sessionId: sessionB, params: { expression: "workOnly" } }).then(() => true, () => false)
+        yield* Effect.promise(() => waitFor(() => evaluation() !== undefined))
+        const closed = waitForClose(first)
+        first.close()
+        yield* Effect.promise(() => closed)
+        yield* Effect.promise(() => waitFor(() => clientA!.events.some((event) => event.method === "Target.detachedFromTarget")))
+        const remaining = yield* Effect.promise(() => waitForStatus(relay.url, (candidate) => candidate.activeTargets === 1))
+        expect(remaining.profiles).toEqual(expect.arrayContaining([expect.objectContaining({ id: profileB, connected: true, activeTargets: 1 })]))
+        expect(clientB.events.some((event) => event.method === "Target.detachedFromTarget")).toBe(false)
+        expect(second.readyState).toBe(WebSocket.OPEN)
+        second.respond(evaluation()!)
+        expect(yield* Effect.promise(() => pending)).toBe(true)
+        expect(first.commands.some((command) => (command.params?.params as { expression?: string } | undefined)?.expression === "workOnly")).toBe(false)
+      } finally {
+        clientA?.close()
+        clientB?.close()
+        first.close()
+        second.close()
+      }
+    })))
+  })
+
+  it("requires an explicit profile for new work and keeps named sessions pinned", async () => {
+    const port = 24_000 + Math.floor(Math.random() * 10_000)
+    const profileA = "11111111-1111-4111-8111-111111111111"
+    const profileB = "22222222-2222-4222-8222-222222222222"
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port, sessionCatalogPath: null })
+      const first = yield* Effect.promise(() => connectExtension(relay.url))
+      const second = yield* Effect.promise(() => connectExtension(relay.url))
+      try {
+        for (const [socket, profileId, profileName] of [[first, profileA, "Personal"], [second, profileB, "Work"]] as const) {
+          socket.send(JSON.stringify({ method: "hello", params: { version: "0.0.24", protocolVersion: 2, profileId, profileName } }))
+          socket.send(JSON.stringify({ method: "ready" }))
+        }
+        yield* Effect.promise(() => waitForStatus(relay.url, (status) => status.profiles?.filter((profile) => profile.connected).length === 2))
+        yield* Effect.promise(async () => {
+          for (const [pathname, body] of [
+            ["/cli/session/new", { id: "ambiguous" }],
+            ["/v1/sessions/ensure", { id: "ambiguous" }],
+            ["/cli/execute", { code: "1", createIfMissing: true }],
+            ["/cli/session/adopt", { createIfMissing: true, targetSelection: { urlIncludes: "example.com" } }],
+            ["/recording/start", { outputPath: "/tmp/profile-ambiguity.webm" }],
+          ] as const) {
+            const response = await fetch(`${relay.url}${pathname}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })
+            expect(response.status, pathname).toBe(409)
+            expect(await response.json(), pathname).toMatchObject({ code: "profile-ambiguous", error: expect.stringMatching(/profile/i) })
+          }
+          expect(await fetch(`${relay.url}/cli/sessions`).then((response) => response.json())).toMatchObject({ sessions: [] })
+          const created = await fetch(`${relay.url}/cli/session/new`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "personal", profileId: profileA }) })
+          expect(created.status).toBe(200)
+          expect(await created.json()).toMatchObject({ session: { id: "personal", profileId: profileA, profileName: "Personal" } })
+          const ensured = await fetch(`${relay.url}/v1/sessions/ensure`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "personal" }) })
+          expect(ensured.status).toBe(200)
+          expect(await ensured.json()).toMatchObject({ session: { id: "personal", profileId: profileA } })
+          for (const pathname of ["/cli/session/new", "/v1/sessions/ensure"]) {
+            const conflict = await fetch(`${relay.url}${pathname}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "personal", profileId: profileB }) })
+            expect(conflict.status, pathname).toBe(409)
+            expect(await conflict.json()).toMatchObject({ code: "profile-mismatch" })
+          }
+          const mismatch = await fetch(`${relay.url}/cli/execute`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sessionId: "personal", profileId: profileB, code: "1", createIfMissing: false }) })
+          expect(mismatch.status).toBe(409)
+          expect(await mismatch.json()).toMatchObject({ code: "profile-mismatch", error: expect.stringMatching(/profile/i) })
+        })
+        const closed = waitForClose(first)
+        first.close()
+        yield* Effect.promise(() => closed)
+        yield* Effect.promise(() => waitForStatus(relay.url, (status) => status.profiles?.filter((profile) => profile.connected).length === 1))
+        yield* Effect.promise(async () => {
+          const pinned = await fetch(`${relay.url}/v1/sessions/ensure`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "personal" }) })
+          expect(pinned.status).toBe(200)
+          expect(await pinned.json()).toMatchObject({ session: { id: "personal", profileId: profileA, profileName: "Personal" } })
+          const automatic = await fetch(`${relay.url}/cli/session/new`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "work" }) })
+          expect(automatic.status).toBe(200)
+          expect(await automatic.json()).toMatchObject({ session: { id: "work", profileId: profileB, profileName: "Work" } })
+        })
+      } finally {
+        first.close()
+        second.close()
+      }
+    })))
+  })
+
   it("protects a compatible browser's handshake before its inventory is ready", async () => {
     const port = 24_000 + Math.floor(Math.random() * 10_000)
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
@@ -271,7 +405,12 @@ describe("relay extension handshake", () => {
   })
 })
 
-type ExtensionStatus = { readonly connected: boolean; readonly activeTargets: number; readonly protocolCompatible?: boolean }
+type ExtensionStatus = {
+  readonly connected: boolean
+  readonly activeTargets: number
+  readonly protocolCompatible?: boolean
+  readonly profiles?: readonly { readonly id: string; readonly name?: string; readonly connected: boolean; readonly activeTargets?: number }[]
+}
 type CdpMessage = CdpEvent | CdpResponse
 
 async function connectRespondingExtension(
@@ -331,9 +470,9 @@ async function waitForStatus(relayUrl: string, predicate: (status: ExtensionStat
   }
 }
 
-function connectCdpClient(relayUrl: string): Promise<WebSocket & { readonly events: CdpEvent[]; readonly messages: CdpMessage[] }> {
+function connectCdpClient(relayUrl: string, profileId?: string): Promise<WebSocket & { readonly events: CdpEvent[]; readonly messages: CdpMessage[] }> {
   return new Promise((resolve, reject) => {
-    const socket = new WebSocket(`${relayUrl.replace(/^http/, "ws")}/devtools/browser/test`)
+    const socket = new WebSocket(`${relayUrl.replace(/^http/, "ws")}/devtools/browser/test${profileId ? `?profileId=${profileId}` : ""}`)
     const messages: CdpMessage[] = []
     const events: CdpEvent[] = []
     socket.on("open", () => resolve(Object.assign(socket, { events, messages })))

@@ -20,6 +20,7 @@ import {
   AuthenticatedJsonRequest,
   AuthRefreshRequest,
   AuthRunRequest,
+  BrowserProfileNameRequest,
   ExecuteRequest,
   NetworkSessionRequest,
   NetworkStartRequest,
@@ -34,8 +35,9 @@ import {
   type ExtensionStatus,
   type TargetSummary,
 } from "./relay-schema.ts"
-import { SessionError, type BrowserControlSessions } from "./session-manager.ts"
-import type { RecordingRelay, RecordingStartOptions, RecordingTargetOptions } from "./recording-relay.ts"
+import { SessionError } from "./session-manager.ts"
+import type { RecordingStartOptions, RecordingTargetOptions } from "./recording-relay.ts"
+import type { RelayProfiles, RelayProfileRuntime } from "./relay.ts"
 import { TargetOwnershipError, type TargetRegistry } from "./target-registry.ts"
 import { browserControlBuildId, browserControlVersion } from "./version.ts"
 
@@ -45,18 +47,9 @@ export function createHttpRequestHandler(options: {
   readonly browserId: string
   readonly relayInstance: { readonly id: string; readonly startedAt: string; readonly pid: number; readonly managed: boolean }
   readonly shutdown: () => void
-  readonly extensionStatus: () => Pick<ExtensionStatus,
-    "connected" | "version" | "protocolVersion" | "protocolCompatible" | "protocolLegacy" | "rejectedConnections" | "cdpClients"
-  >
-  readonly recordingRelay: RecordingRelay
-  readonly registry: TargetRegistry
-  readonly sessions: BrowserControlSessions
+  readonly profiles: RelayProfiles
+  readonly extensionStatus?: () => Pick<ExtensionStatus, "connected" | "version" | "protocolVersion" | "protocolCompatible" | "protocolLegacy" | "rejectedConnections" | "cdpClients" | "profiles">
 }): (request: http.IncomingMessage, response: http.ServerResponse) => void {
-  options.sessions.setUserAttachedPageUrlsProvider(() =>
-    options.registry.listRootTargets()
-      .filter((target) => target.owner === "user")
-      .map((target) => target.targetInfo.url || "about:blank")
-  )
   return (request, response) => {
     const hostError = validateHostHeader({ hostHeader: request.headers.host, host: options.host, port: options.port })
     if (hostError) {
@@ -97,24 +90,51 @@ export function createHttpRequestHandler(options: {
       return
     }
     if (pathname === "/json/version") {
-      const browserControlSessionId = headerValue(request.headers["browser-control-session-id"])
-      const webSocketDebuggerUrl = new URL(`ws://${formatHostForUrl(options.host)}:${options.port}/devtools/browser/${options.browserId}`)
-      if (browserControlSessionId) {
-        webSocketDebuggerUrl.searchParams.set("browserControlSessionId", browserControlSessionId)
-      }
-      sendJson(response, {
-        Browser: `Browser-Control/${browserControlVersion}`,
-        "Protocol-Version": "1.3",
-        webSocketDebuggerUrl: webSocketDebuggerUrl.toString(),
-      })
+      runRequestEffect(response, Effect.sync(() => {
+        const browserControlSessionId = headerValue(request.headers["browser-control-session-id"])
+        const profileId = requestUrl.searchParams.get("profileId") ?? headerValue(request.headers["browser-control-profile-id"])
+        const runtime = options.profiles.select({
+          ...(browserControlSessionId ? { sessionId: browserControlSessionId } : {}),
+          ...(profileId ? { profileId } : {}),
+        })
+        const webSocketDebuggerUrl = new URL(`ws://${formatHostForUrl(options.host)}:${options.port}/devtools/browser/${options.browserId}`)
+        webSocketDebuggerUrl.searchParams.set("profileId", runtime.profileId)
+        if (browserControlSessionId) {
+          webSocketDebuggerUrl.searchParams.set("browserControlSessionId", browserControlSessionId)
+        }
+        sendJson(response, {
+          Browser: `Browser-Control/${browserControlVersion}`,
+          "Protocol-Version": "1.3",
+          webSocketDebuggerUrl: webSocketDebuggerUrl.toString(),
+        })
+      }))
       return
     }
     if (pathname === "/json/list") {
-      sendJson(response, targetSummaries(options.registry))
+      sendJson(response, options.profiles.list().flatMap((runtime) => targetSummaries(runtime)))
       return
     }
     if (pathname === "/extension/status") {
-      const extensionStatus = options.extensionStatus()
+      const runtimes = options.profiles.list()
+      const statuses = runtimes.map((runtime) => runtime.extensionStatus())
+      const connected = statuses.filter((status) => status.connected)
+      const primary = connected.length === 1 ? connected[0] : statuses.length === 1 ? statuses[0] : undefined
+      const extensionStatus: Pick<ExtensionStatus, "connected" | "version" | "protocolVersion" | "protocolCompatible" | "protocolLegacy" | "rejectedConnections" | "cdpClients" | "profiles"> = options.extensionStatus?.() ?? {
+        connected: connected.length > 0,
+        version: primary?.version ?? null,
+        protocolVersion: primary?.protocolVersion ?? null,
+        protocolCompatible: connected.length > 0 ? connected.every((status) => status.protocolCompatible === true) : null,
+        protocolLegacy: connected.length > 0 ? connected.some((status) => status.protocolLegacy === true) : null,
+        rejectedConnections: statuses.reduce((count, status) => count + status.rejectedConnections, 0),
+        cdpClients: statuses.reduce((count, status) => count + status.cdpClients, 0),
+        profiles: runtimes.map((runtime, index) => ({
+          id: runtime.profileId,
+          ...(runtime.profileName === undefined ? {} : { name: runtime.profileName }),
+          connected: statuses[index]!.connected,
+          version: statuses[index]!.version,
+          activeTargets: runtime.registry.rootTargetCount(),
+        })),
+      }
       sendJson(response, {
         connected: extensionStatus.connected,
         version: extensionStatus.version,
@@ -123,23 +143,36 @@ export function createHttpRequestHandler(options: {
         ...(extensionStatus.protocolLegacy === undefined ? {} : { protocolLegacy: extensionStatus.protocolLegacy }),
         ...(extensionStatus.rejectedConnections === undefined ? {} : { rejectedConnections: extensionStatus.rejectedConnections }),
         ...(extensionStatus.cdpClients === undefined ? {} : { cdpClients: extensionStatus.cdpClients }),
-        activeTargets: options.registry.rootTargetCount(),
-        childTargets: options.registry.childTargets.size,
-        sessions: options.sessions.listSummaries(),
-        targets: targetSummaries(options.registry),
+        ...(extensionStatus.profiles === undefined ? {} : { profiles: extensionStatus.profiles }),
+        activeTargets: options.profiles.list().reduce((count, runtime) => count + runtime.registry.rootTargetCount(), 0),
+        childTargets: options.profiles.list().reduce((count, runtime) => count + runtime.registry.childTargets.size, 0),
+        sessions: options.profiles.list().flatMap((runtime) => runtime.sessions.listSummaries()),
+        targets: options.profiles.list().flatMap((runtime) => targetSummaries(runtime)),
       })
       return
     }
+    if (pathname === "/profiles/name" && request.method === "POST") {
+      runRequestEffect(response, Effect.gen(function* () {
+        const body = yield* decodeRequest(BrowserProfileNameRequest, yield* readJsonBody(request), "profile name")
+        const runtime = options.profiles.select({ profileId: body.profileId })
+        const profile = yield* Effect.tryPromise({
+          try: () => runtime.renameProfile(body.name),
+          catch: (cause) => cause instanceof Error ? cause : new Error("Rename browser profile", { cause }),
+        })
+        sendJson(response, profile)
+      }))
+      return
+    }
     if (pathname.startsWith("/recording/")) {
-      runRequestEffect(response, handleRecordingRequest({ request, response, pathname, requestUrl, registry: options.registry, recordingRelay: options.recordingRelay }))
+      runRequestEffect(response, handleRecordingRequest({ request, response, pathname, requestUrl, profiles: options.profiles }))
       return
     }
     if (pathname.startsWith("/network/")) {
-      runRequestEffect(response, handleNetworkRequest({ request, response, pathname, sessions: options.sessions }))
+      runRequestEffect(response, handleNetworkRequest({ request, response, pathname, profiles: options.profiles }))
       return
     }
     if (pathname.startsWith("/auth/")) {
-      runRequestEffect(response, handleAuthRequest({ request, response, pathname, sessions: options.sessions }))
+      runRequestEffect(response, handleAuthRequest({ request, response, pathname, profiles: options.profiles }))
       return
     }
     if (pathname.startsWith("/v1/")) {
@@ -147,7 +180,7 @@ export function createHttpRequestHandler(options: {
         request,
         response,
         pathname,
-        sessions: options.sessions,
+        profiles: options.profiles,
       }))
       return
     }
@@ -156,8 +189,7 @@ export function createHttpRequestHandler(options: {
         request,
         response,
         pathname,
-        sessions: options.sessions,
-        registry: options.registry,
+        profiles: options.profiles,
       }))
       return
     }
@@ -170,13 +202,14 @@ function handleClientRequest(options: {
   readonly request: http.IncomingMessage
   readonly response: http.ServerResponse
   readonly pathname: string
-  readonly sessions: BrowserControlSessions
+  readonly profiles: RelayProfiles
 }): Effect.Effect<void, Error> {
   return Effect.gen(function* () {
     if (options.pathname === "/v1/sessions/ensure" && options.request.method === "POST") {
       const request = yield* decodeRequest(SessionEnsureRequest, yield* readJsonBody(options.request), "session ensure")
+      const { sessions } = yield* options.profiles.bind({ sessionId: request.id, ...(request.profileId ? { profileId: request.profileId } : {}) })
       sendJson(options.response, {
-        session: yield* options.sessions.ensure(request.id, {
+        session: yield* sessions.ensure(request.id, {
           ...(request.readOnly === undefined ? {} : { readOnly: request.readOnly }),
         }),
       })
@@ -185,7 +218,8 @@ function handleClientRequest(options: {
     if (options.pathname === "/v1/authenticated-origin/json" && options.request.method === "POST") {
       const request = yield* decodeRequest(AuthenticatedJsonRequest, yield* readJsonBody(options.request), "authenticated origin")
       options.response.setHeader("cache-control", "no-store")
-      sendJson(options.response, yield* options.sessions.authenticatedJson(request))
+      const { sessions } = yield* options.profiles.bind({ sessionId: request.sessionId })
+      sendJson(options.response, yield* sessions.authenticatedJson(request))
       return
     }
     options.response.writeHead(404)
@@ -197,30 +231,34 @@ function handleNetworkRequest(options: {
   readonly request: http.IncomingMessage
   readonly response: http.ServerResponse
   readonly pathname: string
-  readonly sessions: BrowserControlSessions
+  readonly profiles: RelayProfiles
 }): Effect.Effect<void, Error> {
   return Effect.gen(function* () {
     if (options.pathname === "/network/start" && options.request.method === "POST") {
       const request = yield* decodeRequest(NetworkStartRequest, yield* readJsonBody(options.request), "network start")
       const { sessionId, ...captureOptions } = request
-      const result = yield* options.sessions.networkStart(sessionId, captureOptions)
+      const { sessions } = yield* options.profiles.bind({ sessionId })
+      const result = yield* sessions.networkStart(sessionId, captureOptions)
       sendJson(options.response, result)
       return
     }
     if (options.pathname === "/network/status" && options.request.method === "POST") {
       const request = yield* decodeRequest(NetworkSessionRequest, yield* readJsonBody(options.request), "network status")
-      sendJson(options.response, yield* options.sessions.networkStatus(request.sessionId))
+      const { sessions } = yield* options.profiles.bind({ sessionId: request.sessionId })
+      sendJson(options.response, yield* sessions.networkStatus(request.sessionId))
       return
     }
     if (options.pathname === "/network/stop" && options.request.method === "POST") {
       const request = yield* decodeRequest(NetworkStopRequest, yield* readJsonBody(options.request), "network stop")
       const { sessionId, ...stopOptions } = request
-      sendJson(options.response, yield* options.sessions.networkStop(sessionId, stopOptions))
+      const { sessions } = yield* options.profiles.bind({ sessionId })
+      sendJson(options.response, yield* sessions.networkStop(sessionId, stopOptions))
       return
     }
     if (options.pathname === "/network/cancel" && options.request.method === "POST") {
       const request = yield* decodeRequest(NetworkSessionRequest, yield* readJsonBody(options.request), "network cancel")
-      sendJson(options.response, yield* options.sessions.networkCancel(request.sessionId))
+      const { sessions } = yield* options.profiles.bind({ sessionId: request.sessionId })
+      sendJson(options.response, yield* sessions.networkCancel(request.sessionId))
       return
     }
     options.response.writeHead(404)
@@ -232,7 +270,7 @@ function handleAuthRequest(options: {
   readonly request: http.IncomingMessage
   readonly response: http.ServerResponse
   readonly pathname: string
-  readonly sessions: BrowserControlSessions
+  readonly profiles: RelayProfiles
 }): Effect.Effect<void, Error> {
   return Effect.gen(function* () {
     if (options.pathname === "/auth/status" && options.request.method === "POST") {
@@ -243,7 +281,8 @@ function handleAuthRequest(options: {
     if (options.pathname === "/auth/refresh" && options.request.method === "POST") {
       const request = yield* decodeRequest(AuthRefreshRequest, yield* readJsonBody(options.request), "auth refresh")
       const { sessionId, ...refreshOptions } = request
-      sendJson(options.response, yield* options.sessions.authRefresh(sessionId, refreshOptions))
+      const { sessions } = yield* options.profiles.bind({ sessionId })
+      sendJson(options.response, yield* sessions.authRefresh(sessionId, refreshOptions))
       return
     }
     if (options.pathname === "/auth/run" && options.request.method === "POST") {
@@ -277,14 +316,14 @@ function handleRecordingRequest(options: {
   readonly response: http.ServerResponse
   readonly pathname: string
   readonly requestUrl: URL
-  readonly registry: TargetRegistry
-  readonly recordingRelay: RecordingRelay
+  readonly profiles: RelayProfiles
 }): Effect.Effect<void, Error> {
   return Effect.gen(function* () {
     if (options.pathname === "/recording/start" && options.request.method === "POST") {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(RecordingStartRequest, body, "recording start")
-      const target = resolveAttachedRecordingTarget({ registry: options.registry, tabId: request.tabId, sessionId: request.sessionId })
+      const { registry, recordingRelay } = recordingProfile(options.profiles, request)
+      const target = resolveAttachedRecordingTarget({ registry, tabId: request.tabId, sessionId: request.sessionId })
       const startOptions: RecordingStartOptions = {
         tabId: target.tabId,
         ...(target.sessionId ? { sessionId: target.sessionId } : {}),
@@ -298,7 +337,7 @@ function handleRecordingRequest(options: {
         ...(request.maxDurationMs === undefined ? {} : { maxDurationMs: request.maxDurationMs }),
       }
       const result = yield* Effect.tryPromise({
-        try: () => options.recordingRelay.startRecording(startOptions),
+        try: () => recordingRelay.startRecording(startOptions),
         catch: (cause) => new Error(formatCauseMessage({ label: "start recording", cause }), { cause }),
       })
       sendJson(options.response, result, result.success ? 200 : 500)
@@ -307,18 +346,25 @@ function handleRecordingRequest(options: {
     if (options.pathname === "/recording/stop" && options.request.method === "POST") {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(RecordingTargetRequest, body, "recording stop")
-      const target = recordingTargetFromValues({ registry: options.registry, tabId: request.tabId, sessionId: request.sessionId })
+      const { registry, recordingRelay } = recordingProfile(options.profiles, request)
+      const target = recordingTargetFromValues({ registry, tabId: request.tabId, sessionId: request.sessionId })
       const result = yield* Effect.tryPromise({
-        try: () => options.recordingRelay.stopRecording(target),
+        try: () => recordingRelay.stopRecording(target),
         catch: (cause) => new Error(formatCauseMessage({ label: "stop recording", cause }), { cause }),
       })
       sendJson(options.response, result, result.success ? 200 : 500)
       return
     }
     if (options.pathname === "/recording/status" && options.request.method === "GET") {
-      const target = recordingTargetFromQuery({ registry: options.registry, searchParams: options.requestUrl.searchParams })
+      const searchParams = options.requestUrl.searchParams
+      const { registry, recordingRelay } = recordingProfile(options.profiles, {
+        ...(searchParams.get("profileId") ? { profileId: searchParams.get("profileId")! } : {}),
+        ...(searchParams.get("sessionId") ? { sessionId: searchParams.get("sessionId")! } : {}),
+        ...(searchParams.get("tabId") ? { tabId: optionalInteger(Number(searchParams.get("tabId")), "tabId")! } : {}),
+      })
+      const target = recordingTargetFromQuery({ registry, searchParams })
       const result = yield* Effect.tryPromise({
-        try: () => options.recordingRelay.statusRecording(target),
+        try: () => recordingRelay.statusRecording(target),
         catch: (cause) => new Error(formatCauseMessage({ label: "recording status", cause }), { cause }),
       })
       sendJson(options.response, result)
@@ -327,9 +373,10 @@ function handleRecordingRequest(options: {
     if (options.pathname === "/recording/cancel" && options.request.method === "POST") {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(RecordingTargetRequest, body, "recording cancel")
-      const target = recordingTargetFromValues({ registry: options.registry, tabId: request.tabId, sessionId: request.sessionId })
+      const { registry, recordingRelay } = recordingProfile(options.profiles, request)
+      const target = recordingTargetFromValues({ registry, tabId: request.tabId, sessionId: request.sessionId })
       const result = yield* Effect.tryPromise({
-        try: () => options.recordingRelay.cancelRecording(target),
+        try: () => recordingRelay.cancelRecording(target),
         catch: (cause) => new Error(formatCauseMessage({ label: "cancel recording", cause }), { cause }),
       })
       sendJson(options.response, result, result.success ? 200 : 500)
@@ -354,26 +401,31 @@ function handleCliRequest(options: {
   readonly request: http.IncomingMessage
   readonly response: http.ServerResponse
   readonly pathname: string
-  readonly sessions: BrowserControlSessions
-  readonly registry: TargetRegistry
+  readonly profiles: RelayProfiles
 }): Effect.Effect<void, Error> {
   return Effect.gen(function* () {
     if (options.pathname === "/cli/sessions" && options.request.method === "GET") {
-      sendJson(options.response, { sessions: options.sessions.listSummaries() })
+      sendJson(options.response, { sessions: options.profiles.list().flatMap((runtime) => runtime.sessions.listSummaries()) })
       return
     }
     if (options.pathname === "/cli/session/new" && options.request.method === "POST") {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(SessionNewRequest, body, "session new")
-      const session = yield* options.sessions.create(optionalSessionId(request.id), { readOnly: request.readOnly === true })
-      sendJson(options.response, { session: options.sessions.summary(session.id) })
+      const id = optionalSessionId(request.id)
+      const { sessions } = yield* options.profiles.bind({ ...(id ? { sessionId: id } : {}), ...(request.profileId ? { profileId: request.profileId } : {}) })
+      const session = yield* sessions.create(id, { readOnly: request.readOnly === true })
+      sendJson(options.response, { session: sessions.summary(session.id) })
       return
     }
     if (options.pathname === "/cli/session/delete" && options.request.method === "POST") {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(SessionIdRequest, body, "session delete")
       const id = requiredSessionId(request.id)
-      const deleted = yield* options.sessions.delete(id)
+      const owner = options.profiles.list().find((runtime) => runtime.sessions.sessions.has(id))
+      const runtime = owner?.profileId === "unbound" && owner.sessions.sessions.get(id)?.target
+        ? yield* options.profiles.bind({ sessionId: id })
+        : owner
+      const deleted = runtime ? yield* runtime.sessions.delete(id) : false
       sendJson(options.response, { deleted, id })
       return
     }
@@ -381,7 +433,11 @@ function handleCliRequest(options: {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(SessionIdRequest, body, "session reset")
       const id = requiredSessionId(request.id)
-      const session = yield* options.sessions.reset(id)
+      const owner = options.profiles.list().find((runtime) => runtime.sessions.sessions.has(id))
+      const runtime = owner?.profileId === "unbound" && owner.sessions.sessions.get(id)?.target
+        ? yield* options.profiles.bind({ sessionId: id })
+        : owner
+      const session = runtime ? yield* runtime.sessions.reset(id) : undefined
       if (!session) {
         sendJson(options.response, { error: `Session not found: ${id}`, code: "session-not-found" }, 404)
         return
@@ -393,9 +449,13 @@ function handleCliRequest(options: {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(SessionAdoptRequest, body, "session adopt")
       const requestedSessionId = optionalSessionId(request.sessionId)
+      const { sessions, registry } = yield* options.profiles.bind({
+        ...(requestedSessionId ? { sessionId: requestedSessionId } : {}),
+        ...(request.profileId ? { profileId: request.profileId } : {}),
+      })
       const targetSelection = request.targetSelection
       const selectedTarget = selectTarget({
-        targets: options.registry.listRootTargets(),
+        targets: registry.listRootTargets(),
         selection: targetSelection,
         getUrl: (target) => target.targetInfo.url,
       })
@@ -403,7 +463,7 @@ function handleCliRequest(options: {
         throw new Error("No page matched target selection")
       }
       const adoptedTargetId = selectedTarget.targetInfo.targetId
-      const { session, adoptedUrl } = yield* options.sessions.adopt({
+      const { session, adoptedUrl } = yield* sessions.adopt({
         ...(requestedSessionId ? { sessionId: requestedSessionId } : {}),
         createIfMissing: request.createIfMissing,
         targetId: adoptedTargetId,
@@ -416,8 +476,12 @@ function handleCliRequest(options: {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(ExecuteRequest, body, "execute")
       const requestedSessionId = optionalSessionId(request.sessionId)
+      const { sessions } = yield* options.profiles.bind({
+        ...(requestedSessionId ? { sessionId: requestedSessionId } : {}),
+        ...(request.profileId ? { profileId: request.profileId } : {}),
+      })
       const targetSelection = request.targetSelection
-      const { result, session } = yield* options.sessions.execute({
+      const { result, session } = yield* sessions.execute({
         ...(requestedSessionId ? { sessionId: requestedSessionId } : {}),
         code: request.code,
         createIfMissing: request.createIfMissing,
@@ -432,10 +496,12 @@ function handleCliRequest(options: {
   })
 }
 
-function targetSummaries(registry: TargetRegistry): TargetSummary[] {
-  return registry.listRootTargets().map((target) => {
+function targetSummaries(runtime: RelayProfileRuntime): TargetSummary[] {
+  return runtime.registry.listRootTargets().map((target) => {
       return {
         id: target.targetInfo.targetId,
+        profileId: runtime.profileId,
+        ...(runtime.profileName === undefined ? {} : { profileName: runtime.profileName }),
         type: target.targetInfo.type,
         title: target.targetInfo.title,
         url: target.targetInfo.url,
@@ -456,6 +522,33 @@ function decodeRequest<A>(schema: Schema.ConstraintDecoder<A>, body: unknown, la
       code: "invalid-request",
     })),
   )
+}
+
+function recordingProfile(profiles: RelayProfiles, options: {
+  readonly profileId?: string
+  readonly tabId?: number
+  readonly sessionId?: string
+}): RelayProfileRuntime {
+  if (options.profileId) return profiles.select({ profileId: options.profileId })
+  const runtimes = profiles.list()
+  if (runtimes.filter((runtime) => runtime.profileId !== "unbound").length > 1) {
+    throw new HttpRouteError({ message: "Recording target identifiers are browser-profile-local; provide profileId when multiple profiles are known", status: 409, code: "profile-ambiguous" })
+  }
+  const matches = runtimes.filter((runtime) => {
+    const byTab = options.tabId === undefined ? undefined : runtime.registry.getRootTargetByTabId(options.tabId)
+    const bySession = options.sessionId === undefined ? undefined : runtime.registry.getRootTargetBySessionId(options.sessionId)
+    if (options.tabId !== undefined && options.sessionId !== undefined) return byTab !== undefined && byTab === bySession
+    return byTab !== undefined || bySession !== undefined
+  })
+  if (matches.length === 1) return matches[0]!
+  if (matches.length > 1) {
+    throw new HttpRouteError({ message: "Recording target matches multiple browser profiles; provide profileId", status: 409, code: "profile-ambiguous" })
+  }
+  if (runtimes.length === 1) return runtimes[0]!
+  if (options.tabId !== undefined || options.sessionId !== undefined) {
+    throw new HttpRouteError({ message: "Recording target not found in a unique browser profile; provide profileId", status: 404, code: "target-not-found" })
+  }
+  return profiles.select({})
 }
 
 function resolveAttachedRecordingTarget(options: {

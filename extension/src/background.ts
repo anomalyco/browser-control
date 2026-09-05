@@ -17,6 +17,11 @@ const relayPort = 19989
 const offscreenDocumentPath = "offscreen.html"
 const maxRecordingSocketBufferedBytes = 16 * 1024 * 1024
 
+type ProfileIdentity = {
+  readonly profileId: string
+  readonly profileName?: string
+}
+
 let socket: WebSocket | undefined
 let connectionPromise: Promise<void> | undefined
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined
@@ -89,7 +94,7 @@ function connect(): void {
   void ensureConnection().catch(() => {})
 }
 
-function startConnection(): WebSocket {
+function startConnection(profile: ProfileIdentity): WebSocket {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer)
     reconnectTimer = undefined
@@ -99,7 +104,7 @@ function startConnection(): WebSocket {
   let stopKeepAlive: (() => void) | undefined
   socket = currentSocket
   currentSocket.onopen = () => {
-    void announceHelloAndAttachedTabs(currentSocket, currentGeneration).then(
+    void announceHelloAndAttachedTabs(currentSocket, currentGeneration, profile).then(
       () => {
         if (socket === currentSocket && currentSocket.readyState === WebSocket.OPEN) {
           stopKeepAlive = startSocketKeepAlive(() => sendOnCurrentSocket(currentSocket, { method: "pong" }))
@@ -130,8 +135,27 @@ async function ensureConnection(): Promise<void> {
   if (connectionPromise) {
     return connectionPromise
   }
-  const current = socket?.readyState === WebSocket.CONNECTING ? socket : startConnection()
-  const pending = new Promise<void>((resolve, reject) => {
+  const pending = connectToRelay()
+  connectionPromise = pending
+  try {
+    await pending
+  } finally {
+    if (connectionPromise === pending) connectionPromise = undefined
+  }
+}
+
+async function connectToRelay(): Promise<void> {
+  // Persist before opening the socket so reconnects and worker restarts cannot
+  // announce a transient identity, and hello remains the first socket message.
+  const stored = await chrome.storage.local.get(["profileId", "profileName"])
+  const profileId = typeof stored.profileId === "string" && stored.profileId.trim()
+    ? stored.profileId
+    : crypto.randomUUID()
+  if (profileId !== stored.profileId) await chrome.storage.local.set({ profileId })
+  const profileName = typeof stored.profileName === "string" ? stored.profileName.trim() : ""
+  const profile: ProfileIdentity = { profileId, ...(profileName ? { profileName } : {}) }
+  const current = socket?.readyState === WebSocket.CONNECTING ? socket : startConnection(profile)
+  await new Promise<void>((resolve, reject) => {
     if (current.readyState === WebSocket.OPEN) {
       resolve()
       return
@@ -164,20 +188,15 @@ async function ensureConnection(): Promise<void> {
     current.addEventListener("error", onError, { once: true })
     current.addEventListener("close", onClose, { once: true })
   })
-  connectionPromise = pending
-  try {
-    await pending
-  } finally {
-    if (connectionPromise === pending) connectionPromise = undefined
-  }
 }
 
-async function announceHelloAndAttachedTabs(currentSocket: WebSocket, currentGeneration: number): Promise<void> {
+async function announceHelloAndAttachedTabs(currentSocket: WebSocket, currentGeneration: number, profile: ProfileIdentity): Promise<void> {
   sendOnSocket(currentSocket, {
     method: "hello",
     params: {
       version: chrome.runtime.getManifest().version,
       protocolVersion: extensionProtocolVersion,
+      ...profile,
     },
   })
   await completeExtensionHandshake({
@@ -343,6 +362,19 @@ async function handleCommand(command: ShimCommand, currentSocket: WebSocket): Pr
     const tabId = numberParam(command.params, "tabId")
     await sendPageStatusMessage(tabId, { action: "page-status.clear" })
     return {}
+  }
+  if (command.method === "profile.rename") {
+    const profileName = stringParam(command.params, "name").trim()
+    if (profileName.length === 0 || profileName.length > 100) {
+      throw new Error("Profile name must contain 1–100 characters after trimming")
+    }
+    const stored = await chrome.storage.local.get("profileId")
+    if (typeof stored.profileId !== "string" || !stored.profileId.trim()) {
+      throw new Error("Profile identity is not initialized")
+    }
+    assertCurrentSocket(currentSocket)
+    await chrome.storage.local.set({ profileName })
+    return { profileId: stored.profileId, profileName }
   }
   if (command.method === "runtime.reload") {
     chrome.runtime.reload()
