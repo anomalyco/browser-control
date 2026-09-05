@@ -37,6 +37,7 @@
   "scripts": {
     "audit:duplicates": "jscpd src extension/src --format typescript --min-lines 10 --min-tokens 100 --mode weak --reporters console --absolute --no-tips",
     "bench:recording": "tsx scripts/bench-recording.ts",
+    "bench:recording-quality": "tsx scripts/bench-recording-quality.ts",
     "build:cli": "tsx scripts/build-cli.ts",
     "build": "pnpm build:cli && pnpm build:extension",
     "build:extension": "tsx scripts/build-extension.ts",
@@ -59,13 +60,16 @@
     "@effect/platform-node-shared": "4.0.0-rc.112",
     "acorn": "^8.18.0",
     "effect": "4.0.0-rc.112",
+    "pixelmatch": "^7.2.0",
     "playwright-core": "^1.62.1",
+    "pngjs": "^7.0.0",
     "ws": "^8.21.3"
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.1",
     "@types/chrome": "^0.2.7",
     "@types/node": "^26.2.0",
+    "@types/pngjs": "^6.0.5",
     "@types/ws": "^8.18.1",
     "esbuild": "^0.28.2",
     "fflate": "^0.8.3",

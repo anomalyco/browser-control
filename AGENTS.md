@@ -199,10 +199,19 @@ local Node relay.
   best-effort and must never fail the execute call.
 - Relay-owned recording uses `Page.startScreencast`, immediately acknowledges
   compositor frames, activates the target to avoid background-tab throttling,
-  and fits its viewport within 1280×720. Stream each distinct JPEG once in a
-  timestamped Matroska envelope and let ffmpeg produce constant 25 fps output;
+  and preserves its starting CSS viewport. Request uncapped JPEG100 frames:
+  screencast caps shrink an emulated viewport against the full backing surface.
+  Normalize device pixels using the first frame's surface width, then crop to
+  the viewport without upscaling. Stream each distinct JPEG once in a
+  timestamped Matroska envelope and let ffmpeg produce constant 60 fps output;
   never push duplicated JPEGs through Node or derive duration from discontinuous
   navigation timestamps.
+- Recording receipts and sidecars share the same CDP quality counters; report
+  screenshot fallback explicitly and never call compositor-event counts distinct
+  motion. Reject unsupported frame rates instead of silently clamping them.
+- `screenshotDiff` remains a session-page execute helper. Preserve original pixel
+  geometry, reject unequal image dimensions, bound PNG decoding, and never
+  overwrite baseline or existing output artifacts to make a comparison pass.
 - Session delete/reset must acquire the session's execute permit before closing
   the sandbox, so running scripts are never yanked mid-flight.
 - Session deletion is idempotent for a resolved session id: return whether a

@@ -425,6 +425,11 @@ reconciles existing client announcements, browser grouping, and page status.
   operations while the mask is active.
 - `screenshotWithLabels({ page, path? })` annotates likely interactive elements
   and returns label metadata.
+- `screenshotDiff({ baseline, path?, threshold?, fullPage? })` compares PNGs at
+  the same CSS-pixel scale and returns changed-pixel counts/ratio plus a
+  red-highlighted image. It rejects dimension mismatches instead of resizing,
+  counts antialiasing changes, bounds input size, and never overwrites an existing
+  output. It is an execute helper, not a new action-tool family.
 - `fillInput` and `fillInputs` provide a DOM-evaluation fallback when browser
   extensions make native Playwright filling hang.
 - Allowed Playwright mouse actions can reveal a spring-animated cursor.
@@ -597,8 +602,19 @@ commands never replace a running relay.
   extension-backed tabs because Chromium blocks download behavior commands from
   `chrome.debugger`; download waits return a direct capability error.
 - CDP recording activates its tab to avoid background compositor throttling,
-  fits the viewport within 1280x720, requires `ffmpeg` on `PATH`, and does not
-  capture audio.
+   preserves the starting CSS viewport rather than downscaling to 720p, requires
+   `ffmpeg` on `PATH`, and does not capture audio. It captures uncapped JPEG100
+   compositor frames, normalizes device pixels using the first frame's surface
+   width, then crops at native CSS size (rounding odd output dimensions down to
+   even). Output defaults to 60 fps; actual motion depends on source frames.
+   The encoder starts on the first frame; a start-time ffmpeg probe preserves
+   missing-dependency errors. Keep viewport/emulation fixed during recording.
+- Recording start/stop/status expose JSON receipts. CDP quality metrics come from
+  the same counters as the sidecar: dimensions, configured rate, received/retained
+  source frames and rates, coalescing/drops, and stop-time screenshot fallback.
+  Compositor events are not distinct-motion measurements. Tab capture and older
+  relays omit unavailable quality data. All explicit frame rates must be integers
+  in 1..60; never silently clamp unsupported requests.
 - The trusted sandbox exposes selected Node built-ins, not unrestricted local
   command execution.
 - Exact parity across third-party authentication remains a manual diagnostic.

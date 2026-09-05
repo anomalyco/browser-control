@@ -27,6 +27,14 @@ import {
 } from "../src/relay-schema.ts"
 
 const decodeSession = Schema.decodeUnknownSync(SessionSummary)
+
+it.each([0, -1, 61, 120, 29.97, NaN, Infinity])("rejects invalid recording frame rate %s at the wire boundary", (frameRate) => {
+  expect(() => Schema.decodeUnknownSync(RecordingStartRequest)({ outputPath: "/tmp/demo.mp4", frameRate })).toThrow()
+})
+
+it.each([1, 30, 60])("accepts recording frame rate %s without clamping", (frameRate) => {
+  expect(Schema.decodeUnknownSync(RecordingStartRequest)({ outputPath: "/tmp/demo.mp4", frameRate }).frameRate).toBe(frameRate)
+})
 const decodeSessions = Schema.decodeUnknownSync(SessionsContainer)
 const decodeSessionContainer = Schema.decodeUnknownSync(SessionContainer)
 const decodeAdoptRequest = Schema.decodeUnknownSync(SessionAdoptRequest)

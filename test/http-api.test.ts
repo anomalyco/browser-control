@@ -83,13 +83,16 @@ describe("HTTP request schemas", () => {
     const cancel = vi.spyOn(recordingRelay, "cancelRecording").mockResolvedValue({ success: true })
     const status = vi.spyOn(recordingRelay, "statusRecording").mockResolvedValue({ isRecording: false })
     try {
-      for (const options of [{}, { mode: "auto", audio: false, frameRate: 0, videoBitsPerSecond: 0, audioBitsPerSecond: 0, maxDurationMs: 0 }]) {
+      for (const options of [{}, { mode: "auto", audio: false, frameRate: 30, videoBitsPerSecond: 0, audioBitsPerSecond: 0, maxDurationMs: 0 }]) {
         await expect(postJson(port, "/recording/start", { sessionId: "owner-7", outputPath, ...options, ignored: "discard me" })).resolves.toMatchObject({ status: 200 })
         expect(start.mock.lastCall?.[0]).toStrictEqual({ tabId: 7, sessionId: "bc-tab-7", owner: "user", outputPath, ...options })
       }
       await postJson(port, "/recording/start", { tabId: 7, sessionId: "unknown", outputPath })
       expect(start.mock.lastCall?.[0]).toStrictEqual({ tabId: 7, sessionId: "bc-tab-7", owner: "user", outputPath })
       start.mockClear()
+      for (const frameRate of [0, -1, 61, 29.97]) {
+        await expect(postJson(port, "/recording/start", { tabId: 7, outputPath, frameRate })).resolves.toMatchObject({ status: 400, body: { code: "invalid-request" } })
+      }
       for (const [selector, message, code, statusCode] of [
         [{ sessionId: "unknown" }, "No attached tab found for sessionId unknown", "target-not-found", 404],
         [{ tabId: 0 }, "No attached tab found for tabId 0", "target-not-found", 404],
