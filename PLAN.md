@@ -296,15 +296,37 @@ require a new extension capture protocol and permission model.
 
 ## Session And Tab Model
 
-A relay serves one browser/profile connection at a time. The first compatible
-OPEN connection keeps ownership through inventory reconciliation and normal
-operation; another connection is rejected with close code 4004 instead of
-destroying existing targets, handoffs, or pending commands. Contention starts a
-bounded websocket liveness probe so a dead incumbent cannot hold ownership
-indefinitely. Genuine disconnect/reconnect still rebuilds the inventory.
-`status` and `doctor` report rejected connection attempts, not a browser count.
-This does not add simultaneous multi-browser routing or persistent browser
-selection: switching requires disconnecting the incumbent extension.
+A relay serves multiple browser/profile connections simultaneously. Each extension
+installation stores a random profile ID locally and announces it in `hello`.
+Connections, RPCs, target registries, CDP clients, handoffs, and recording state
+are isolated per profile, including when Chrome tab/session IDs collide.
+Sessions persist their profile ID in the shared catalog and never fall back to
+another profile when their own disconnects. New sessions require `--profile`
+(or MCP `profileId`) when selection is ambiguous. `profile list` discovers IDs;
+`profile name <id> <label>` persists a user-chosen label in the extension.
+Labels are conveniences, not account identity or credentials.
+
+A duplicate connection for the same profile is rejected with close code 4004;
+it cannot erase the incumbent's targets or pending commands. Older extensions
+without identity remain confined to one legacy runtime and must be reloaded for
+multi-profile use. Catalog entries predating profile IDs bind only to a ready
+profile containing the exact saved target; targetless entries need explicit
+selection. Disconnected legacy identities migrate by the same rule after reload.
+No session adopts a browser merely because it connects first.
+Disconnect/reconnect inventory reconciliation is profile-local. The shared
+`RelayShutdown` controller drains every profile's admitted and queued session
+work, native operations, root reconciliation, and catalog writes. Raw CDP
+clients or active recordings/captures in any profile block restart. Each profile
+retains upstream `RootTargetLifecycle` and `CdpRuntime` guards; a cancelled drain
+resumes admission for all profiles.
+
+Follow-up: profile-specific startup waiting. On local 0.5.1 / extension 0.0.25,
+restarting the relay while two profiles are open can make an immediate named
+execute return `Browser profile not found` before that profile reconnects (the
+other profile has already satisfied the generic readiness wait). Reproduce with
+a managed-relay upgrade followed immediately by `execute --profile <label>`.
+Expected: wait for the selected profile; current recovery: inspect `profile list`
+and retry once its connection appears. No command is routed to the wrong profile.
 
 Password-manager extension UI is a Chromium permission boundary, not a missing
 page. A cross-extension failure keeps the session's page and returns an explicit

@@ -77,6 +77,7 @@ const extensionCommandMethodValues = [
   "pageStatus.set",
   "pageStatus.clear",
   "runtime.reload",
+  "profile.rename",
   "recording.start",
   "recording.stop",
   "recording.status",

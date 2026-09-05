@@ -81,7 +81,8 @@ async function validateStoreExtension(dist: string): Promise<string> {
     throw new Error("Extension manifest must target Manifest V3 and Chrome 120 or later")
   }
   const permissions = manifest.permissions
-  const expectedPermissions = ["activeTab", "alarms", "debugger", "offscreen", "tabCapture", "tabGroups"]
+  // storage persists the profile's random installation ID and user-assigned label.
+  const expectedPermissions = ["activeTab", "alarms", "debugger", "offscreen", "storage", "tabCapture", "tabGroups"]
   if (!Array.isArray(permissions) || permissions.join(",") !== expectedPermissions.join(",")) {
     throw new Error("Extension manifest permissions differ from the reviewed allowlist")
   }

@@ -20,6 +20,11 @@ export type SessionExecuteRecord = {
 }
 
 export type SessionHooks = {
+  /** Stable browser profile owning every session in this manager. */
+  readonly profileId?: string
+  readonly profileName?: string
+  /** Reject identifiers already held by another profile on the same relay. */
+  readonly isSessionIdTaken?: (id: string) => boolean
   /** Called when a session starts (true) or finishes (false) an execute. */
   readonly onExecuteStateChange?: (sessionId: string, executing: boolean) => void
   /** Called after each execute completes, for journaling. Failure is logged and ignored. */
@@ -92,6 +97,7 @@ export class BrowserControlSessions {
   private readonly pendingSessionWork = new Map<string, number>()
   private readonly idle = Latch.makeUnsafe(true)
   private userAttachedPageUrlsProvider: (() => readonly string[]) | undefined
+  private profileName: string | undefined
 
   constructor(
     private readonly endpointUrl: string,
@@ -101,12 +107,24 @@ export class BrowserControlSessions {
   ) {
     this.createSandbox = createSandbox ?? ((id, onDefaultTargetChange) => new ExecuteSandbox({ endpointUrl: this.endpointUrl, sessionId: id, onDefaultTargetChange }))
     this.hooks = hooks ?? {}
+    this.profileName = this.hooks.profileName
     this.targetOwnership = targetOwnership ?? new MemoryTargetOwnership()
     this.userAttachedPageUrlsProvider = this.hooks.getUserAttachedPageUrls
   }
 
   setUserAttachedPageUrlsProvider(provider: () => readonly string[]): void {
     this.userAttachedPageUrlsProvider = provider
+  }
+
+  setProfileName(name: string): Effect.Effect<void, Error> {
+    return this.withAdmission(undefined, Effect.suspend(() => {
+      this.profileName = name
+      for (const session of this.sessions.values()) {
+        session.profileName = name
+      }
+      this.schedulePersistence()
+      return this.flushPersistence()
+    }).pipe(Effect.uninterruptible))
   }
 
   listSummaries(): SessionSummary[] {
@@ -121,6 +139,9 @@ export class BrowserControlSessions {
     const ids = new Set<string>()
     const targetOwners = new Set<string>()
     for (const entry of entries) {
+      if (entry.profileId !== this.hooks.profileId) {
+        throw new Error(`Persisted session ${entry.id} belongs to a different or unbound browser profile`)
+      }
       if (ids.has(entry.id)) throw new Error(`Duplicate persisted session: ${entry.id}`)
       ids.add(entry.id)
       if (entry.target && targetOwners.has(entry.target.id)) {
@@ -137,6 +158,75 @@ export class BrowserControlSessions {
       session.sandbox.restore(entry.target)
       this.sessions.set(entry.id, session)
     }
+  }
+
+  transferTo(
+    id: string,
+    destination: BrowserControlSessions,
+    persist: () => Promise<void>,
+  ): Effect.Effect<SessionSummary, Error> {
+    const source = this
+    return source.withAdmission(id, Effect.suspend(() => {
+      const existing = source.sessions.get(id)
+      if (!existing) return Effect.fail(sessionError("not-found", `Session not found: ${id}`, id))
+      if (source === destination) return Effect.succeed(source.sessionSummary(existing))
+      const save = () => Effect.tryPromise({
+        try: persist,
+        catch: (cause) => cause instanceof Error ? cause : new Error("Persist browser profile binding", { cause }),
+      })
+      return destination.withAdmission(id, source.withLifecyclePermit(existing, "bind profile", Effect.gen(function* () {
+        if (source.sessions.get(id) !== existing) {
+          return yield* Effect.fail(sessionError("inactive", `Session is no longer available for profile binding: ${id}`, id))
+        }
+        if (source.hooks.profileId !== undefined && source.hooks.profileId !== "unbound" && source.hooks.profileId !== "legacy") {
+          return yield* Effect.fail(sessionError("invalid-request", `Session ${id} is already pinned to a browser profile`, id))
+        }
+        if (destination.sessions.has(id)) {
+          return yield* Effect.fail(sessionError("already-exists", `Session already exists in destination profile: ${id}`, id))
+        }
+        yield* source.flushPersistence()
+        yield* destination.flushPersistence()
+        if (destination.sessions.has(id)) {
+          return yield* Effect.fail(sessionError("inactive", `Destination profile is no longer available for session ${id}`, id))
+        }
+        const replacement = destination.createBrowserControlSession(id, existing.readOnly, existing, existing.executeSemaphore)
+        if (existing.target) replacement.target = existing.target
+        replacement.sandbox.restore(existing.target)
+        let reservation: TargetOwnershipReservation | undefined
+        const transaction = Effect.gen(function* () {
+          if (existing.target) {
+            reservation = yield* Effect.try({
+              try: () => destination.targetOwnership.reserveTargetOwnership(existing.target!.id, id),
+              catch: (cause) => cause instanceof Error ? cause : new Error("Reserve transferred session target", { cause }),
+            })
+          }
+          source.sessions.delete(id)
+          destination.sessions.set(id, replacement)
+          yield* save()
+          if (reservation) {
+            const activeReservation = reservation
+            const change = yield* Effect.try({
+              try: () => destination.targetOwnership.commitTargetOwnership({ reservation: activeReservation }),
+              catch: (cause) => cause instanceof Error ? cause : new Error("Commit transferred session target", { cause }),
+            })
+            destination.notifyTargetOwnershipChange(change)
+          }
+          if (existing.target) {
+            source.notifyTargetOwnershipChange(source.targetOwnership.releaseTargetOwnership(existing.target.id, id))
+          }
+          yield* source.disconnectBrowserControlSession(existing)
+          return destination.sessionSummary(replacement)
+        })
+        return yield* transaction.pipe(Effect.catch((error) => Effect.gen(function* () {
+          if (reservation) destination.notifyTargetOwnershipChange(destination.targetOwnership.rollbackTargetOwnership(reservation))
+          if (destination.sessions.get(id) === replacement) destination.sessions.delete(id)
+          source.sessions.set(id, existing)
+          yield* destination.disconnectBrowserControlSession(replacement)
+          yield* save()
+          return yield* Effect.fail(error)
+        })))
+      })))
+    }))
   }
 
   persistedTargetOwner(targetId: string): { readonly sessionId: string; readonly owner: "relay" | "user" } | undefined {
@@ -162,8 +252,11 @@ export class BrowserControlSessions {
   }
 
   private createAcceptedSession(id: string | undefined, options?: { readonly readOnly?: boolean }): BrowserControlSession {
-    const sessionId = id ?? generateSessionId(this.sessions)
-    if (this.sessions.has(sessionId)) {
+    let sessionId = id ?? generateSessionId(this.sessions)
+    for (let attempt = 0; id === undefined && this.hooks.isSessionIdTaken?.(sessionId) && attempt < 100; attempt++) {
+      sessionId = generateSessionId(this.sessions)
+    }
+    if (this.sessions.has(sessionId) || this.hooks.isSessionIdTaken?.(sessionId)) {
       throw sessionError("already-exists", `Session already exists: ${sessionId}`, sessionId)
     }
     const session = this.createBrowserControlSession(sessionId, options?.readOnly === true)
@@ -435,6 +528,7 @@ export class BrowserControlSessions {
           if (manager.sessions.get(session.id) !== session) {
             return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${session.id}`, session.id))
           }
+          if (resolved.created) yield* manager.flushPersistence()
           started = true
           session.updatedAt = new Date().toISOString()
           manager.setExecuting(session.id, true)
@@ -535,6 +629,7 @@ export class BrowserControlSessions {
           if (manager.sessions.get(session.id) !== session) {
             return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${session.id}`, session.id))
           }
+          if (resolved.created) yield* manager.flushPersistence()
           if (adoptionCancelled()) {
             return yield* Effect.fail(timeoutError)
           }
@@ -711,18 +806,20 @@ export class BrowserControlSessions {
   private createBrowserControlSession(id: string, readOnly: boolean, timestamps?: {
     readonly createdAt: string
     readonly updatedAt?: string
-  }): BrowserControlSession {
+  }, executeSemaphore = Semaphore.makeUnsafe(1)): BrowserControlSession {
     const now = new Date().toISOString()
     let session: BrowserControlSession | undefined
     session = {
       id,
+      ...(this.hooks.profileId === undefined ? {} : { profileId: this.hooks.profileId }),
+      ...(this.profileName === undefined ? {} : { profileName: this.profileName }),
       createdAt: timestamps?.createdAt ?? now,
       updatedAt: timestamps?.updatedAt ?? now,
       readOnly,
       sandbox: this.createSandbox(id, (target) => {
         if (session) this.updateTarget(session, target)
       }),
-      executeSemaphore: Semaphore.makeUnsafe(1),
+      executeSemaphore,
     }
     return session
   }
@@ -731,6 +828,8 @@ export class BrowserControlSessions {
     const status = session.sandbox.getStatus()
     return {
       id: session.id,
+      ...(session.profileId === undefined ? {} : { profileId: session.profileId }),
+      ...(session.profileName === undefined ? {} : { profileName: session.profileName }),
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
       connected: status.connected,
@@ -787,6 +886,8 @@ export class BrowserControlSessions {
     const target = session.target
     return {
       id: session.id,
+      ...(session.profileId === undefined ? {} : { profileId: session.profileId }),
+      ...(session.profileName === undefined ? {} : { profileName: session.profileName }),
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
       readOnly: session.readOnly,
@@ -794,7 +895,7 @@ export class BrowserControlSessions {
     }
   }
 
-  private persistedSessions(): PersistedSession[] {
+  persistedSessions(): PersistedSession[] {
     return Array.from(this.sessions.values(), (session) => this.persistedSession(session))
   }
 

@@ -1,6 +1,8 @@
 import { Config, Context, Effect, Layer, Option, Schema } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientRequest, type HttpClientResponse } from "effect/unstable/http"
 import {
+  BrowserProfileSummary,
+  type BrowserProfileNameRequest,
   type AuthProfileRequest,
   type AuthenticatedJsonRequest,
   AuthenticatedJsonOutcome,
@@ -110,11 +112,12 @@ export interface Interface {
   readonly endpoint: string
   readonly version: Effect.Effect<RelayVersion, RelayClientError>
   readonly shutdown: (request: RelayShutdownRequest) => Effect.Effect<RelayShutdownResponse, RelayClientError>
+  readonly profileName?: (request: BrowserProfileNameRequest) => Effect.Effect<BrowserProfileSummary, RelayClientError>
   readonly extensionStatus: Effect.Effect<ExtensionStatus, RelayClientError>
   readonly targets: Effect.Effect<readonly TargetSummary[], RelayClientError>
   readonly sessions: Effect.Effect<readonly SessionSummary[], RelayClientError>
-  readonly sessionNew: (id?: string | undefined, options?: { readonly readOnly?: boolean }) => Effect.Effect<SessionSummary, RelayClientError>
-  readonly sessionEnsure: (id: string, options?: { readonly readOnly?: boolean }) => Effect.Effect<SessionSummary, RelayClientError>
+  readonly sessionNew: (id?: string | undefined, options?: { readonly readOnly?: boolean; readonly profileId?: string }) => Effect.Effect<SessionSummary, RelayClientError>
+  readonly sessionEnsure: (id: string, options?: { readonly readOnly?: boolean; readonly profileId?: string }) => Effect.Effect<SessionSummary, RelayClientError>
   readonly sessionReset: (id: string) => Effect.Effect<SessionSummary, RelayClientError>
   readonly sessionAdopt: (request: SessionAdoptRequest) => Effect.Effect<SessionAdoptResponse, RelayClientError>
   readonly sessionDelete: (id: string) => Effect.Effect<SessionDeleted, RelayClientError>
@@ -226,11 +229,13 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
 
   const recordingTargetBody = (target: RecordingTargetRequest): Record<string, unknown> => ({
     ...(target.sessionId ? { sessionId: target.sessionId } : {}),
+    ...(target.profileId ? { profileId: target.profileId } : {}),
     ...(target.tabId === undefined ? {} : { tabId: target.tabId }),
   })
 
   const recordingTargetQuery = (target: RecordingTargetRequest): string => {
     const searchParams = new URLSearchParams()
+    if (target.profileId) searchParams.set("profileId", target.profileId)
     if (target.sessionId) {
       searchParams.set("sessionId", target.sessionId)
     }
@@ -246,23 +251,27 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
     version: getJson("/version", RelayVersion),
     shutdown: (request) => postJson("/shutdown", { ...request }, RelayShutdownResponse),
     extensionStatus: getJson("/extension/status", ExtensionStatus),
+    profileName: (request) => postJson("/profiles/name", { ...request }, BrowserProfileSummary),
     targets: getJson("/json/list", TargetSummaries),
     sessions: getJson("/cli/sessions", SessionsContainer).pipe(Effect.map((container) => container.sessions)),
     sessionNew: (id, options) =>
       postJson("/cli/session/new", {
         ...(id ? { id } : {}),
         ...(options?.readOnly ? { readOnly: true } : {}),
+        ...(options?.profileId ? { profileId: options.profileId } : {}),
       }, SessionContainer).pipe(Effect.map((container) => container.session)),
     sessionEnsure: (id, options) =>
       postJson("/v1/sessions/ensure", {
         id,
         ...(options?.readOnly === undefined ? {} : { readOnly: options.readOnly }),
+        ...(options?.profileId ? { profileId: options.profileId } : {}),
       }, SessionEnsureResponse).pipe(Effect.map((container) => container.session)),
     sessionReset: (id) =>
       postJson("/cli/session/reset", { id }, SessionContainer).pipe(Effect.map((container) => container.session)),
     sessionAdopt: (request) =>
       postJson("/cli/session/adopt", {
         ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+        ...(request.profileId ? { profileId: request.profileId } : {}),
         createIfMissing: request.createIfMissing,
         targetSelection: request.targetSelection,
       }, SessionAdoptResponse),
@@ -270,6 +279,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
     execute: (request) =>
       postJson("/cli/execute", {
         ...(request.sessionId ? { sessionId: request.sessionId } : {}),
+        ...(request.profileId ? { profileId: request.profileId } : {}),
         code: request.code,
         createIfMissing: request.createIfMissing,
         ...(request.targetSelection === undefined ? {} : { targetSelection: request.targetSelection }),

@@ -16,6 +16,8 @@ export const SessionSummary = Schema.Struct({
   connected: Schema.Boolean,
   pageUrl: Schema.NullOr(Schema.String),
   stateKeys: Schema.Array(Schema.String),
+  profileId: Schema.optionalKey(Schema.String),
+  profileName: Schema.optionalKey(Schema.String),
   readOnly: Schema.optionalKey(Schema.Boolean),
 })
 
@@ -58,6 +60,7 @@ export const TargetSelection = Schema.Struct({
 export interface TargetSelection extends Schema.Schema.Type<typeof TargetSelection> {}
 
 export const ExecuteRequest = Schema.Struct({
+  profileId: Schema.optionalKey(Schema.NonEmptyString),
   sessionId: Schema.optionalKey(Schema.String),
   code: Schema.String,
   createIfMissing: Schema.Boolean,
@@ -67,6 +70,7 @@ export const ExecuteRequest = Schema.Struct({
 export interface ExecuteRequest extends Schema.Schema.Type<typeof ExecuteRequest> {}
 
 export const SessionAdoptRequest = Schema.Struct({
+  profileId: Schema.optionalKey(Schema.NonEmptyString),
   sessionId: Schema.optionalKey(Schema.String),
   createIfMissing: Schema.Boolean,
   targetSelection: TargetSelection,
@@ -75,6 +79,7 @@ export const SessionAdoptRequest = Schema.Struct({
 export interface SessionAdoptRequest extends Schema.Schema.Type<typeof SessionAdoptRequest> {}
 
 export const SessionNewRequest = Schema.Struct({
+  profileId: Schema.optionalKey(Schema.NonEmptyString),
   id: Schema.optionalKey(Schema.String),
   readOnly: Schema.optionalKey(Schema.Boolean),
 })
@@ -82,6 +87,7 @@ export const SessionNewRequest = Schema.Struct({
 export interface SessionNewRequest extends Schema.Schema.Type<typeof SessionNewRequest> {}
 
 export const SessionEnsureRequest = Schema.Struct({
+  profileId: Schema.optionalKey(Schema.NonEmptyString),
   id: Schema.NonEmptyString,
   readOnly: Schema.optionalKey(Schema.Boolean),
 })
@@ -221,6 +227,7 @@ export const AuthenticatedJsonOutcome = Schema.TaggedUnion({
 export type AuthenticatedJsonOutcome = typeof AuthenticatedJsonOutcome.Type
 
 export const TargetSummary = Schema.Struct({
+  profileId: Schema.optionalKey(Schema.String),
   id: Schema.String,
   type: Schema.String,
   title: Schema.String,
@@ -236,7 +243,24 @@ export interface TargetSummary extends Schema.Schema.Type<typeof TargetSummary> 
 
 export const TargetSummaries = Schema.Array(TargetSummary)
 
+export const BrowserProfileSummary = Schema.Struct({
+  id: Schema.String,
+  name: Schema.optionalKey(Schema.String),
+  connected: Schema.Boolean,
+  version: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  activeTargets: Schema.optionalKey(Schema.Number),
+})
+
+export interface BrowserProfileSummary extends Schema.Schema.Type<typeof BrowserProfileSummary> {}
+
+export const BrowserProfileNameRequest = Schema.Struct({
+  profileId: Schema.NonEmptyString,
+  name: Schema.NonEmptyString.check(Schema.isMaxLength(100)),
+})
+export interface BrowserProfileNameRequest extends Schema.Schema.Type<typeof BrowserProfileNameRequest> {}
+
 export const ExtensionStatus = Schema.Struct({
+  profiles: Schema.optionalKey(Schema.Array(BrowserProfileSummary)),
   connected: Schema.Boolean,
   version: Schema.NullOr(Schema.String),
   protocolVersion: Schema.optionalKey(Schema.NullOr(Schema.Number)),
@@ -391,6 +415,7 @@ const RecordingMode = Schema.Literals(["tab-capture", "cdp"])
 const RecordingRequestedMode = Schema.Literals(["auto", "tab-capture", "cdp"])
 
 export const RecordingTargetRequest = Schema.Struct({
+  profileId: Schema.optionalKey(Schema.NonEmptyString),
   sessionId: Schema.optionalKey(Schema.String),
   tabId: Schema.optionalKey(Schema.Number),
 })
@@ -460,6 +485,9 @@ export interface RecordingCancelResponse extends Schema.Schema.Type<typeof Recor
 
 export const RelayErrorCode = Schema.Literals([
   "invalid-request",
+  "profile-ambiguous",
+  "profile-not-found",
+  "profile-mismatch",
   "relay-starting",
   "relay-busy",
   "auth-profile-not-found",

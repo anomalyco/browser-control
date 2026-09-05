@@ -27,11 +27,13 @@ type ToolSpec = {
 type ExecuteArguments = {
   readonly code: string
   readonly session?: string | undefined
+  readonly profileId?: string | undefined
   readonly targetSelection?: TargetSelection
 }
 
 type AdoptArguments = {
   readonly session?: string | undefined
+  readonly profileId?: string | undefined
   readonly targetSelection: TargetSelection
 }
 
@@ -45,6 +47,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       inputSchema: objectSchema({
         code: { type: "string", description: "JavaScript code to execute. It receives browser, context, page, state, modules, fillInput, fillInputs, snapshot(options?) for a compact semantic outline or explicit diff against the previous snapshot, ref(id) for the latest snapshot's locator, screenshotWithLabels, ariaSnapshot(target?, { timeout }), ghostCursor (show/hide), and handoff(message, { timeoutMs, start? })." },
         session: { type: "string", description: "Optional existing Browser Control session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed." },
+        profileId: { type: "string", description: "Persistent browser profile id or unique profile label from status. Required for new sessions when multiple profiles are available; existing sessions stay pinned." },
         targetUrl: { type: "string", description: "Optional URL substring selecting an existing attached page. This does not navigate or open a URL; use page.goto() for that." },
         targetIndex: { type: "integer", minimum: 0, description: "Optional zero-based attached page index selector." },
       }, ["code"]),
@@ -57,6 +60,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         const sessionId = args.session ?? currentSession.id
         const result = yield* relay.execute({
           sessionId,
+          ...(args.profileId ? { profileId: args.profileId } : {}),
           code: args.code,
           createIfMissing: !args.session,
           ...(args.targetSelection ? { targetSelection: args.targetSelection } : {}),
@@ -84,10 +88,24 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       }),
     },
     {
+      name: "profile_name",
+      description: "Give a connected browser profile a persistent label for profile selection.",
+      inputSchema: objectSchema({ profileId: { type: "string" }, name: { type: "string", minLength: 1, maxLength: 100 } }, ["profileId", "name"]),
+      readOnly: false,
+      destructive: false,
+      idempotent: true,
+      handle: (input) => Effect.gen(function* () {
+        const object = requireObject(input)
+        if (!relay.profileName) return yield* Effect.fail(new Error("Profile naming is unavailable"))
+        return yield* relay.profileName({ profileId: requiredStringField(object, "profileId"), name: requiredStringField(object, "name") })
+      }),
+    },
+    {
       name: "session_new",
       description: "Create a Browser Control session and make it current for this MCP server.",
       inputSchema: objectSchema({
         id: { type: "string", description: "Optional lowercase session id." },
+        profileId: { type: "string", description: "Browser profile id or unique label from status. Required when multiple profiles are available." },
         readOnly: { type: "boolean", description: "Create a read-only session: the relay rejects input-dispatching CDP so scripts can inspect but not click or type." },
       }),
       readOnly: false,
@@ -96,7 +114,8 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       handle: (input) => Effect.gen(function* () {
         const requestedId = optionalStringField(input, "id")
         const readOnly = optionalBooleanField(input, "readOnly")
-        const session = yield* relay.sessionNew(requestedId, readOnly ? { readOnly: true } : {})
+        const profileId = optionalStringField(input, "profileId")
+        const session = yield* relay.sessionNew(requestedId, { ...(readOnly ? { readOnly: true } : {}), ...(profileId ? { profileId } : {}) })
         currentSession.id = session.id
         currentSession.established = true
         return { session }
@@ -178,6 +197,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       description: "Make an attached tab the Browser Control session's default page for subsequent bare execute calls.",
       inputSchema: objectSchema({
         session: { type: "string", description: "Optional existing Browser Control session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed." },
+        profileId: { type: "string", description: "Persistent browser profile id or unique profile label from status. Required for new sessions when multiple profiles are available; existing sessions stay pinned." },
         targetUrl: { type: "string", description: "Adopt an existing attached page whose URL contains this text. This does not navigate or open a URL." },
         targetIndex: { type: "integer", minimum: 0, description: "Adopt the attached page at this zero-based target index." },
       }),
@@ -189,6 +209,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         const sessionId = args.session ?? currentSession.id
         const result = yield* relay.sessionAdopt({
           sessionId,
+          ...(args.profileId ? { profileId: args.profileId } : {}),
           createIfMissing: !args.session,
           targetSelection: args.targetSelection,
         })
@@ -451,6 +472,7 @@ function parseExecuteArguments(input: unknown): ExecuteArguments {
   return {
     code,
     ...(session ? { session } : {}),
+    ...(optionalStringField(object, "profileId") ? { profileId: optionalStringField(object, "profileId") } : {}),
     ...(targetSelection ? { targetSelection } : {}),
   }
 }
@@ -464,6 +486,7 @@ function parseAdoptArguments(input: unknown): AdoptArguments {
   }
   return {
     ...(session ? { session } : {}),
+    ...(optionalStringField(object, "profileId") ? { profileId: optionalStringField(object, "profileId") } : {}),
     targetSelection,
   }
 }

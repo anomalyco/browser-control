@@ -154,6 +154,12 @@ const check = Effect.fn("LifecycleCheck.run")(function* (options: { previous: st
     socket.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 1 } }))
     socket.send(JSON.stringify({ method: "ready" }))
     yield* wait(relay.extensionStatus.pipe(Effect.flatMap((status) => Effect.try(() => {
+      assert(status.connected, "Extension inventory has not settled")
+    }))))
+    // Old catalogs have no profile identity. Restoration is deliberately lazy:
+    // an explicit session request binds only to its exact, ready target inventory.
+    yield* relay.sessionEnsure(fixtureSession)
+    yield* wait(relay.extensionStatus.pipe(Effect.flatMap((status) => Effect.try(() => {
       assert(status.connected && status.protocolCompatible === true && status.protocolVersion === 2)
       assert.equal(status.targets?.length, 1)
       const target = status.targets[0]

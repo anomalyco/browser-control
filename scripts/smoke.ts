@@ -1634,7 +1634,7 @@ const scopedOwnerCdpPage = Effect.fnUntraced(function* (options: {
 
 async function makeOwnerCdpPage(options: { readonly sessionId: string; readonly urlIncludes: string }): Promise<OwnerCdpPage> {
   const [versionResponse, targetsResponse] = await Promise.all([
-    fetch(new URL("/json/version", endpointUrl)),
+    fetch(new URL("/json/version", endpointUrl), { headers: { "browser-control-session-id": options.sessionId } }),
     fetch(new URL("/json/list", endpointUrl)),
   ])
   const version = await versionResponse.json() as { readonly webSocketDebuggerUrl?: unknown }
@@ -1773,7 +1773,9 @@ async function makeOwnerCdpPage(options: { readonly sessionId: string; readonly 
 
 const scopedBrowser = Effect.fnUntraced(function* () {
   return yield* Effect.acquireRelease(
-    playwright("connect over CDP", () => chromium.connectOverCDP(endpointUrl)),
+    playwright("connect over CDP", () => chromium.connectOverCDP(endpointUrl, {
+      ...(process.env.BROWSER_CONTROL_PROFILE ? { headers: { "browser-control-profile-id": process.env.BROWSER_CONTROL_PROFILE } } : {}),
+    })),
     (browser) => boundedCleanup("close browser", () => browser.close()),
   )
 })

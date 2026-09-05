@@ -76,11 +76,31 @@ session. Reset or delete releases an adopted user tab without closing it.
 Prefer adoption for authenticated browser state rather than reproducing login
 in a fresh page.
 
-Each relay controls one browser/profile at a time. A second extension connection
-cannot replace a healthy active connection. If `status` or `doctor` reports
-rejected competing connections, keep the extension enabled only in the intended
-browser/profile. To switch browsers, disconnect the incumbent extension first;
-creating a new execute session does not switch browsers.
+A relay can control several browser profiles simultaneously. Reload the updated
+extension once in each profile so it advertises its persistent installation ID.
+Inspect `browser-control profile list` (or MCP `status` → `profiles`), then select
+an ID or unique label when creating a session:
+
+```bash
+browser-control profile list
+browser-control profile name <profile-id> "Rebase Accounts"
+browser-control execute --profile "Rebase Accounts" 'return page.url()'
+```
+
+CLI `execute`, `session new`, `session adopt`, and recording commands accept
+`--profile` (or `BROWSER_CONTROL_PROFILE`); MCP counterparts accept `profileId`.
+Recording selectors are profile-local: pass `--profile` when multiple profiles
+are known, including a profile that has disconnected. MCP `profile_name`
+assigns a label. Labels are user-chosen, not Chrome account names discovered by
+the extension. An existing session remains pinned to its profile; continue with
+its session ID. Selecting a different profile for that session is rejected.
+When more than one profile is available, new sessions without a profile fail
+closed. A disconnected profile never falls back to another connected account.
+Old catalog entries bind only where their exact saved target reappears; entries
+without a target require explicit selection. Disconnected legacy connections
+can migrate by the same exact-target rule after the extension is reloaded.
+Two connections claiming the same ID are still rejected; reload older extensions
+rather than disabling the other profile.
 
 Completion: the selected page URL is the intended page, and later work either
 retains the returned session id or intentionally uses the MCP process session.
@@ -403,9 +423,10 @@ Common diagnoses:
   does not recover.
 - Incompatible extension protocol: update either the extension or npm package;
   exact extension and relay release versions do not need to match.
-- Competing browser/profile connections: the active browser is preserved and
-  additional connections are rejected. Use one browser/profile per relay;
-  repeatedly creating sessions or resetting tabs does not switch browsers.
+- Duplicate or legacy profile connections: a connection claiming an already
+  active identity is rejected. Reload older extensions in each profile, inspect
+  `profile list`, and select the intended profile explicitly. Do not reset a
+  pinned session to switch accounts; create a new session for the other profile.
 - Stale relay build: inspect `doctor`, then coordinate an explicit
   `browser-control relay restart`. It requires an exact managed instance and
   safe shutdown protocol 2. Legacy relays need a one-time coordinated manual

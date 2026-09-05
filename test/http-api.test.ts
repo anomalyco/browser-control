@@ -162,6 +162,19 @@ describe("HTTP request schemas", () => {
     })
     const sessions = new BrowserControlSessions(`http://127.0.0.1:${port}`, undefined, undefined, registry)
     sessions.createNew("beta")
+    const runtime = {
+      profileId: "11111111-1111-4111-8111-111111111111",
+      profileName: undefined,
+      renameProfile: async (name: string) => ({ id: "11111111-1111-4111-8111-111111111111", name, connected: false }),
+      registry,
+      sessions,
+      extensionStatus: () => ({ connected: true, version: "9.4.2", protocolVersion: 2, protocolCompatible: true, protocolLegacy: false, rejectedConnections: 0, cdpClients: 0 }),
+      recordingRelay: new RecordingRelay({
+        isExtensionConnected: () => true,
+        sendToExtension: async () => ({}),
+        sendDebuggerCommand: async () => ({}),
+      }),
+    }
     const shutdown = new RelayShutdown({
       instanceId: "relay-test",
       managed: true,
@@ -186,13 +199,7 @@ describe("HTTP request schemas", () => {
         protocolCompatible: true,
         protocolLegacy: false,
       }),
-      recordingRelay: new RecordingRelay({
-        isExtensionConnected: () => true,
-        sendToExtension: async () => ({}),
-        sendDebuggerCommand: async () => ({}),
-      }),
-      registry,
-      sessions,
+      profiles: { list: () => [runtime], get: () => runtime, select: () => runtime, bind: () => Effect.succeed(runtime) },
     })
 
     try {
@@ -341,6 +348,19 @@ describe("HTTP request schemas", () => {
     const port = address.port
     const registry = new TargetRegistry()
     const sessions = new BrowserControlSessions(`http://127.0.0.1:${port}`, undefined, undefined, registry)
+    const runtime = {
+      profileId: "11111111-1111-4111-8111-111111111111",
+      profileName: undefined,
+      renameProfile: async (name: string) => ({ id: "11111111-1111-4111-8111-111111111111", name, connected: false }),
+      registry,
+      sessions,
+      extensionStatus: () => ({ connected: true, version: "9.4.2", protocolVersion: 2, protocolCompatible: true, protocolLegacy: false, rejectedConnections: 0, cdpClients: 0 }),
+      recordingRelay: new RecordingRelay({
+        isExtensionConnected: () => true,
+        sendToExtension: async () => ({}),
+        sendDebuggerCommand: async () => ({}),
+      }),
+    }
     sessions.createNew("alpha")
     const summary = sessions.summary("alpha")
     if (!summary) throw new Error("test session was not created")
@@ -365,14 +385,8 @@ describe("HTTP request schemas", () => {
       browserId: "test-browser",
       relayInstance: { id: "relay-test", startedAt: "2026-07-19T00:00:00.000Z", pid: 123, managed: true },
       shutdown,
-      extensionStatus: () => ({ connected: true, version: "9.4.2" }),
-      registry,
-      sessions,
-      recordingRelay: new RecordingRelay({
-        isExtensionConnected: () => true,
-        sendToExtension: async () => ({}),
-        sendDebuggerCommand: async () => ({}),
-      }),
+      extensionStatus: runtime.extensionStatus,
+      profiles: { list: () => [runtime], get: () => runtime, select: () => runtime, bind: () => Effect.succeed(runtime) },
     })
     let restart: http.ClientRequest | undefined
     const partial = http.request({
@@ -460,6 +474,13 @@ async function startBoundaryServer() {
   const port = address.port
   const sessions = new BrowserControlSessions(`http://127.0.0.1:${port}`, undefined, undefined, registry)
   sessions.createNew("alpha")
+  const runtime = {
+    profileId: "11111111-1111-4111-8111-111111111111",
+    profileName: undefined,
+    renameProfile: async (name: string) => ({ id: "11111111-1111-4111-8111-111111111111", name, connected: true }),
+    registry, sessions, recordingRelay,
+    extensionStatus: () => ({ connected: true, version: "9.4.2", protocolVersion: 2, protocolCompatible: true, protocolLegacy: false, rejectedConnections: 0, cdpClients: 0 }),
+  }
   handler = createHttpRequestHandler({
     host: "127.0.0.1", port, browserId: "test-browser",
     relayInstance: { id: "relay-test", startedAt: "2026-07-19T00:00:00.000Z", pid: 123, managed: true },
@@ -468,8 +489,8 @@ async function startBoundaryServer() {
       drain: sessions.beginDrain(), resume: () => sessions.resume(), busy: () => undefined,
       settle: Effect.void, quiescent: () => sessions.isDrained(), audit: () => Effect.void, stop: () => {},
     }),
-    extensionStatus: () => ({ connected: true, version: "9.4.2" }),
-    registry, sessions, recordingRelay,
+    extensionStatus: runtime.extensionStatus,
+    profiles: { list: () => [runtime], get: () => runtime, select: () => runtime, bind: () => Effect.succeed(runtime) },
   })
   return { server, port, sessions, recordingRelay }
 }
