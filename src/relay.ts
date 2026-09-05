@@ -765,9 +765,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       typeof message.params?.version === "string" ? message.params.version : undefined,
       message.params?.protocolVersion,
     )
-    if (protocol.legacy) {
-      extensionRpc.markReady()
-    }
     return extensionGeneration
   }
 

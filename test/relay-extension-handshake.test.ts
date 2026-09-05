@@ -30,22 +30,23 @@ describe("relay extension handshake", () => {
     })))
   })
 
-  it("reports incompatible protocol without accepting its events", async () => {
+  it.each([undefined, 1, 3])("reports incompatible protocol %s without accepting its events or ready", async (protocolVersion) => {
     const port = 24_000 + Math.floor(Math.random() * 10_000)
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const relay = yield* startRelay({ port, sessionCatalogPath: null })
       const extension = yield* Effect.promise(() => connectExtension(relay.url))
-      extension.send(JSON.stringify({ method: "hello", params: { version: "2.0.0", protocolVersion: 3 } }))
+      extension.send(JSON.stringify({ method: "hello", params: { version: "2.0.0", protocolVersion } }))
       extension.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 7 } }))
+      extension.send(JSON.stringify({ method: "ready" }))
       yield* Effect.sleep("20 millis")
 
       const status = yield* Effect.promise(() => fetch(`${relay.url}/extension/status`).then((response) => response.json()))
       expect(status).toMatchObject({
         connected: false,
         version: "2.0.0",
-        protocolVersion: 3,
+        protocolVersion: protocolVersion ?? 1,
         protocolCompatible: false,
-        protocolLegacy: false,
+        protocolLegacy: protocolVersion === undefined,
         activeTargets: 0,
       })
       extension.close()

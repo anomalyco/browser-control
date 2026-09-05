@@ -4,8 +4,8 @@ import { RelayLifecycleEvent } from "./relay-lifecycle-log.ts"
 
 type State = Data.TaggedEnum<{
   Running: {}
-  Draining: { readonly requestId: string }
-  Stopping: { readonly requestId: string }
+  Draining: {}
+  Stopping: {}
   Closing: {}
 }>
 const State = Data.taggedEnum<State>()
@@ -94,7 +94,7 @@ export class RelayShutdown {
         return yield* Effect.fail(new RelayShutdownError({ reason: "not-managed", message: "A foreground relay must be stopped by its owner" }))
       }
       if (!control.accepting) return yield* Effect.fail(control.busyError())
-      control.state = State.Draining({ requestId: request.requestId })
+      control.state = State.Draining()
       const fields = { instanceId: request.instanceId, requestId: request.requestId, client: request.client }
       yield* Effect.gen(function* () {
         yield* control.options.audit(RelayLifecycleEvent.cases.Requested.make(fields))
@@ -111,12 +111,12 @@ export class RelayShutdown {
           duration: control.options.timeoutMs ?? 10_000,
           orElse: () => Effect.fail(control.busyError("timeout")),
         })))
-        if (!State.$is("Draining")(control.state) || control.state.requestId !== request.requestId) {
+        if (!State.$is("Draining")(control.state)) {
           return yield* Effect.fail(control.busyError())
         }
         yield* control.options.audit(RelayLifecycleEvent.cases.Stopping.make(fields))
         yield* restore(Effect.void)
-        if (!State.$is("Draining")(control.state) || control.state.requestId !== request.requestId) {
+        if (!State.$is("Draining")(control.state)) {
           return yield* Effect.fail(control.busyError())
         }
         if (control.requests !== 0 || !control.options.quiescent()) {
@@ -124,7 +124,7 @@ export class RelayShutdown {
         }
         const busy = control.options.busy()
         if (busy) return yield* Effect.fail(control.busyError(busy))
-        control.state = State.Stopping({ requestId: request.requestId })
+        control.state = State.Stopping()
         control.options.stop()
       }).pipe(Effect.onExit((exit) => {
         if (Exit.isSuccess(exit) || !State.$is("Draining")(control.state)) return Effect.void

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
-import { Deferred, Effect, Fiber, Latch } from "effect"
+import { Deferred, Effect, Exit, Fiber, Latch } from "effect"
 import { TestClock } from "effect/testing"
 import { adoptionTipForUrl, BrowserControlSessions, shouldAppendAdoptionTip } from "../src/session-manager.ts"
 import type { ExecuteSandboxLike, SessionTarget } from "../src/relay-types.ts"
@@ -1087,6 +1087,28 @@ describe("BrowserControlSessions", () => {
       yield* Fiber.join(second)
       expect(sessions.hasPendingWork("alpha")).toBe(false)
       expect(sandbox.closes()).toBe(1)
+    }))
+  })
+
+  it.each(["typed failure", "defect"] as const)("closeAll preserves teardown behavior after a disconnect %s", async (outcome) => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const failure = new Error("disconnect failed")
+      const disconnect = vi.fn(() => outcome === "typed failure" ? Effect.fail(failure) : Effect.die(failure))
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => ({
+        ...makeFakeSandbox(),
+        disconnectSettled: disconnect,
+      }))
+      const session = sessions.createNew("alpha")
+
+      const exit = yield* Effect.exit(sessions.closeAll())
+
+      expect(exit).toEqual(outcome === "typed failure" ? Exit.void : Exit.die(failure))
+      expect(disconnect).toHaveBeenCalledOnce()
+      expect(sessions.sessions.get("alpha")).toBe(outcome === "typed failure" ? undefined : session)
+      expect(sessions.hasPendingWork("alpha")).toBe(false)
+      expect((yield* session.executeSemaphore.withPermitsIfAvailable(1)(Effect.void))._tag).toBe("Some")
+      sessions.resume()
+      expect(() => sessions.createNew("beta")).toThrow("closing")
     }))
   })
 

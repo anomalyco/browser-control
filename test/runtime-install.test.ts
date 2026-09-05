@@ -16,7 +16,7 @@ afterEach(async () => {
   await Promise.all(temporary.splice(0).map((directory) => fs.rm(directory, { recursive: true, force: true })))
 })
 
-async function fixture() {
+async function fixture(options: { readonly mcpProbe?: "startup" | "initialize" | "tools/list" | "skill" | "session_current" } = {}) {
   const directory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "browser-control-runtime-")))
   temporary.push(directory)
   const source = path.join(directory, "checkout")
@@ -84,13 +84,17 @@ console.log(argument === '--version' ? 'browser-control v1.2.3' : argument === '
       await fs.writeFile(path.join(pkg, "dist/mcp.js"), `#!/usr/bin/env node
 import fs from 'node:fs';
 import readline from 'node:readline';
-await fetch('http://127.0.0.1:' + process.env.BROWSER_CONTROL_PORT + '/version');
+const probe = ${JSON.stringify(options.mcpProbe ?? null)};
+const probeRelay = () => fetch('http://127.0.0.1:' + process.env.BROWSER_CONTROL_PORT + '/version');
+if (probe === 'startup') await probeRelay();
 for await (const line of readline.createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
   if (!request.id) continue;
+  if (request.method === probe || request.params?.name === probe) await probeRelay();
   console.log(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' }));
   const result = request.method === 'initialize' ? { serverInfo: { name: 'browser-control', version: '1.2.3' } }
-    : request.method === 'tools/list' ? { tools: [{ name: 'execute' }, { name: 'skill' }] }
+    : request.method === 'tools/list' ? { tools: [{ name: 'execute' }, { name: 'skill' }, { name: 'session_current' }] }
+    : request.params?.name === 'session_current' ? { isError: false, structuredContent: { currentSession: process.env.BROWSER_CONTROL_SESSION } }
     : { content: [{ type: 'text', text: fs.readFileSync(new URL('../skills/browser-control/SKILL.md', import.meta.url), 'utf8') }] };
   console.log(JSON.stringify({ jsonrpc: '2.0', id: request.id, result }));
 }
@@ -109,6 +113,14 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
 }
 
 describe("isolated runtime installation", () => {
+  it.each(["startup", "initialize", "tools/list", "skill", "session_current"] as const)("rejects MCP relay requests during %s without stamping the candidate", async (mcpProbe) => {
+    const f = await fixture({ mcpProbe })
+    await fs.symlink(f.source, f.active)
+    await expect(Effect.runPromise(prepareRuntime(f, f.run))).rejects.toThrow("Unexpected MCP endpoint requests: GET /version")
+    await expect(fs.lstat(path.join(f.install, marker))).rejects.toMatchObject({ code: "ENOENT" })
+    expect(await fs.realpath(f.active)).toBe(f.source)
+  })
+
   it("leaves the active pointer and checkout untouched when prepare fails", async () => {
     const f = await fixture()
     const previous = path.join(f.directory, "previous")

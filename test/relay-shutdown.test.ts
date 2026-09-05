@@ -247,6 +247,62 @@ describe("RelayShutdown", () => {
     }).pipe(Effect.provide(TestClock.layer())))
   })
 
+  it.each(["draining", "stopping"] as const)("finishing an old cancellation audit leaves a new %s restart untouched", async (phase) => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const cancelling = yield* Latch.make()
+      const releaseCancellation = yield* Latch.make()
+      const draining = yield* Latch.make()
+      const releaseDrain = yield* Latch.make()
+      const events: RelayLifecycleEvent[] = []
+      let busy = true
+      const { shutdown, resume, stop } = fixture({
+        busy: () => busy ? "recordings" : undefined,
+        drain: draining.open.pipe(Effect.andThen(releaseDrain.await)),
+        audit: (event) => Effect.gen(function* () {
+          if (event._tag === "Cancelled") {
+            yield* cancelling.open
+            yield* releaseCancellation.await
+          }
+          events.push(event)
+        }),
+      })
+      const first = yield* Effect.forkChild(shutdown.request(request).pipe(Effect.flip))
+      yield* cancelling.await
+      expect(shutdown.accepting).toBe(true)
+      expect(resume).toHaveBeenCalledOnce()
+      expect(first.pollUnsafe()).toBeUndefined()
+
+      busy = false
+      const nextRequest = { ...request, requestId: "next-restart" }
+      const next = yield* Effect.forkChild(shutdown.request(nextRequest))
+      yield* draining.await
+      if (phase === "stopping") {
+        yield* releaseDrain.open
+        yield* Fiber.join(next)
+      }
+
+      yield* releaseCancellation.open
+      expect(yield* Fiber.join(first)).toMatchObject({ reason: "busy", message: expect.stringContaining("recordings") })
+      expect(shutdown.accepting).toBe(false)
+      expect(shutdown.stopping).toBe(phase === "stopping")
+      expect(resume).toHaveBeenCalledOnce()
+      expect(stop).toHaveBeenCalledTimes(phase === "stopping" ? 1 : 0)
+      if (phase === "draining") {
+        expect(next.pollUnsafe()).toBeUndefined()
+        yield* releaseDrain.open
+        yield* Fiber.join(next)
+      }
+      expect(shutdown.stopping).toBe(true)
+      expect(stop).toHaveBeenCalledOnce()
+      expect(events.filter((event) => event._tag === "Cancelled")).toEqual([
+        RelayLifecycleEvent.cases.Cancelled.make({ instanceId: request.instanceId, requestId: request.requestId, client: request.client }),
+      ])
+      expect(events.filter((event) => event._tag === "Stopping")).toEqual([
+        RelayLifecycleEvent.cases.Stopping.make({ instanceId: nextRequest.instanceId, requestId: nextRequest.requestId, client: nextRequest.client }),
+      ])
+    }))
+  })
+
   it.each(["Requested", "Stopping"] as const)("propagates %s audit failure without stopping and permits retry", async (phase) => {
     const failure = new Error(`${phase} fsync failed`)
     let fail = true

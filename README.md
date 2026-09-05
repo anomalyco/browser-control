@@ -83,6 +83,11 @@ CLI and MCP clients share the detached relay, but each execute session keeps its
 own default page and persistent JavaScript `state`. Restarting an MCP process
 does not stop the relay or interrupt an active CLI session.
 
+MCP initialization, tool discovery, `skill`, and `session_current` do not contact
+or start the relay. The first operational call (such as `execute`, `session_new`,
+or `session_adopt`) starts it if needed. Relay-backed observational tools report
+an unavailable relay rather than starting one.
+
 ### 3. Load the extension
 
 Browser Control currently ships its extension as an unpacked extension inside

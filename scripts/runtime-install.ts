@@ -82,7 +82,8 @@ async function digestInstall(install: string): Promise<string> {
 
 const validateMcp = Effect.fn("RuntimeInstall.validateMcp")(function* (install: string, version: string, skill: string) {
   yield* attempt(async (signal) => {
-    // This endpoint is deliberately not a relay and cannot serve browser work.
+    // A sentinel, not a relay: any request fails validation. Keep the listener
+    // reachable so a regressed eager ensure cannot launch a managed relay.
     const requests: string[] = []
     const server = createServer((request, response) => {
       requests.push(`${request.method} ${request.url}`)
@@ -147,13 +148,19 @@ const validateMcp = Effect.fn("RuntimeInstall.validateMcp")(function* (install: 
                 send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })
               } else if (response.id === 2) {
                 const result = Schema.decodeUnknownSync(Schema.Struct({ tools: Schema.Array(Schema.Struct({ name: Schema.String })) }))(response.result)
-                if (!result.tools.some((tool) => tool.name === "execute") || !result.tools.some((tool) => tool.name === "skill")) {
+                if (!["execute", "skill", "session_current"].every((name) => result.tools.some((tool) => tool.name === name))) {
                   throw new Error("MCP tools missing")
                 }
                 send({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "skill", arguments: {} } })
               } else if (response.id === 3) {
                 const result = Schema.decodeUnknownSync(Schema.Struct({ content: Schema.Array(Schema.Struct({ type: Schema.Literal("text"), text: Schema.String })) }))(response.result)
                 if (result.content.map((item) => item.text).join("").trim() !== skill.trim()) throw new Error("MCP skill differs from installed skill")
+                send({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "session_current", arguments: {} } })
+              } else if (response.id === 4) {
+                Schema.decodeUnknownSync(Schema.Struct({
+                  isError: Schema.Literal(false),
+                  structuredContent: Schema.Struct({ currentSession: Schema.Literal("runtime-validation") }),
+                }))(response.result)
                 complete = true
                 child.kill("SIGKILL")
               }
@@ -167,7 +174,7 @@ const validateMcp = Effect.fn("RuntimeInstall.validateMcp")(function* (install: 
           protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "runtime-validation", version: "1" },
         } })
       })
-      if (requests.length === 0 || requests.some((request) => request !== "GET /version")) {
+      if (requests.length !== 0) {
         throw new Error(`Unexpected MCP endpoint requests: ${requests.join(", ")}`)
       }
     } finally {

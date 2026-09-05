@@ -365,13 +365,6 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
   ]
 }
 
-const relayLayer = Layer.effectDiscard(
-  Effect.gen(function* () {
-    const relay = yield* RelayClient.Service
-    yield* RelayLifecycle.ensureRelay({ relay })
-  }),
-)
-
 const registerTools = Effect.gen(function* () {
   const server = yield* McpServer.McpServer
   const relay = yield* RelayClient.Service
@@ -423,7 +416,7 @@ export const mcpServerLayer = McpServer.layerStdio({
   protocols: [McpProtocol.v2025_06_18, McpProtocol.v2025_11_25, McpProtocol.v2025_03_26, McpProtocol.v2024_11_05],
 })
 
-export const mcpToolsLayer = Layer.mergeAll(relayLayer, Layer.effectDiscard(registerTools))
+export const mcpToolsLayer = Layer.effectDiscard(registerTools)
 
 export const runMcpServer: Effect.Effect<never, Error> = Layer.launch(
   mcpToolsLayer.pipe(

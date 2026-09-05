@@ -33,6 +33,9 @@ local Node relay.
   path. MCP uses the same detached relay lifecycle instead of owning an
   in-process relay, so an MCP restart cannot interrupt CLI handoffs. The first
   session is created atomically in the execute request.
+- MCP initialization, discovery, `skill`, and `session_current` never contact or
+  start the relay. Operational tools ensure readiness per call; observational
+  relay tools report unavailability without autostart.
 - Ordinary CLI, MCP, and SDK calls never replace a running relay. Replacement
   requires `browser-control relay restart`, an exact managed instance, and safe
   shutdown protocol 2. Legacy, foreground, source, and newer relays fail closed;

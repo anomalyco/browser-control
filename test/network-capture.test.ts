@@ -92,6 +92,27 @@ describe("NetworkCapture", () => {
     expect(result).toMatchObject({ capturedBodyBytes: 6, truncatedBodyCount: 2 })
   })
 
+  it.each([
+    { mime: "application/json", body: '{"message":"café 🎈"}', limit: 100, truncated: 0 },
+    { mime: "application/json", body: '{"token":"café 🎈"}', limit: 4, truncated: 1 },
+    { mime: "application/octet-stream", body: "opaque bytes", limit: 100, truncated: 1 },
+  ])("preserves body bytes and omission rules for $mime at limit $limit", async ({ mime, body, limit, truncated }) => {
+    const directory = await temporaryDirectory()
+    const outputPath = path.join(directory, "capture.har")
+    const page = new FakePage()
+    const recorder = new Recorder()
+    await Effect.runPromise(recorder.start(page as unknown as Page, { maxBodyBytes: limit }))
+    page.exchange({
+      // The actual bytes still need bounding if a server understates the length.
+      responseHeaders: [{ name: "Content-Type", value: mime }, { name: "Content-Length", value: "1" }],
+      responseBody: Buffer.from(body),
+    })
+    const result = await Effect.runPromise(recorder.stop({ outputPath }))
+    expect(result).toMatchObject({ capturedBodyBytes: Math.min(Buffer.byteLength(body), limit), truncatedBodyCount: truncated })
+    const artifact = JSON.parse(await fs.readFile(outputPath, "utf8"))
+    expect(artifact.log.entries[0].response.content.text).toBe(truncated ? undefined : body)
+  })
+
   it("redacts artifact credentials even without a persisted profile", async () => {
     const directory = await temporaryDirectory()
     const outputPath = path.join(directory, "capture.har")

@@ -174,4 +174,27 @@ describe("SecretCollector", () => {
       { ref: "BC_SECRET_1", value: "secret-value", sources: [] },
     ])).toBe("using ${BC_SECRET_1} twice ${BC_SECRET_1}")
   })
+
+  it("combines known values and secret-shaped fields without changing nested scalar semantics", () => {
+    const collector = new SecretCollector([
+      { ref: "BC_SECRET_1", value: "known-token", sources: ["request.header.authorization"] },
+      { ref: "BC_SECRET_2", value: "42", sources: ["request.body.pin"] },
+      { ref: "BC_SECRET_3", value: "false", sources: ["request.body.flag"] },
+    ])
+    const input = {
+      label: "prefix known-token ${BC_SECRET_1}",
+      items: [42, false, null, "", { password: ["unknown", 42, false, null, "", { nested: "known-token" }] }],
+      credentials: { empty: "", missing: null, flag: false, nested: [{ label: "not previously observed" }] },
+      untouched: { value: "plain", count: 7 },
+    }
+    const original = structuredClone(input)
+
+    expect(collector.redactValue(input)).toEqual({
+      label: "prefix ${BC_SECRET_1} ${BC_SECRET_1}",
+      items: ["${BC_SECRET_2}", "${BC_SECRET_3}", null, "", { password: ["[REDACTED]", "[REDACTED]", "[REDACTED]", null, "", { nested: "[REDACTED]" }] }],
+      credentials: { empty: "", missing: null, flag: "[REDACTED]", nested: [{ label: "[REDACTED]" }] },
+      untouched: { value: "plain", count: 7 },
+    })
+    expect(input).toEqual(original)
+  })
 })

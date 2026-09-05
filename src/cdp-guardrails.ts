@@ -19,8 +19,6 @@ const alwaysBlocked = new Map<string, string>([
   ["Browser.close", "it would close the user's browser"],
 ])
 
-export const alwaysBlockedCdpMethods: ReadonlySet<string> = new Set(alwaysBlocked.keys())
-
 const readOnlyBlockedPrefixes = ["Input."] as const
 
 export type GuardContext = {

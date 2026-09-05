@@ -28,6 +28,10 @@ browser-control execute 'return { url: page.url(), title: await page.title() }'
 Use `browser-control doctor` only when setup or runtime behavior is unclear.
 `status` and `doctor` are observational and never start the relay.
 
+MCP startup, tool discovery, `skill`, and `session_current` do not contact the
+relay. The first operational tool call starts it if needed; relay-backed
+observational tools report unavailability instead of starting it.
+
 Ordinary CLI/MCP/SDK calls never replace a running relay. On a build mismatch,
 coordinate with other agents before running `browser-control relay restart`.
 It preserves browser tabs and durable sessions but resets JavaScript state and

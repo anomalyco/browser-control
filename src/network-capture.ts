@@ -569,15 +569,14 @@ function captureBuffer(buffer: Buffer | null, mimeType: string | undefined, acti
   const remaining = Math.max(0, active.options.maxTotalBodyBytes - active.capturedBodyBytes)
   const captureBytes = Math.min(buffer.length, active.options.maxBodyBytes, remaining)
   const truncated = captureBytes < buffer.length
-  const captured = Buffer.from(buffer.subarray(0, captureBytes))
-  active.capturedBodyBytes += captured.length
+  active.capturedBodyBytes += captureBytes
   const textual = isTextualMimeType(mimeType)
   const omitted = truncated || !textual
   if (omitted) active.truncatedBodyCount += 1
   return {
     size: buffer.length,
     mimeType: mimeType ?? "application/octet-stream",
-    ...(!truncated && textual ? { text: captured.toString("utf8") } : {}),
+    ...(!truncated && textual ? { text: buffer.toString("utf8", 0, captureBytes) } : {}),
     truncated: omitted,
   }
 }

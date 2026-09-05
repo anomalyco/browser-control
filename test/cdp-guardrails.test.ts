@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest"
-import { alwaysBlockedCdpMethods, guardCdpMethod } from "../src/cdp-guardrails.ts"
+import { guardCdpMethod } from "../src/cdp-guardrails.ts"
 
 describe("cdp-guardrails", () => {
   it("always blocks browser-state-destroying methods", () => {
     for (const method of ["Network.clearBrowserCookies", "Network.clearBrowserCache", "Storage.clearCookies", "Browser.close"]) {
-      expect(alwaysBlockedCdpMethods.has(method)).toBe(true)
       const message = guardCdpMethod({ method, readOnly: false })
       expect(message).toContain(`Browser Control blocked ${method}`)
       expect(message).toContain("always blocked")

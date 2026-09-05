@@ -643,21 +643,13 @@ export class BrowserControlSessions {
       manager.admission = "closed"
       yield* manager.beginDrain().pipe(Effect.ignore)
       yield* manager.adoptSemaphore.withPermit(Effect.gen(function* () {
-        const closedSessionIds = yield* Effect.forEach(Array.from(manager.sessions.values()), (session) => {
+        yield* Effect.forEach(Array.from(manager.sessions.values()), (session) => {
           return session.executeSemaphore.withPermit(
             manager.disconnectBrowserControlSession(session),
-          ).pipe(
-            Effect.match({
-              onFailure: () => undefined,
-              onSuccess: () => session.id,
-            }),
           )
-        }, { concurrency: "unbounded" })
+        }, { concurrency: "unbounded", discard: true })
         yield* manager.flushPersistence().pipe(Effect.ignore)
-        for (const id of closedSessionIds) {
-          if (!id) continue
-          manager.sessions.delete(id)
-        }
+        manager.sessions.clear()
       }))
     }).pipe(Effect.uninterruptible)
   }

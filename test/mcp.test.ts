@@ -1,10 +1,142 @@
-import { describe, expect, it, vi } from "vitest"
-import { Effect, Layer, Queue, Sink, Stdio, Stream } from "effect"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import { ConfigProvider, Effect, Layer, Queue, Schema, Sink, Stdio, Stream } from "effect"
 import { McpSchema, McpServer } from "effect/unstable/ai"
+import { spawn } from "node:child_process"
+import fs from "node:fs/promises"
 import { mcpErrorMessage, mcpServerLayer, mcpToolRequiresRelayCompatibility, mcpToolsLayer, toolResultForValue } from "../src/mcp.ts"
 import * as RelayClient from "../src/relay-client.ts"
+import * as RelayLifecycle from "../src/relay-lifecycle.ts"
 
 vi.mock("../src/version.ts", () => ({ browserControlVersion: "1.0.0", browserControlBuildId: "2026-08-31T12:00:00.000Z" }))
+// A readiness regression must never start a real relay from these tests.
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...await importOriginal<typeof import("node:child_process")>(),
+  spawn: vi.fn(() => { throw new Error("Unexpected managed relay spawn") }),
+}))
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.clearAllMocks()
+})
+
+const stdioClient = Effect.fnUntraced(function* (relay: Layer.Layer<RelayClient.Service>) {
+  const stdin = yield* Queue.unbounded<Uint8Array>()
+  const stdout = yield* Queue.unbounded<string | Uint8Array>()
+  yield* Layer.launch(mcpToolsLayer.pipe(
+    Layer.provide(mcpServerLayer),
+    Layer.provide(Stdio.layerTest({
+      stdin: Stream.fromQueue(stdin),
+      stdout: () => Sink.forEach((chunk) => Queue.offer(stdout, chunk)),
+    })),
+    Layer.provide(relay),
+    Layer.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ BROWSER_CONTROL_SESSION: "mcp-lazy-test" }))),
+  )).pipe(Effect.forkScoped)
+  let nextId = 0
+  let output = ""
+  const decoder = new TextDecoder()
+  const decode = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Struct({
+    id: Schema.optionalKey(Schema.Number),
+    result: Schema.optionalKey(Schema.Unknown),
+    error: Schema.optionalKey(Schema.Unknown),
+  })))
+  const send = (message: unknown) => Queue.offer(stdin, new TextEncoder().encode(`${JSON.stringify(message)}\n`))
+  const request = Effect.fnUntraced(function* (method: string, params: unknown) {
+    const id = ++nextId
+    yield* send({ jsonrpc: "2.0", id, method, params })
+    while (true) {
+      while (!output.includes("\n")) {
+        const chunk = yield* Queue.take(stdout)
+        output += typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true })
+      }
+      const end = output.indexOf("\n")
+      const message = decode(output.slice(0, end))
+      output = output.slice(end + 1)
+      if (message.id === id) return message
+    }
+  })
+  const initialized = yield* request("initialize", {
+    protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test-client", version: "1.0.0" },
+  })
+  expect(initialized).toMatchObject({ result: { serverInfo: { name: "browser-control" } } })
+  expect(initialized.error).toBeUndefined()
+  yield* send({ jsonrpc: "2.0", method: "notifications/initialized" })
+  return request
+})
+
+describe("lazy MCP relay startup", () => {
+  it("initializes, discovers tools, reads skill and current session over stdio without an available relay", async () => {
+    const skill = await fs.readFile(new URL("../skills/browser-control/SKILL.md", import.meta.url), "utf8")
+    const probe = vi.fn(() => Effect.fail(new RelayClient.RelayUnreachable({
+      endpoint: "http://127.0.0.1:1", path: "/version", message: "Relay unavailable", cause: new Error("offline"),
+    })))
+    await Effect.runPromise(Effect.gen(function* () {
+      const request = yield* stdioClient(Layer.mock(RelayClient.Service, {
+        endpoint: "http://127.0.0.1:1", version: Effect.suspend(probe),
+      }))
+      expect((yield* request("tools/list", {})).result).toMatchObject({ tools: expect.arrayContaining([
+        expect.objectContaining({ name: "execute" }), expect.objectContaining({ name: "skill" }),
+        expect.objectContaining({ name: "session_current" }),
+      ]) })
+      expect(yield* request("tools/call", { name: "skill", arguments: {} })).toMatchObject({
+        result: { isError: false, content: [{ type: "text", text: skill }] },
+      })
+      expect(yield* request("tools/call", { name: "session_current", arguments: {} })).toMatchObject({
+        result: { isError: false, structuredContent: { currentSession: "mcp-lazy-test" } },
+      })
+    }).pipe(Effect.scoped, Effect.timeout("5 seconds")))
+    expect(probe).not.toHaveBeenCalled()
+    expect(spawn).not.toHaveBeenCalled()
+  })
+
+  it.each(["execute", "session_new", "session_adopt"] as const)("autostarts for %s and rechecks later calls without replacing a mismatched relay", async (name) => {
+    let running = false
+    let buildId = "2026-08-31T12:00:00.000Z"
+    const start = vi.fn(() => { running = true })
+    const ensureRelay = RelayLifecycle.ensureRelay
+    vi.spyOn(RelayLifecycle, "ensureRelay").mockImplementation((options) => ensureRelay({
+      ...options, start: Effect.sync(start), retryTimes: 0,
+    }))
+    const probe = vi.fn(() => running
+      ? Effect.succeed({ version: "1.0.0", buildId })
+      : Effect.fail(new RelayClient.RelayUnreachable({
+        endpoint: "http://127.0.0.1:1", path: "/version", message: "Relay unavailable", cause: new Error("offline"),
+      })))
+    const session = { id: "mcp-lazy-test", createdAt: "2026-07-01", updatedAt: "2026-07-01", connected: true, pageUrl: null, stateKeys: [] }
+    const execute = vi.fn<RelayClient.Interface["execute"]>(() => Effect.succeed({ session, text: "ok", isError: false, logs: [] }))
+    const sessionNew = vi.fn<RelayClient.Interface["sessionNew"]>(() => Effect.succeed(session))
+    const sessionAdopt = vi.fn<RelayClient.Interface["sessionAdopt"]>(() => Effect.succeed({ session, adoptedUrl: "https://example.com/", adoptedTargetId: "target-test" }))
+    const operation = name === "execute" ? execute : name === "session_new" ? sessionNew : sessionAdopt
+    const input = name === "execute" ? { code: "1" } : name === "session_adopt" ? { targetIndex: 0 } : {}
+    const shutdown = vi.fn<RelayClient.Interface["shutdown"]>(() => Effect.succeed({ stopping: true }))
+    await Effect.runPromise(Effect.gen(function* () {
+      const request = yield* stdioClient(Layer.mock(RelayClient.Service, {
+        endpoint: "http://127.0.0.1:1", version: Effect.suspend(probe),
+        extensionStatus: Effect.succeed({ connected: true, version: "test", activeTargets: 1 }), execute, sessionNew, sessionAdopt, shutdown,
+      }))
+      expect(probe).not.toHaveBeenCalled()
+      expect(start).not.toHaveBeenCalled()
+      for (let call = 0; call < 2; call++) {
+        expect(yield* request("tools/call", { name, arguments: input })).toMatchObject({ result: { isError: false } })
+      }
+      expect(start).toHaveBeenCalledOnce()
+      expect(probe).toHaveBeenCalledTimes(3) // absent probe + readiness probe + next-call probe
+      expect(operation).toHaveBeenCalledTimes(2)
+      buildId = "2026-08-01T00:00:00.000Z"
+      expect(yield* request("tools/call", { name, arguments: input })).toMatchObject({
+        result: { isError: true, content: [{ type: "text", text: expect.stringContaining("browser-control relay restart") }] },
+      })
+      expect(probe).toHaveBeenCalledTimes(4)
+      expect(yield* request("tools/call", { name: "session_current", arguments: {} })).toMatchObject({
+        result: { isError: false, structuredContent: { currentSession: session.id } },
+      })
+      expect(probe).toHaveBeenCalledTimes(4)
+    }).pipe(Effect.scoped, Effect.timeout("5 seconds")))
+    expect(start).toHaveBeenCalledOnce()
+    expect(operation).toHaveBeenCalledTimes(2)
+    expect(shutdown).not.toHaveBeenCalled()
+    expect(spawn).not.toHaveBeenCalled()
+  })
+})
 
 describe("MCP protocol negotiation", () => {
   it.each(["2025-06-18", "2025-11-25", "2025-03-26", "2024-11-05", "2024-10-07"])(

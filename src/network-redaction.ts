@@ -113,7 +113,7 @@ export class SecretCollector {
   }
 
   redactValue(value: unknown): unknown {
-    return redactSecretShapedValue(redactKnownValue(value, this.slots()))
+    return redactKnownValue(value, this.slots())
   }
 
   private protectHeader(name: string, value: string, source: string): string {
@@ -306,17 +306,6 @@ export function redactKnownValues(text: string, slots: readonly CredentialSlot[]
     .reduce((output, slot) => replaceOutsideReferences(output, slot.value, `\${${slot.ref}}`), text)
 }
 
-function redactSecretShapedValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redactSecretShapedValue)
-  if (!value || typeof value !== "object") return value
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
-    key,
-    secretNamePattern.test(key) && item !== null && item !== ""
-      ? redactSecretValue(item)
-      : redactSecretShapedValue(item),
-  ]))
-}
-
 function redactKnownValue(value: unknown, slots: readonly CredentialSlot[]): unknown {
   if (typeof value === "string") return redactKnownValues(value, slots)
   if (typeof value === "number" || typeof value === "boolean") {
@@ -325,7 +314,10 @@ function redactKnownValue(value: unknown, slots: readonly CredentialSlot[]): unk
   }
   if (Array.isArray(value)) return value.map((item) => redactKnownValue(item, slots))
   if (!value || typeof value !== "object") return value
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactKnownValue(item, slots)]))
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+    key,
+    secretNamePattern.test(key) ? redactSecretValue(item) : redactKnownValue(item, slots),
+  ]))
 }
 
 function redactSecretValue(value: unknown): unknown {

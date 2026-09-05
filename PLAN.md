@@ -465,6 +465,11 @@ reconciles existing client announcements, browser grouping, and page status.
   needed. The relay outlives the MCP process, so a CLI handoff is not coupled to
   MCP lifecycle. `status` and `doctor` remain observational; `serve` is the
   foreground debugging path.
+- MCP startup, discovery, `skill`, and `session_current` are relay-independent.
+  Operational calls ensure readiness on each use; the first pays any cold-start
+  cost. Relay-backed observational tools report unavailability without autostart.
+- Smoke commands have one attempt and one verdict. Timeouts remain failures;
+  explicit repetitions are separate results, not silent recovery retries.
 - A running daemon is replaced only by explicit `browser-control relay restart`,
   never by ordinary CLI/MCP/SDK calls. Safe shutdown protocol 2 requires the
   exact managed instance and bounded requester metadata. Legacy, foreground,
