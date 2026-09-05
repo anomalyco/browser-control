@@ -33,25 +33,26 @@ describe("extension connection lifecycle", () => {
     expect(create).not.toHaveBeenCalled()
   })
 
-  it("wakes and reconnects when the browser profile starts", () => {
+  it("wakes and reconnects when the browser profile starts", async () => {
     let onStartup: (() => void) | undefined
+    let onInstalled: (() => void) | undefined
+    const create = vi.fn(async () => {})
+    const get = vi.fn(async () => undefined)
     const connect = vi.fn()
-    const getAlarm = vi.fn(async () => undefined)
 
     startConnectionLifecycle({
-      alarms: {
-        create: vi.fn(async () => {}),
-        get: getAlarm,
-      },
+      alarms: { create, get },
       addStartupListener: (listener) => { onStartup = listener },
+      addInstalledListener: (listener) => { onInstalled = listener },
       connect,
     })
+    await vi.waitFor(() => expect(connect).toHaveBeenCalledTimes(1))
 
-    expect(connect).toHaveBeenCalledTimes(1)
-    expect(getAlarm).toHaveBeenCalledTimes(1)
     onStartup?.()
-    expect(connect).toHaveBeenCalledTimes(2)
-    expect(getAlarm).toHaveBeenCalledTimes(2)
+    await vi.waitFor(() => expect(connect).toHaveBeenCalledTimes(2))
+    onInstalled?.()
+    await vi.waitFor(() => expect(connect).toHaveBeenCalledTimes(3))
+    expect(get).toHaveBeenCalledWith(reconnectAlarmName)
   })
 
   it("runs a heartbeat every 20 seconds and stops cleanly", () => {

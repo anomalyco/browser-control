@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { Effect } from "effect"
+import { spawn } from "node:child_process"
+import { fileURLToPath } from "node:url"
 import * as RelayClient from "../src/relay-client.ts"
 import {
   ensureExtensionConnected,
@@ -7,15 +9,20 @@ import {
   managedRelayEntrypoint,
   managedRelayLaunch,
   relayBuildProblem,
+  restartRelay,
+  startManagedRelay,
   statusCollections,
   stoppedRelayStatus,
 } from "../src/relay-lifecycle.ts"
 import { sourceBuildIdForFiles } from "../src/version.ts"
+import type { RelayShutdownRequest, RelayVersion } from "../src/relay-schema.ts"
+
+vi.mock("node:child_process", () => ({ spawn: vi.fn(() => ({ unref: vi.fn() })) }))
 
 const version = { version: "0.1.0", buildId: "build-current" }
 
 function relay(options: {
-  readonly version: Effect.Effect<typeof version, RelayClient.RelayClientError>
+  readonly version: Effect.Effect<RelayVersion, RelayClient.RelayClientError>
   readonly extensionStatus?: RelayClient.Interface["extensionStatus"]
   readonly shutdown?: RelayClient.Interface["shutdown"]
 }): RelayClient.Interface {
@@ -122,62 +129,83 @@ describe("relay lifecycle", () => {
     expect(result.buildProblem).toContain("does not match CLI build")
   })
 
-  it("replaces a stale relay with the current build", async () => {
+  it("leaves an older managed relay untouched during ordinary readiness", async () => {
     const current = { ...version, buildId: "2026-08-04T12:00:00.000Z" }
-    const stale = { ...version, buildId: "2026-08-03T12:00:00.000Z", instanceId: "stale", pid: 123, managed: true }
-    let running: typeof stale | typeof current | undefined = stale
+    const stale = { ...version, buildId: "2026-08-03T12:00:00.000Z", instanceId: "stale", pid: 123, managed: true, shutdownProtocol: 2 as const }
     let stops = 0
     let starts = 0
     const client = relay({
-      version: Effect.suspend(() => running ? Effect.succeed(running) : Effect.fail(unreachable())),
-      shutdown: () => Effect.sync(() => {
-        stops++
-        running = undefined
-        return { stopping: true as const }
-      }),
+      version: Effect.succeed(stale),
+      shutdown: () => Effect.sync(() => { stops++; return { stopping: true as const } }),
     })
 
     const result = await Effect.runPromise(ensureRelay({
       relay: client,
       buildId: current.buildId,
-      start: Effect.sync(() => {
-        starts++
-        running = current
-      }),
+      start: Effect.sync(() => { starts++ }),
       retryDelayMs: 0,
     }))
 
-    expect(result).toEqual({ version: current, started: true })
-    expect(stops).toBe(1)
-    expect(starts).toBe(1)
+    expect(result).toMatchObject({ version: stale, started: false })
+    expect(result.buildProblem).toContain("browser-control relay restart")
+    expect(stops).toBe(0)
+    expect(starts).toBe(0)
   })
 
-  it("does not stop a relay instance that changed after the stale probe", async () => {
-    const stale = { ...version, buildId: "2026-08-03T12:00:00.000Z", instanceId: "stale", pid: 123, managed: true }
-    const current = { ...version, buildId: "2026-08-04T12:00:00.000Z", pid: 123, managed: true }
-    let probes = 0
-    let stops = 0
+  it("explicitly replaces an exact older managed instance with attributed shutdown", async () => {
+    const current = { ...version, buildId: "2026-08-04T12:00:00.000Z", instanceId: "current", managed: true }
+    const stale = { ...version, buildId: "2026-08-03T12:00:00.000Z", instanceId: "stale", pid: 123, managed: true, shutdownProtocol: 2 as const }
+    let running: RelayVersion | undefined = stale
+    const shutdowns: RelayShutdownRequest[] = []
     const client = relay({
-      version: Effect.sync(() => ++probes === 1 ? stale : current),
-      shutdown: () => Effect.sync(() => {
-        stops++
+      version: Effect.suspend(() => running ? Effect.succeed(running) : Effect.fail(unreachable())),
+      shutdown: (request) => Effect.sync(() => {
+        shutdowns.push(request)
+        running = undefined
         return { stopping: true as const }
       }),
     })
 
-    const result = await Effect.runPromise(ensureRelay({
+    const result = await Effect.runPromise(restartRelay({
+      relay: client,
+      buildId: current.buildId,
+      clientKind: "cli",
+      start: Effect.sync(() => { running = current }),
+      retryDelayMs: 0,
+    }))
+
+    expect(result).toEqual({ version: current, started: true, waitForReconnect: true })
+    expect(shutdowns).toEqual([{
+      instanceId: "stale",
+      requestId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      reason: "explicit-restart",
+      client: { kind: "cli", instanceId: expect.stringMatching(/^[0-9a-f-]{36}$/), buildId: current.buildId },
+    }])
+  })
+
+  it("does not stop a relay instance that changed after the stale probe", async () => {
+    const stale = { ...version, buildId: "2026-08-03T12:00:00.000Z", instanceId: "stale", pid: 123, managed: true, shutdownProtocol: 2 as const }
+    const current = { ...version, buildId: "2026-08-04T12:00:00.000Z", instanceId: "current", pid: 123, managed: true }
+    let probes = 0
+    let stops = 0
+    const client = relay({
+      version: Effect.sync(() => ++probes === 1 ? stale : current),
+      shutdown: () => Effect.sync(() => { stops++; return { stopping: true as const } }),
+    })
+
+    const result = await Effect.runPromise(restartRelay({
       relay: client,
       buildId: current.buildId,
       start: Effect.die("should not start"),
       retryDelayMs: 0,
     }))
 
-    expect(result).toEqual({ version: current, started: false })
+    expect(result).toEqual({ version: current, started: false, waitForReconnect: true })
     expect(stops).toBe(0)
   })
 
   it("observes a concurrent replacement when stale shutdown loses the race", async () => {
-    const stale = { ...version, buildId: "2026-08-03T12:00:00.000Z", instanceId: "stale", pid: 123, managed: true }
+    const stale = { ...version, buildId: "2026-08-03T12:00:00.000Z", instanceId: "stale", pid: 123, managed: true, shutdownProtocol: 2 as const }
     const current = { ...version, buildId: "2026-08-04T12:00:00.000Z", instanceId: "current", pid: 456, managed: true }
     let probes = 0
     const client = relay({
@@ -190,14 +218,14 @@ describe("relay lifecycle", () => {
       })),
     })
 
-    const result = await Effect.runPromise(ensureRelay({
+    const result = await Effect.runPromise(restartRelay({
       relay: client,
       buildId: current.buildId,
       start: Effect.die("should not start"),
       retryDelayMs: 0,
     }))
 
-    expect(result).toEqual({ version: current, started: false })
+    expect(result).toEqual({ version: current, started: false, waitForReconnect: true })
   })
 
   it("does not replace a managed relay with an older CLI build", async () => {
@@ -218,8 +246,149 @@ describe("relay lifecycle", () => {
       retryDelayMs: 0,
     }))
 
-    expect(result.buildProblem).toContain("does not match CLI build")
+    expect(result.buildProblem).toContain("refresh or restart this CLI or MCP client")
     expect(shutdowns).toBe(0)
+  })
+
+  it.each([
+    { name: "newer", buildId: "2026-08-05T12:00:00.000Z", managed: true, shutdownProtocol: 2, message: "Refusing to downgrade" },
+    { name: "source", buildId: "source-abc", managed: true, shutdownProtocol: 2, message: "source or unorderable" },
+    { name: "foreground", buildId: "2026-08-03T12:00:00.000Z", managed: false, shutdownProtocol: 2, message: "foreground" },
+    { name: "legacy", buildId: "2026-08-03T12:00:00.000Z", managed: true, shutdownProtocol: undefined, message: "Stop it manually once" },
+  ] as const)("refuses explicit replacement of a $name relay", async ({ name, buildId, managed, shutdownProtocol, message }) => {
+    await expect(Effect.runPromise(restartRelay({
+      relay: relay({ version: Effect.succeed({ ...version, buildId, instanceId: name, managed, ...(shutdownProtocol ? { shutdownProtocol } : {}) }) }),
+      buildId: "2026-08-04T12:00:00.000Z",
+      start: Effect.die("should not start"),
+    }))).rejects.toThrow(message)
+  })
+
+  it("refuses a source client without stopping the managed relay", async () => {
+    await expect(Effect.runPromise(restartRelay({
+      relay: relay({ version: Effect.succeed({ ...version, buildId: "2026-08-03T12:00:00.000Z", instanceId: "stale", managed: true, shutdownProtocol: 2 }) }),
+      buildId: "source-current",
+      start: Effect.die("should not start"),
+    }))).rejects.toThrow("source or unorderable")
+  })
+
+  it("preserves relay-busy refusal instead of treating it as a concurrent replacement", async () => {
+    const busy = new RelayClient.RelayRejected({ message: "Relay is busy", status: 409, path: "/shutdown", code: "relay-busy" })
+    await expect(Effect.runPromise(restartRelay({
+      relay: relay({
+        version: Effect.succeed({ ...version, buildId: "2026-08-03T12:00:00.000Z", instanceId: "stale", managed: true, shutdownProtocol: 2 }),
+        shutdown: () => Effect.fail(busy),
+      }),
+      buildId: "2026-08-04T12:00:00.000Z",
+      start: Effect.die("should not start"),
+    }))).rejects.toThrow("Relay is busy")
+  })
+
+  it("does not stop a competing replacement with the wrong build", async () => {
+    const stale = { ...version, buildId: "2026-08-03T12:00:00.000Z", instanceId: "stale", managed: true, shutdownProtocol: 2 as const }
+    let probes = 0
+    await expect(Effect.runPromise(restartRelay({
+      relay: relay({ version: Effect.sync(() => ++probes === 1 ? stale : { ...stale, instanceId: "competitor", buildId: "2026-08-05T12:00:00.000Z" }) }),
+      buildId: "2026-08-04T12:00:00.000Z",
+      start: Effect.die("should not start"),
+    }))).rejects.toThrow("competing relay was left untouched")
+  })
+
+  it("explicit restart starts an absent relay and verifies its identity and build", async () => {
+    const current = { ...version, instanceId: "current", managed: true }
+    let running = false
+    const result = await Effect.runPromise(restartRelay({
+      relay: relay({ version: Effect.suspend(() => running ? Effect.succeed(current) : Effect.fail(unreachable())) }),
+      buildId: current.buildId,
+      start: Effect.sync(() => { running = true }),
+    }))
+    expect(result).toEqual({ version: current, started: true, waitForReconnect: true })
+  })
+
+  it("checks the build of the process launched after shutdown without stopping it again", async () => {
+    const stale = { ...version, buildId: "2026-08-03T12:00:00.000Z", instanceId: "stale", managed: true, shutdownProtocol: 2 as const }
+    let running: RelayVersion | undefined = stale
+    let shutdowns = 0
+    await expect(Effect.runPromise(restartRelay({
+      relay: relay({
+        version: Effect.suspend(() => running ? Effect.succeed(running) : Effect.fail(unreachable())),
+        shutdown: () => Effect.sync(() => { shutdowns++; running = undefined; return { stopping: true as const } }),
+      }),
+      buildId: "2026-08-04T12:00:00.000Z",
+      start: Effect.sync(() => { running = { ...stale, instanceId: "wrong-artifact" } }),
+      retryDelayMs: 0,
+    }))).rejects.toThrow("competing relay was left untouched")
+    expect(shutdowns).toBe(1)
+  })
+
+  it("waits for the acknowledged same-build instance to drain before starting its successor", async () => {
+    const current = { ...version, buildId: "2026-08-04T12:00:00.000Z", instanceId: "current", managed: true, shutdownProtocol: 2 as const }
+    let stopping = false
+    let probes = 0
+    let running: RelayVersion | undefined = current
+    const result = await Effect.runPromise(restartRelay({
+      relay: relay({
+        version: Effect.suspend(() => {
+          if (stopping && ++probes === 3) running = undefined
+          return running ? Effect.succeed(running) : Effect.fail(unreachable())
+        }),
+        shutdown: () => Effect.sync(() => { stopping = true; return { stopping: true as const } }),
+      }),
+      buildId: current.buildId,
+      start: Effect.sync(() => {
+        expect(probes).toBe(3)
+        expect(running).toBeUndefined()
+        running = { ...current, instanceId: "successor" }
+      }),
+      retryDelayMs: 0,
+    }))
+    expect(result.version.instanceId).toBe("successor")
+  })
+
+  it("never launches a successor when the acknowledged relay does not finish draining", async () => {
+    const current = { ...version, buildId: "2026-08-04T12:00:00.000Z", instanceId: "current", managed: true, shutdownProtocol: 2 as const }
+    await expect(Effect.runPromise(restartRelay({
+      relay: relay({ version: Effect.succeed(current), shutdown: () => Effect.succeed({ stopping: true }) }),
+      buildId: current.buildId,
+      start: Effect.die("should not start"),
+      retryTimes: 1,
+      retryDelayMs: 0,
+    }))).rejects.toThrow("still draining")
+  })
+
+  it("requires a distinct successor identity even when the build matches", async () => {
+    const current = { ...version, buildId: "2026-08-04T12:00:00.000Z", instanceId: "current", managed: true, shutdownProtocol: 2 as const }
+    let running: RelayVersion | undefined = current
+    await expect(Effect.runPromise(restartRelay({
+      relay: relay({
+        version: Effect.suspend(() => running ? Effect.succeed(running) : Effect.fail(unreachable())),
+        shutdown: () => Effect.sync(() => { running = undefined; return { stopping: true as const } }),
+      }),
+      buildId: current.buildId,
+      start: Effect.sync(() => { running = current }),
+      retryDelayMs: 0,
+    }))).rejects.toThrow("did not produce a new managed instance")
+  })
+
+  it("correlates the successor launch with the acknowledged shutdown request", async () => {
+    const current = { ...version, buildId: "2026-08-04T12:00:00.000Z", instanceId: "current", managed: true, shutdownProtocol: 2 as const }
+    let running: RelayVersion | undefined = current
+    let requestId: string | undefined
+    let probes = 0
+    const spawns = vi.mocked(spawn).mock.calls.length
+    await Effect.runPromise(restartRelay({
+      relay: relay({
+        version: Effect.suspend(() => {
+          if (!running && ++probes > 1) running = { ...current, instanceId: "successor" }
+          return running ? Effect.succeed(running) : Effect.fail(unreachable())
+        }),
+        shutdown: (request) => Effect.sync(() => { requestId = request.requestId; running = undefined; return { stopping: true as const } }),
+      }),
+      buildId: current.buildId,
+      retryDelayMs: 0,
+    }))
+    expect(vi.mocked(spawn).mock.calls.length).toBe(spawns + 1)
+    expect(vi.mocked(spawn).mock.calls.at(-1)?.[2]?.env?.BROWSER_CONTROL_RESTART_REQUEST_ID).toBe(requestId)
+    expect(requestId).toMatch(/^[0-9a-f-]{36}$/)
   })
 
   it("waits for the extension to reconnect after relay startup", async () => {
@@ -297,6 +466,10 @@ describe("relay lifecycle", () => {
     })).toEqual({ sessions: [], targets: [] })
     expect(relayBuildProblem(version, "build-current")).toBeUndefined()
     expect(relayBuildProblem({ ...version, buildId: "build-old" }, "dev")).toContain("does not match CLI build")
+    expect(relayBuildProblem(
+      { ...version, buildId: "2026-08-06T12:00:00.000Z" },
+      "2026-08-05T12:00:00.000Z",
+    )).toContain("refresh or restart this CLI or MCP client")
   })
 
   it("starts a managed relay through the CLI entrypoint from MCP builds and source", () => {
@@ -313,6 +486,35 @@ describe("relay lifecycle", () => {
       executable: "node",
       args: ["/package/dist/cli.js", "serve"],
     })
+  })
+
+  it("pins the default CLI to the loaded module rather than a mutable global entrypoint", () => {
+    const original = [...process.argv]
+    try {
+      process.argv[1] = "/new/global/browser-control-mcp"
+      expect(managedRelayLaunch(undefined, "node", ["--import", "tsx"])).toEqual({
+        executable: "node",
+        args: ["--import", "tsx", fileURLToPath(new URL("../src/cli.ts", import.meta.url)), "serve"],
+      })
+    } finally {
+      process.argv.splice(0, process.argv.length, ...original)
+    }
+  })
+
+  it("passes restart attribution only to the child and omits inherited attribution on autostart", async () => {
+    vi.stubEnv("BROWSER_CONTROL_RESTART_REQUEST_ID", "inherited-request")
+    try {
+      await Effect.runPromise(startManagedRelay("/package/dist/cli.js", "node", [], { restartRequestId: "explicit-request" }))
+      expect(spawn).toHaveBeenLastCalledWith("node", ["/package/dist/cli.js", "serve"], expect.objectContaining({
+        env: expect.objectContaining({ BROWSER_CONTROL_MANAGED_RELAY: "1", BROWSER_CONTROL_RESTART_REQUEST_ID: "explicit-request" }),
+      }))
+      await Effect.runPromise(startManagedRelay("/package/dist/cli.js", "node", []))
+      const env = vi.mocked(spawn).mock.calls.at(-1)?.[2]?.env
+      expect(env).not.toHaveProperty("BROWSER_CONTROL_RESTART_REQUEST_ID")
+      expect(process.env.BROWSER_CONTROL_RESTART_REQUEST_ID).toBe("inherited-request")
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 
   it("gives source processes a deterministic content-sensitive build id", () => {

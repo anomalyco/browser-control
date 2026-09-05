@@ -100,7 +100,7 @@ export interface JsonOptions<S extends Schema.Top> {
   readonly maxResponseBytes?: number
 }
 
-export interface AuthenticatedOrigin {
+export interface AuthenticatedOriginCapability {
   readonly origin: string
   readonly json: {
     <S extends Schema.Top>(
@@ -111,6 +111,8 @@ export interface AuthenticatedOrigin {
     ): Effect.Effect<S["Type"], Error, S["DecodingServices"]>
   }
 }
+
+export type AuthenticatedOrigin = AuthenticatedOriginCapability
 
 /** Reveal a sensitive response using Browser Control's Effect runtime. */
 export const reveal = <A>(value: Redacted.Redacted<A>): A => Redacted.value(value)
@@ -126,7 +128,7 @@ export interface Session {
   readonly summary: SessionSummary
   readonly authenticatedOrigin: (
     options: AuthenticatedOriginOptions,
-  ) => Effect.Effect<AuthenticatedOrigin, ClientError>
+  ) => Effect.Effect<AuthenticatedOriginCapability, ClientError>
 }
 
 export interface EnsureSessionOptions {

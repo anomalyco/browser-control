@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
+import { NodeServices } from "@effect/platform-node"
+import { Effect, Option } from "effect"
+import { Command } from "effect/unstable/cli"
 
 vi.mock("@effect/platform-node", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@effect/platform-node")>()
@@ -11,7 +14,7 @@ vi.mock("@effect/platform-node", async (importOriginal) => {
   }
 })
 
-import { executeJsonEnvelope, formatSessionContinuation, normalizeCliArguments } from "../src/cli.ts"
+import { browserControl, executeJsonEnvelope, formatSessionContinuation, normalizeCliArguments } from "../src/cli.ts"
 import type { ExecuteResponse } from "../src/relay-schema.ts"
 
 const session: ExecuteResponse["session"] = {
@@ -116,5 +119,41 @@ describe("CLI argument normalization", () => {
       "bc-cli-operand:printf",
       "bc-cli-operand:-n",
     ])
+  })
+})
+
+describe("CLI boolean defaults", () => {
+  it.each([
+    { path: ["relay", "restart"], args: [], expected: {} },
+    { path: ["execute"], args: ["--file", "script.js"], expected: { json: false, code: [], file: Option.some("script.js") } },
+    { path: ["execute"], args: ["--file", "script.js", "--json"], expected: { json: true, code: [] } },
+    { path: ["execute"], args: ["--file", "script.js", "--no-json"], expected: { json: false, code: [] } },
+    { path: ["session", "new"], args: [], expected: { readOnly: false } },
+    { path: ["session", "new"], args: ["--read-only"], expected: { readOnly: true } },
+    { path: ["session", "list"], args: [], expected: { json: false } },
+    { path: ["status"], args: [], expected: { json: false } },
+    { path: ["recording", "start"], args: ["recording.webm"], expected: { audio: false } },
+    { path: ["recording", "start"], args: ["recording.webm", "--audio"], expected: { audio: true } },
+    { path: ["recording", "status"], args: [], expected: { json: false } },
+    { path: ["network", "start"], args: [], expected: { json: false } },
+    { path: ["network", "status"], args: [], expected: { json: false } },
+    { path: ["network", "stop"], args: [], expected: { json: false } },
+    { path: ["secrets", "status"], args: ["profile"], expected: { json: false } },
+    { path: ["secrets", "refresh"], args: ["profile"], expected: { json: false } },
+    { path: ["journal"], args: [], expected: { json: false } },
+    { path: ["doctor"], args: [], expected: { json: false } },
+  ])("parses $path $args without changing flag defaults", async ({ path, args, expected }) => {
+    let command: Command.Command.Any = browserControl
+    for (const name of path) {
+      const child = command.subcommands.flatMap((group) => group.commands).find((child) => child.name === name)
+      if (!child) throw new Error(`Missing command: ${name}`)
+      command = child
+    }
+    let parsed: unknown
+    const parseOnly = command.pipe(Command.withHandler((input: unknown) => Effect.sync(() => { parsed = input })))
+    await Effect.runPromise(
+      Command.runWith(parseOnly, { version: "test" })(args).pipe(Effect.provide(NodeServices.layer)),
+    )
+    expect(parsed).toMatchObject(expected)
   })
 })

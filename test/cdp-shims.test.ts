@@ -1,22 +1,23 @@
 import { describe, expect, it } from "vitest"
 import type { WebSocket } from "ws"
-import {
-  createClientTargetAnnouncements,
-  hasAnnouncedSession,
-  replayChildTargetsForParent,
-  sendAttachedToChildTarget,
-  sendAttachedToTarget,
-} from "../src/cdp-shims.ts"
+import { CdpClientPool } from "../src/cdp-client-pool.ts"
+import { replayChildTargetsForParent } from "../src/cdp-shims.ts"
 import type { ChildTarget, ConnectedTarget } from "../src/relay-types.ts"
-import type { CdpEvent, TargetInfo } from "../src/protocol.ts"
+import { parseJsonObject, type JsonObject, type TargetInfo } from "../src/protocol.ts"
+import { sendCdpEvent } from "../src/relay-helpers.ts"
 import { TargetRegistry } from "../src/target-registry.ts"
 
-function socket(events: CdpEvent[]): WebSocket {
-  return {
-    send: (data: string) => {
-      events.push(JSON.parse(data) as CdpEvent)
+function setup() {
+  const events: JsonObject[] = []
+  const socket: Pick<WebSocket, "send"> = {
+    send(data) {
+      if (typeof data !== "string") throw new Error("Expected a serialized CDP event")
+      events.push(parseJsonObject(data))
     },
-  } as WebSocket
+  }
+  const clients = new CdpClientPool<typeof socket>(sendCdpEvent)
+  clients.register(socket)
+  return { socket, clients, events, registry: new TargetRegistry() }
 }
 
 function targetInfo(targetId: string): TargetInfo {
@@ -44,64 +45,9 @@ describe("TargetRegistry crash state", () => {
   })
 })
 
-describe("sendAttachedToTarget", () => {
-  it("does not re-announce the same target id and session id", () => {
-    const events: CdpEvent[] = []
-    const client = socket(events)
-    const announcements = createClientTargetAnnouncements()
-
-    sendAttachedToTarget({ socket: client, announcements, target: root("bc-tab-1") })
-    sendAttachedToTarget({ socket: client, announcements, target: root("bc-tab-1") })
-
-    expect(events).toHaveLength(1)
-    expect(events[0]?.method).toBe("Target.attachedToTarget")
-    expect(hasAnnouncedSession(announcements, "bc-tab-1")).toBe(true)
-  })
-
-  it("detaches the old session before re-announcing the same target id under a new session id", () => {
-    const events: CdpEvent[] = []
-    const client = socket(events)
-    const announcements = createClientTargetAnnouncements()
-
-    sendAttachedToTarget({ socket: client, announcements, target: root("bc-tab-1") })
-    sendAttachedToTarget({ socket: client, announcements, target: root("bc-tab-2") })
-
-    expect(events.map((event) => event.method)).toEqual([
-      "Target.attachedToTarget",
-      "Target.detachedFromTarget",
-      "Target.attachedToTarget",
-    ])
-    expect(events[1]).toEqual({ method: "Target.detachedFromTarget", params: { sessionId: "bc-tab-1", targetId: "target-1" } })
-    expect(hasAnnouncedSession(announcements, "bc-tab-1")).toBe(false)
-    expect(hasAnnouncedSession(announcements, "bc-tab-2")).toBe(true)
-  })
-})
-
-describe("sendAttachedToChildTarget", () => {
-  it("detaches duplicate child target ids on the parent session before re-announcing", () => {
-    const events: CdpEvent[] = []
-    const client = socket(events)
-    const announcements = createClientTargetAnnouncements()
-
-    sendAttachedToChildTarget({ socket: client, announcements, target: child("child-session-1") })
-    sendAttachedToChildTarget({ socket: client, announcements, target: child("child-session-2") })
-
-    expect(events.map((event) => event.method)).toEqual([
-      "Target.attachedToTarget",
-      "Target.detachedFromTarget",
-      "Target.attachedToTarget",
-    ])
-    expect(events[1]).toEqual({
-      sessionId: "bc-tab-1",
-      method: "Target.detachedFromTarget",
-      params: { sessionId: "child-session-1", targetId: "child-target-1" },
-    })
-  })
-
+describe("replayChildTargetsForParent", () => {
   it("replays dedicated workers without synthesizing iframe navigation events", () => {
-    const events: CdpEvent[] = []
-    const client = socket(events)
-    const registry = new TargetRegistry()
+    const { socket, clients, events, registry } = setup()
     registry.addChildTarget({
       ...child("worker-session", "worker-target"),
       targetInfo: { ...targetInfo("worker-target"), type: "worker", url: "https://example.com/worker.js" },
@@ -109,10 +55,10 @@ describe("sendAttachedToChildTarget", () => {
     })
 
     replayChildTargetsForParent({
-      socket: client,
+      socket,
       parentSessionId: "bc-tab-1",
       registry,
-      announcements: createClientTargetAnnouncements(),
+      clients,
     })
 
     expect(events).toHaveLength(1)
@@ -124,21 +70,63 @@ describe("sendAttachedToChildTarget", () => {
   })
 
   it("does not replay a held URL-less page child", () => {
-    const events: CdpEvent[] = []
-    const client = socket(events)
-    const registry = new TargetRegistry()
+    const { socket, clients, events, registry } = setup()
     registry.addChildTarget({
       ...child("held-session", "held-target"),
       targetInfo: { ...targetInfo("held-target"), type: "page", url: "" },
     })
 
     replayChildTargetsForParent({
-      socket: client,
+      socket,
       parentSessionId: "bc-tab-1",
       registry,
-      announcements: createClientTargetAnnouncements(),
+      clients,
     })
 
     expect(events).toEqual([])
+    expect(clients.hasSession(socket, "held-session")).toBe(false)
+  })
+
+  it("replays iframe parent events before attachment and navigation on the child session", () => {
+    const { socket, clients, events, registry } = setup()
+    const target = child("iframe-session")
+    registry.addChildTarget(target)
+    registry.addChildTarget(child("unrelated-session", "unrelated-target", "other-parent"))
+    const attached = { frameId: target.targetInfo.targetId, parentFrameId: "root-frame" }
+    const navigated = { frame: { id: target.targetInfo.targetId, parentId: "root-frame", url: "https://example.com/stale" } }
+    registry.rememberFrameEvent({ tabId: 1, frameId: target.targetInfo.targetId, attached, navigated })
+
+    replayChildTargetsForParent({ socket, parentSessionId: "bc-tab-1", registry, clients })
+
+    expect(events).toEqual([
+      { sessionId: "bc-tab-1", method: "Page.frameAttached", params: attached },
+      { sessionId: "bc-tab-1", method: "Page.frameNavigated", params: navigated },
+      {
+        sessionId: "bc-tab-1",
+        method: "Target.attachedToTarget",
+        params: { sessionId: target.sessionId, targetInfo: target.targetInfo, waitingForDebugger: false },
+      },
+      {
+        sessionId: target.sessionId,
+        method: "Page.frameNavigated",
+        params: { frame: { ...navigated.frame, url: target.targetInfo.url } },
+      },
+    ])
+    expect(clients.hasSession(socket, target.sessionId)).toBe(true)
+    expect(clients.hasSession(socket, "unrelated-session")).toBe(false)
+  })
+
+  it("synthesizes child iframe navigation from target info when no frame event was retained", () => {
+    const { socket, clients, events, registry } = setup()
+    const target = child("iframe-session")
+    registry.addChildTarget(target)
+
+    replayChildTargetsForParent({ socket, parentSessionId: "bc-tab-1", registry, clients })
+
+    expect(events.map((event) => event.method)).toEqual(["Target.attachedToTarget", "Page.frameNavigated"])
+    expect(events[1]).toMatchObject({
+      sessionId: target.sessionId,
+      params: { frame: { id: target.targetInfo.targetId, url: target.targetInfo.url, securityOrigin: "https://example.com" } },
+    })
   })
 })

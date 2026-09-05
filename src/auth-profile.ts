@@ -26,7 +26,7 @@ const StoredAuthProfile = Schema.Struct({
   return new Set(sources).size === sources.length ? undefined : "Auth profile sources must be unique"
 }))
 
-export interface AuthProfile extends Schema.Schema.Type<typeof StoredAuthProfile> {}
+interface AuthProfile extends Schema.Schema.Type<typeof StoredAuthProfile> {}
 
 export type AuthProfileSummary = {
   readonly name: string
@@ -43,7 +43,7 @@ export type AuthProfileSummary = {
 
 export type AuthRunResult = {
   readonly exitCode: number
-  readonly signal: string | null
+  readonly signal: NodeJS.Signals | null
   readonly stdout: string
   readonly stderr: string
   readonly stdoutTruncated: boolean
@@ -74,7 +74,7 @@ export class AuthProfileError extends Schema.TaggedError<AuthProfileError>()(
   },
 ) {}
 
-export const defaultBaseDir = (): string => path.join(os.homedir(), ".browser-control", "secrets")
+const defaultBaseDir = (): string => path.join(os.homedir(), ".browser-control", "secrets")
 const writeLock = Semaphore.makeUnsafe(1)
 const profileLockTimeoutMs = 30_000
 const staleProfileLockMs = 60_000
@@ -249,22 +249,6 @@ export const run = Effect.fn("AuthProfile.run")(function* (options: AuthRunOptio
     stderrTruncated: result.stderrTruncated || stderr.truncated,
     durationMs: Date.now() - startedAt,
   } satisfies AuthRunResult
-})
-
-export const remove = Effect.fn("AuthProfile.remove")(function* (name: string, options: AuthProfileOptions = {}) {
-  const filePath = yield* profilePath(options.baseDir ?? defaultBaseDir(), name)
-  return yield* Effect.tryPromise({
-    try: async () => {
-      try {
-        await fs.unlink(filePath)
-        return true
-      } catch (cause) {
-        if (isNodeError(cause) && cause.code === "ENOENT") return false
-        throw cause
-      }
-    },
-    catch: (cause) => new AuthProfileError({ message: `Could not delete auth profile: ${name}`, operation: "delete", reason: "write-failed", cause }),
-  })
 })
 
 function summary(profile: AuthProfile): AuthProfileSummary {

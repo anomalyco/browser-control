@@ -28,6 +28,12 @@ browser-control execute 'return { url: page.url(), title: await page.title() }'
 Use `browser-control doctor` only when setup or runtime behavior is unclear.
 `status` and `doctor` are observational and never start the relay.
 
+Ordinary CLI/MCP/SDK calls never replace a running relay. On a build mismatch,
+coordinate with other agents before running `browser-control relay restart`.
+It preserves browser tabs and durable sessions but resets JavaScript state and
+snapshot refs. A busy or timed-out drain leaves the old relay running; finish
+recordings/captures and disconnect raw CDP clients rather than forcing a stop.
+
 ```bash
 browser-control doctor
 browser-control status --json
@@ -190,6 +196,11 @@ return { authenticatedUrl: page.url(), title: await page.title() }
 After a resolved handoff, Browser Control waits through transient destination
 context replacement before returning, so this verification can remain in the
 same execute.
+
+For a handoff on another page, pass `{ page: otherPage }`. Readiness checks that
+page, not the session default. If a non-default page was replaced or closed,
+inspect the remaining pages rather than assuming an old Playwright reference
+now identifies its replacement.
 
 Tell the user what action is waiting. Human acknowledgment is not verification:
 always assert the expected URL or stable element after `handoff`. If the action
@@ -416,9 +427,16 @@ Common diagnoses:
   active identity is rejected. Reload older extensions in each profile, inspect
   `profile list`, and select the intended profile explicitly. Do not reset a
   pinned session to switch accounts; create a new session for the other profile.
-- Stale relay build: operational commands automatically replace an older
-  detached managed relay that advertises guarded shutdown. Older unsupported,
-  source, foreground, and newer relays fail closed with restart guidance.
+- Stale relay build: inspect `doctor`, then coordinate an explicit
+  `browser-control relay restart`. It requires an exact managed instance and
+  safe shutdown protocol 2. Legacy relays need a one-time coordinated manual
+  stop; foreground/source or newer relays are never force-killed or downgraded.
+  MCP observational tools remain available on a mismatch.
+- Unexpected restart: inspect private endpoint-scoped
+  `~/.browser-control/relays/<port>/lifecycle.jsonl` for requester/build/instance
+  metadata. Preparing or selecting a development candidate must not restart the
+  daemon. Use isolated `runtime:prepare` / `runtime:select`, not a live checkout
+  link, when developing Browser Control itself.
 - `Target not found`: attach the intended tab, then select or adopt it using a
   unique URL substring or explicit index.
 - All targets disappeared: dismissing Chromium's debugging banner detaches every
@@ -437,6 +455,12 @@ Common diagnoses:
   shadow roots recursively; closed shadow roots remain unavailable.
 - Download wait fails: use fetch plus `fs`; extension-backed Playwright cannot
   retain a native download artifact.
+- Hover on an infinitely animated target: Playwright may never consider the
+  element stable. Read its current `getBoundingClientRect()` and use
+  `page.mouse.move()` when coordinate input is appropriate.
+- Chromium-protected pages such as the Chrome Web Store developer dashboard may
+  detach `chrome.debugger`. Do not retry or bypass that boundary; open the page
+  for manual operation.
 
 For deeper relay diagnosis, restart with `BROWSER_CONTROL_DEBUG=1`. Debug traces
 must never include expressions, arguments, results, headers, cookies, or form

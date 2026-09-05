@@ -1,137 +1,26 @@
-import { WebSocket } from "ws"
+import type { WebSocket } from "ws"
 import type { JsonObject, TargetInfo } from "./protocol.ts"
 import { getObject, sendCdpEvent } from "./relay-helpers.ts"
-import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
+import type { ChildTarget } from "./relay-types.ts"
 import { shouldExposeChildTarget, type TargetRegistry } from "./target-registry.ts"
+import type { CdpClientPool } from "./cdp-client-pool.ts"
 
-export type ClientCdpSessionAlias =
-  | { readonly kind: "browser" }
-  | {
-    readonly kind: "target"
-    readonly tabId: number
-    readonly targetId: string
-    readonly chromeSessionId?: string
-  }
-
-export type ClientTargetAnnouncements = {
-  readonly sessions: Set<string>
-  readonly targets: Map<string, { readonly sessionId: string; readonly parentSessionId?: string }>
-  readonly sessionTargets: Map<string, string>
-}
-
-export function createClientTargetAnnouncements(): ClientTargetAnnouncements {
-  return { sessions: new Set(), targets: new Map(), sessionTargets: new Map() }
-}
-
-export function hasAnnouncedSession(state: ClientTargetAnnouncements | undefined, sessionId: string): boolean {
-  return state?.sessions.has(sessionId) ?? false
-}
-
-export function removeAnnouncedSession(state: ClientTargetAnnouncements | undefined, sessionId: string): void {
-  if (!state) {
-    return
-  }
-  state.sessions.delete(sessionId)
-  const targetId = state.sessionTargets.get(sessionId)
-  state.sessionTargets.delete(sessionId)
-  if (targetId && state.targets.get(targetId)?.sessionId === sessionId) {
-    state.targets.delete(targetId)
-  }
-}
-
-export function sendAttachedToTarget(options: {
-  readonly socket: WebSocket
-  readonly announcements: ClientTargetAnnouncements
-  readonly target: ConnectedTarget
-  readonly onDuplicateTarget?: (duplicate: { readonly targetId: string; readonly oldSessionId: string; readonly newSessionId: string }) => void
-}): void {
-  const announcements = options.announcements
-  const targetId = options.target.targetInfo.targetId
-  const existing = announcements.targets.get(targetId)
-  if (existing?.sessionId === options.target.sessionId) {
-    return
-  }
-  if (existing) {
-    options.onDuplicateTarget?.({ targetId, oldSessionId: existing.sessionId, newSessionId: options.target.sessionId })
-    removeAnnouncedSession(announcements, existing.sessionId)
-    sendCdpEvent(options.socket, {
-      ...(existing.parentSessionId === undefined ? {} : { sessionId: existing.parentSessionId }),
-      method: "Target.detachedFromTarget",
-      params: { sessionId: existing.sessionId, targetId },
-    })
-  }
-  removeAnnouncedSession(announcements, options.target.sessionId)
-  announcements.sessions.add(options.target.sessionId)
-  announcements.targets.set(targetId, { sessionId: options.target.sessionId })
-  announcements.sessionTargets.set(options.target.sessionId, targetId)
-  sendCdpEvent(options.socket, {
-    method: "Target.attachedToTarget",
-    params: {
-      sessionId: options.target.sessionId,
-      targetInfo: { ...options.target.targetInfo, attached: true },
-      waitingForDebugger: false,
-    },
-  })
-}
-
-export function sendAttachedToChildTarget(options: {
-  readonly socket: WebSocket
-  readonly announcements: ClientTargetAnnouncements
-  readonly target: ChildTarget
-  readonly onDuplicateTarget?: (duplicate: { readonly targetId: string; readonly oldSessionId: string; readonly newSessionId: string }) => void
-}): void {
-  const announcements = options.announcements
-  const targetId = options.target.targetInfo.targetId
-  const existing = announcements.targets.get(targetId)
-  if (existing?.sessionId === options.target.sessionId) {
-    return
-  }
-  if (existing) {
-    options.onDuplicateTarget?.({ targetId, oldSessionId: existing.sessionId, newSessionId: options.target.sessionId })
-    removeAnnouncedSession(announcements, existing.sessionId)
-    sendCdpEvent(options.socket, {
-      ...(existing.parentSessionId === undefined ? {} : { sessionId: existing.parentSessionId }),
-      method: "Target.detachedFromTarget",
-      params: { sessionId: existing.sessionId, targetId },
-    })
-  }
-  removeAnnouncedSession(announcements, options.target.sessionId)
-  announcements.sessions.add(options.target.sessionId)
-  announcements.targets.set(targetId, { sessionId: options.target.sessionId, parentSessionId: options.target.parentSessionId })
-  announcements.sessionTargets.set(options.target.sessionId, targetId)
-  sendCdpEvent(options.socket, {
-    sessionId: options.target.parentSessionId,
-    method: "Target.attachedToTarget",
-    params: {
-      sessionId: options.target.sessionId,
-      targetInfo: { ...options.target.targetInfo, attached: true },
-      waitingForDebugger: options.target.waitingForDebugger,
-    },
-  })
-}
-
-export function replayChildTargetsForParent(options: {
-  readonly socket: WebSocket
+export function replayChildTargetsForParent<Client extends Pick<WebSocket, "send">>(options: {
+  readonly socket: Client
   readonly parentSessionId: string
   readonly registry: TargetRegistry
-  readonly announcements: ClientTargetAnnouncements
-  readonly onDuplicateTarget?: (duplicate: { readonly targetId: string; readonly oldSessionId: string; readonly newSessionId: string }) => void
+  readonly clients: CdpClientPool<Client>
 }): void {
   for (const target of options.registry.childTargets.values()) {
     if (target.parentSessionId === options.parentSessionId && shouldExposeChildTarget(target)) {
       replayFrameEventsForChild({ socket: options.socket, registry: options.registry, target })
-      sendAttachedToChildTarget({
-        socket: options.socket,
-        announcements: options.announcements,
-        target,
-        ...(options.onDuplicateTarget ? { onDuplicateTarget: options.onDuplicateTarget } : {}),
-      })
+      options.clients.announce(options.socket, target)
       replayChildFrameNavigation({ socket: options.socket, registry: options.registry, target })
     }
   }
 }
 
-export function replayFrameEventsForChild(options: { readonly socket: WebSocket; readonly registry: TargetRegistry; readonly target: ChildTarget }): void {
+function replayFrameEventsForChild(options: { readonly socket: Pick<WebSocket, "send">; readonly registry: TargetRegistry; readonly target: ChildTarget }): void {
   if (options.target.targetInfo.type !== "iframe") {
     return
   }
@@ -147,7 +36,7 @@ export function replayFrameEventsForChild(options: { readonly socket: WebSocket;
   }
 }
 
-export function replayChildFrameNavigation(options: { readonly socket: WebSocket; readonly registry: TargetRegistry; readonly target: ChildTarget }): void {
+export function replayChildFrameNavigation(options: { readonly socket: Pick<WebSocket, "send">; readonly registry: TargetRegistry; readonly target: ChildTarget }): void {
   const navigationParams = childFrameNavigationParams({ registry: options.registry, target: options.target })
   if (!navigationParams) {
     return
@@ -158,7 +47,7 @@ export function replayChildFrameNavigation(options: { readonly socket: WebSocket
   sendCdpEvent(options.socket, { sessionId: options.target.sessionId, method: "Page.frameNavigated", params: navigationParams })
 }
 
-export function childFrameNavigationParams(options: { readonly registry: TargetRegistry; readonly target: ChildTarget }): JsonObject | undefined {
+function childFrameNavigationParams(options: { readonly registry: TargetRegistry; readonly target: ChildTarget }): JsonObject | undefined {
   if (options.target.targetInfo.type !== "iframe") {
     return undefined
   }
@@ -197,7 +86,7 @@ export function childFrameNavigationParams(options: { readonly registry: TargetR
   }
 }
 
-export function replayTargetCreated(options: { readonly socket: WebSocket; readonly targetInfos: readonly TargetInfo[] }): void {
+export function replayTargetCreated(options: { readonly socket: Pick<WebSocket, "send">; readonly targetInfos: readonly TargetInfo[] }): void {
   for (const targetInfo of options.targetInfos) {
     sendCdpEvent(options.socket, { method: "Target.targetCreated", params: { targetInfo } })
   }

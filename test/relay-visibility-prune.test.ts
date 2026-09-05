@@ -7,7 +7,7 @@ import { parseExtensionCommand, type CdpEvent, type CdpRequest, type ExtensionCo
 type CdpMessage = CdpEvent | { readonly id: number; readonly result?: JsonObject; readonly error?: { readonly message: string } }
 
 describe("relay target visibility pruning", () => {
-  it("routes browser-context commands only through the client's preferred root", async () => {
+  it.each([false, true])("routes browser-context commands through an owned healthy root (first root crashed: %s)", async (crashFirst) => {
     const port = 24_000 + Math.floor(Math.random() * 10_000)
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const relay = yield* startRelay({ port, sessionCatalogPath: null })
@@ -65,6 +65,21 @@ describe("relay target visibility pruning", () => {
         expect(browserAlias).toBeDefined()
         if (!browserAlias) throw new Error("Expected browser session alias")
 
+        if (crashFirst) {
+          yield* Effect.promise(() => new Promise<void>((resolve) => {
+            const onMessage = () => {
+              if (!sessionClient.events.some((event) => event.method === "Inspector.targetCrashed")) return
+              sessionClient.off("message", onMessage)
+              resolve()
+            }
+            sessionClient.on("message", onMessage)
+            extension.send(JSON.stringify({
+              method: "debugger.event",
+              params: { tabId: 2, method: "Inspector.targetCrashed", params: {} },
+            }))
+          }))
+        }
+
         const secondOwnedCreate = yield* Effect.promise(() => sendCdp(sessionClient, {
           id: 6,
           method: "Target.createTarget",
@@ -111,7 +126,7 @@ describe("relay target visibility pruning", () => {
         expect(forwarded).toHaveLength(routedCommands.length)
         for (const [index, command] of routedCommands.entries()) {
           expect(forwarded[index]?.params).toEqual({
-            tabId: 2,
+            tabId: crashFirst ? 3 : 2,
             method: command.method,
             params: command.params,
           })

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
-import { Config, Console, Deferred, Effect, FileSystem, Layer, Option } from "effect"
+import { Config, Console, Effect, FileSystem, Layer, Option } from "effect"
 import { Argument, Command, Flag } from "effect/unstable/cli"
 import path from "node:path"
 import process from "node:process"
@@ -67,7 +67,7 @@ const ensureCliRelay = Effect.fnUntraced(function* () {
 const ensureCliRelayAndExtension = Effect.fnUntraced(function* () {
   const relay = yield* RelayClient.Service
   const readiness = yield* ensureCliRelay()
-  yield* RelayLifecycle.ensureExtensionConnected({ relay, waitForReconnect: readiness.started })
+  yield* RelayLifecycle.ensureExtensionConnected({ relay, waitForReconnect: RelayLifecycle.shouldWaitForExtensionReconnect(readiness) })
 })
 
 const resolveExistingSessionId = Effect.fnUntraced(function* (explicitSessionId: string | undefined) {
@@ -197,19 +197,30 @@ const serve = Command.make(
     const additionalExtensionOrigins = parseAdditionalExtensionOrigins(yield* RelayClient.extensionOriginsConfig)
     yield* Effect.scoped(
       Effect.gen(function* () {
-        const shutdown = yield* Deferred.make<void>()
-        const relay = yield* startRelay({
-          port,
-          additionalExtensionOrigins,
-          shutdown: () => { Effect.runFork(Deferred.succeed(shutdown, undefined)) },
-        })
+        const relay = yield* startRelay({ port, additionalExtensionOrigins })
         yield* Console.log(`browser-control relay listening at ${relay.url}`)
         yield* Console.log("Load extension/dist as an unpacked extension and click the toolbar button to attach a tab.")
-        yield* Deferred.await(shutdown)
+        yield* Effect.never
       }),
     )
   }),
 ).pipe(Command.withDescription("Start the local Browser Control relay"))
+
+const relayRestart = Command.make(
+  "restart",
+  {},
+  Effect.fn("Cli.relayRestart")(function* () {
+    const relay = yield* RelayClient.Service
+    yield* Console.error("Restarting the relay leaves browser tabs open but resets in-memory JavaScript state.")
+    const readiness = yield* RelayLifecycle.restartRelay({ relay, clientKind: "cli" })
+    yield* Console.log(`${readiness.started ? "Started" : "Reused concurrent replacement"} Browser Control relay at ${relay.endpoint} (${readiness.version.buildId})`)
+  }),
+).pipe(Command.withDescription("Explicitly drain and restart the managed relay using this installation"))
+
+const relay = Command.make("relay").pipe(
+  Command.withDescription("Manage the local relay lifecycle"),
+  Command.withSubcommands([relayRestart]),
+)
 
 const execute = Command.make(
   "execute",
@@ -969,9 +980,9 @@ const mcp = Command.make(
   }),
 ).pipe(Command.withDescription("Run the Browser Control MCP server over stdio"))
 
-const browserControl = Command.make("browser-control").pipe(
+export const browserControl = Command.make("browser-control").pipe(
   Command.withDescription("Control the user's existing browser through the Browser Control extension"),
-  Command.withSubcommands([serve, execute, session, profile, status, network, secrets, recording, journal, doctor, skill, mcp]),
+  Command.withSubcommands([serve, relay, execute, session, profile, status, network, secrets, recording, journal, doctor, skill, mcp]),
 )
 
 const mainLayer = Layer.mergeAll(RelayClient.layerFetch, SessionStore.layer).pipe(

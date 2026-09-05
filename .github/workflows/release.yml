@@ -27,6 +27,8 @@ jobs:
       - run: npm install --global npm@latest
       - run: pnpm install --frozen-lockfile
       - run: pnpm run ci
+      - name: Validate installed runtime
+        run: pnpm runtime:prepare --staging "$RUNNER_TEMP/browser-control-stage" --install "$RUNNER_TEMP/browser-control-runtime"
       - uses: changesets/action@v2
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}

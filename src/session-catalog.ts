@@ -56,7 +56,6 @@ export class SessionCatalog {
     const temporaryPath = `${this.filePath}.${process.pid}.${crypto.randomUUID()}.tmp`
     const contents = `${JSON.stringify({ version: 1, sessions }, null, 2)}\n`
     let temporaryFile: fs.FileHandle | undefined
-    let renamed = false
     try {
       await fs.mkdir(directory, { recursive: true, mode: 0o700 })
       await fs.chmod(directory, 0o700)
@@ -66,7 +65,6 @@ export class SessionCatalog {
       await temporaryFile.close()
       temporaryFile = undefined
       await fs.rename(temporaryPath, this.filePath)
-      renamed = true
       const directoryHandle = await fs.open(directory, "r")
       try {
         await directoryHandle.sync()
@@ -74,13 +72,10 @@ export class SessionCatalog {
         await directoryHandle.close()
       }
     } catch (error) {
-      if (renamed) {
-        try {
-          if (await fs.readFile(this.filePath, "utf8") === contents) return
-        } catch {}
-      }
       try {
         await temporaryFile?.close()
+      } catch {}
+      try {
         await fs.rm(temporaryPath, { force: true })
       } catch {}
       throw new Error(`Could not write Browser Control session catalog at ${this.filePath}`, { cause: error })

@@ -27,29 +27,92 @@ without a concrete browser-API reason.
 Work these in order unless field evidence changes the priority. Every item
 should land with unit or smoke evidence appropriate to the behavior.
 
-### 1. Split the relay into testable responsibilities
+### 1. Verify isolated runtime upgrades
+
+Candidate preparation builds, packs, installs, and validates outside the live
+checkout. Installation selection changes one shared pointer for future CLI/MCP
+processes, not an existing daemon. Keep old complete installations until their
+processes retire. The loaded extension directory is separate from this workflow.
+
+Preparation also checks the packed Effect dependency cohort in a fresh isolated
+pnpm consumer, without checkout locks or user overrides. Keep all three Effect
+runtime packages exactly aligned; this is not a universal host-graph lock.
+
+Ordinary clients may start an absent daemon but never replace a running one.
+`browser-control relay restart` is the sole CLI replacement operation. It requires
+an exact managed instance with safe shutdown protocol 2, records bounded private
+attribution, drains accepted work, and refuses raw clients or active recordings.
+Failed or cancelled pre-commit drains reopen admission without a delayed stop.
+
+Verification:
+
+- Validate final installed artifacts, not only source imports or an earlier build.
+- Exercise old/new installed clients, explicit replacement, inventory restoration,
+  and forbidden tab-close commands on isolated ports with a fake extension.
+- Real physical-tab continuity still needs an explicitly authorized isolated
+  browser check. Another browser profile alone shares the extension's fixed port.
+
+### 2. Concentrate relay lifecycle invariants
 
 Extract cohesive modules from `makeRelay` without changing the protocol:
 
 - Deepen `CdpRouter` with command classification, guardrails, and compatibility
   shims.
-- `ExtensionEventHandler`: extension event decoding and registry mutation.
+- Keep root-generation preparation, verification, replacement, and bounded
+  reconciliation together. Extracting event decoding alone does not remove
+  ordering obligations.
 
-`CdpClientPool` now owns client sockets, per-client attachment sets, aliases,
-auto-attach settings, and connection generations. `CdpRouter` now owns
+`CdpClientPool` owns client sockets, private per-client announcements and aliases,
+auto-attach settings, and connection generations. Attachment deduplication,
+descendant-first detach, and alias invalidation are complete transitions behind
+its interface, tested through an event sink without browser or websocket mocks.
+`CdpRouter` owns
 client-relative visibility, target inventory, target and alias resolution, and
 exact root-versus-child Chrome session routing.
+Named browser-context commands skip crashed owned roots without falling back to
+unrelated tabs. Raw-client ambiguity includes crashed roots; visibility and
+explicit target routing do not filter them out.
+
+`CdpRuntime` owns register-before-send context observation, bounded reset fallback,
+and idle reset targeting. Runtime recovery is tied to captured root/child and
+extension generations plus current client visibility, never just a physical tab
+id. HTTP and MCP retain validated target selections instead of flattening and
+reparsing them at successive layers.
 
 The goal is browser-free testing of routing and lifecycle behavior, not smaller
-files for their own sake. Keep orchestration in `makeRelay` and avoid exposing
+files for their own sake. Keep composition and resource lifetime in `makeRelay`,
+but put ordering-sensitive transitions in their owning modules. Avoid exposing
 internal protocol details to the CLI or MCP server.
+
+Use Knip and TypeScript unused-local checks as CI gates for internal cleanup.
+Keep public SDK and dynamically loaded entry points explicit. Duplicate-code
+scans are advisory; consolidate identical rules without removing features or
+combining operations with different lifetime guarantees.
+
+`BrowserControlSessions` installs the sandbox's default-target callback itself.
+The callback is bound to the exact session instance, so late notifications from
+a retired sandbox cannot overwrite a reset or recreated session's catalog entry.
+The sandbox exposes only settled teardown; caller deadlines remain in the
+manager's tracked cleanup workers. Handoff readiness follows the selected page,
+with exact-target reacquisition retained for default-page replacement.
+
+`RootTargetLifecycle` owns per-tab preparation, staging, verification, commit,
+scoped reconciliation workers, and generation checks across asynchronous steps.
+Committed ownership and handoff/default-target rebinding precede retiring old
+client views; stale workers cannot tear down a successor generation.
+Committed and staged root probes retain exhausted RPC errors or reject malformed
+target info. A failed inventory readiness check closes the extension socket with
+1011 and clears live registry state through disconnect cleanup; this is not
+automatic debugger reattachment or full SPA recovery.
 
 Verification:
 
 - Extend reconnect, OOPIF, and multi-client smoke cases to cover root detach and
   conflicting client auto-attach settings.
+- Preserve complete staged child subtrees through replacement, including nested
+  descendants and mixed insertion order, and reject stale-generation completion.
 
-### 2. Extend recording surfaces
+### 3. Extend recording surfaces
 
 - Add MCP recording start, stop, status, and cancel tools after the relay path is
   robust.
@@ -58,16 +121,6 @@ Verification:
 Verification:
 
 - Confirm CLI and MCP recording behavior match.
-
-### 3. Resolve smaller agent-experience gaps
-
-Verification:
-
-- Add a local open-shadow-root form fixture for both fill helpers and assert the
-  closed/no-match diagnostic separately.
-- Add CLI parsing tests for positional, `--session`, and `-s` reset/delete forms.
-- Assert reset/delete target the requested session and do not change the saved
-  human-shell current session unexpectedly.
 
 ## Recently Shipped
 
@@ -220,8 +273,9 @@ require a new extension capture protocol and permission model.
 - The product, repository, CLI, and MCP server use the name `browser-control`.
   The npm package is `@opencode-ai/browser-control`.
 - The package is published publicly on npm. Normal setup installs the npm
-  artifact; source development uses `pnpm install`, `pnpm build`, and `bun
-  link`.
+  artifact. Development uses isolated `runtime:prepare` / `runtime:select`
+  installations rather than linking a mutable checkout into the live CLI/MCP.
+  Candidate builds never overwrite the loaded unpacked extension directory.
 - The CLI, MCP server, and source toolchain require Node.js 22.19 or newer,
   matching the minimum runtime supported by the pinned Effect Platform stack.
 - Until the first Store review completes, the browser extension is loaded
@@ -259,7 +313,12 @@ multi-profile use. Catalog entries predating profile IDs bind only to a ready
 profile containing the exact saved target; targetless entries need explicit
 selection. Disconnected legacy identities migrate by the same rule after reload.
 No session adopts a browser merely because it connects first.
-Disconnect/reconnect inventory reconciliation is profile-local.
+Disconnect/reconnect inventory reconciliation is profile-local. The shared
+`RelayShutdown` controller drains every profile's admitted and queued session
+work, native operations, root reconciliation, and catalog writes. Raw CDP
+clients or active recordings/captures in any profile block restart. Each profile
+retains upstream `RootTargetLifecycle` and `CdpRuntime` guards; a cancelled drain
+resumes admission for all profiles.
 
 Follow-up: profile-specific startup waiting. On local 0.5.1 / extension 0.0.25,
 restarting the relay while two profiles are open can make an immediate named
@@ -423,6 +482,16 @@ reconciles existing client announcements, browser grouping, and page status.
   needed. The relay outlives the MCP process, so a CLI handoff is not coupled to
   MCP lifecycle. `status` and `doctor` remain observational; `serve` is the
   foreground debugging path.
+- A running daemon is replaced only by explicit `browser-control relay restart`,
+  never by ordinary CLI/MCP/SDK calls. Safe shutdown protocol 2 requires the
+  exact managed instance and bounded requester metadata. Legacy, foreground,
+  source, and newer relays are never killed speculatively. A legacy relay needs
+  a one-time coordinated manual stop before the new runtime starts.
+- Admission closes before drain; accepted operations retain their transports and
+  permits through real settlement, including late journal promises and retired
+  sandbox cleanup. Restart timeouts leave the daemon running. Endpoint-local
+  `lifecycle.jsonl` records requested, cancelled, stopping, closed, and successor-ready
+  events without browser/account data.
 - `doctor` reports relay and extension versions, build mismatches, sessions,
   active targets, child targets, crashed/browser-error targets, and built
   artifacts.
@@ -436,8 +505,9 @@ reconciles existing client announcements, browser grouping, and page status.
 
 ### The relay owns orchestration
 
-- Node-side code uses Effect v4, with a local `Effect-TS/effect` checkout as the
-  current API and pattern reference.
+- Node-side code uses Effect v4 (`4.0.0-rc.112`), with matching
+  `@effect/platform-node`. The local `effect` checkout is the API and pattern
+  reference; the former `effect-smol` repository is archived.
 - Effect-returning functions prefer `Effect.fn` or `Effect.fnUntraced`.
 - Playwright and relay resources use scoped lifecycles.
 - Application configuration uses Effect `Config`; direct environment access is
@@ -529,10 +599,9 @@ relay reports both values so `doctor` can identify a stale long-running relay.
 It also reports an instance id, start time, and PID; bounded managed-relay
 process-fault diagnostics are retained locally so unexpected same-build
 restarts can be distinguished from session eviction.
-Operational commands replace an older managed relay only after confirming its
-exact instance id, then wait for that process to exit before starting the
-current build. Source runs, foreground relays, and newer builds fail closed with
-restart guidance instead of being terminated automatically.
+Explicit restart confirms the exact managed instance and safe shutdown protocol,
+then waits for that process to exit before starting the current build. Ordinary
+commands never replace a running relay.
 
 ## Known Limitations
 

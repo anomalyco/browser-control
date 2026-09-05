@@ -19,15 +19,17 @@ export async function ensureReconnectAlarm(alarms: AlarmApi): Promise<void> {
 export function startConnectionLifecycle(options: {
   readonly alarms: AlarmApi
   readonly addStartupListener: AddListener
+  readonly addInstalledListener: AddListener
   readonly connect: () => void
 }): void {
   const activate = () => {
     void ensureReconnectAlarm(options.alarms).catch(() => {})
     options.connect()
   }
-  // Global registration wakes the MV3 worker after a full browser restart;
-  // Chrome does not guarantee that persisted alarms survive a restart.
+  // Global startup registration is what wakes an MV3 worker after a full
+  // browser restart; the alarm alone is not reliably persisted before Chrome 150.
   options.addStartupListener(activate)
+  options.addInstalledListener(activate)
   activate()
 }
 

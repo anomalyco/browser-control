@@ -42,6 +42,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 startConnectionLifecycle({
   alarms: chrome.alarms,
   addStartupListener: (listener) => chrome.runtime.onStartup.addListener(listener),
+  addInstalledListener: (listener) => chrome.runtime.onInstalled.addListener(listener),
   connect,
 })
 
@@ -672,9 +673,18 @@ function sendMessage(message: JsonObject): void {
 }
 
 async function sendMessageAfterConnection(message: JsonObject): Promise<void> {
-  if (socket?.readyState !== WebSocket.OPEN) await ensureConnection()
-  const currentSocket = socket
-  if (currentSocket?.readyState === WebSocket.OPEN) currentSocket.send(JSON.stringify(message))
+  const connected = openSocket()
+  if (connected) {
+    connected.send(JSON.stringify(message))
+    return
+  }
+  await ensureConnection()
+  openSocket()?.send(JSON.stringify(message))
+}
+
+function openSocket(): WebSocket | undefined {
+  const current = socket
+  return current?.readyState === WebSocket.OPEN ? current : undefined
 }
 
 async function sendBinaryAfterConnection(data: Uint8Array): Promise<void> {
@@ -689,8 +699,7 @@ async function sendBinaryAfterConnection(data: Uint8Array): Promise<void> {
     }
     if (Date.now() >= deadline) throw new Error("Timed out sending recording data to the Browser Control relay")
   }
-  const buffer = data.buffer
-  currentSocket.send(buffer instanceof ArrayBuffer ? buffer : new Uint8Array(data).buffer)
+  currentSocket.send(new Uint8Array(data))
 }
 
 function decodeBase64(value: string): Uint8Array {

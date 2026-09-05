@@ -3,7 +3,26 @@ import { Effect } from "effect"
 import { WebSocket } from "ws"
 import { describe, expect, it } from "vitest"
 import { startRelay } from "../src/relay.ts"
-import type { CdpEvent, JsonObject, TargetInfo } from "../src/protocol.ts"
+import type { CdpEvent, CdpRequest, ExtensionCommand, JsonObject, TargetInfo } from "../src/protocol.ts"
+
+type CdpReply = { readonly id: number; readonly result?: JsonObject; readonly error?: { readonly message: string } }
+
+function nextMessage(socket: WebSocket, matches: (message: CdpEvent | CdpReply) => boolean): Promise<CdpEvent | CdpReply> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      socket.off("message", onMessage)
+      reject(new Error("Timed out waiting for relay message"))
+    }, 2_000)
+    const onMessage = (data: WebSocket.RawData) => {
+      const message = JSON.parse(data.toString()) as CdpEvent | CdpReply
+      if (!matches(message)) return
+      clearTimeout(timeout)
+      socket.off("message", onMessage)
+      resolve(message)
+    }
+    socket.on("message", onMessage)
+  })
+}
 
 function targetInfo(targetId: string, type: TargetInfo["type"] = "page"): TargetInfo {
   return { targetId, type, title: targetId, url: "https://example.com/", attached: true, canAccessOpener: false }
@@ -40,6 +59,122 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 describe("relay child target announce dedupe", () => {
+  it.each(["detach", "same-target", "same-session", "held-page"] as const)("removes the whole child subtree on %s without leaking to hidden clients", async (transition) => {
+    const port = await freePort()
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port, sessionCatalogPath: null })
+      yield* Effect.tryPromise(async () => {
+        const endpoint = relay.url.replace("http://", "ws://")
+        const extension = await openSocket(`${endpoint}/extension`)
+        const extensionCommands: ExtensionCommand[] = []
+        extension.on("message", (data) => {
+          const command = JSON.parse(data.toString()) as ExtensionCommand
+          extensionCommands.push(command)
+          const result = command.method === "tabs.create"
+            ? { tabId: 1 }
+            : command.method === "debugger.sendCommand" && command.params?.method === "Target.getTargetInfo"
+            ? { targetInfo: targetInfo("root-target") }
+            : {}
+          extension.send(JSON.stringify({ id: command.id, result }))
+        })
+        extension.send(JSON.stringify({ method: "hello", params: { version: "test", protocolVersion: 2 } }))
+        extension.send(JSON.stringify({ method: "ready" }))
+        const owner = await openSocket(`${endpoint}/devtools/browser/test?browserControlSessionId=owner`)
+        const hidden = await openSocket(`${endpoint}/devtools/browser/test?browserControlSessionId=hidden`)
+        const events: CdpEvent[] = []
+        const hiddenEvents: CdpEvent[] = []
+        for (const [socket, received] of [[owner, events], [hidden, hiddenEvents]] as const) {
+          socket.on("message", (data) => {
+            const message = JSON.parse(data.toString()) as CdpEvent | CdpReply
+            if ("method" in message) received.push(message)
+          })
+        }
+        let requestId = 0
+        const send = async (socket: WebSocket, request: Omit<CdpRequest, "id">): Promise<CdpReply> => {
+          const id = ++requestId
+          const response = nextMessage(socket, (message) => "id" in message && message.id === id)
+          socket.send(JSON.stringify({ ...request, id }))
+          const message = await response
+          if (!("id" in message)) throw new Error("Expected CDP reply")
+          return message
+        }
+        const emit = (method: string, params: JsonObject, sessionId?: string) => {
+          extension.send(JSON.stringify({ method: "debugger.event", params: { tabId: 1, method, params, ...(sessionId ? { sessionId } : {}) } }))
+        }
+        let marker = 0
+        const flush = async () => {
+          const timestamp = ++marker
+          // The root event shares the extension and owner sockets with all preceding events.
+          const delivered = nextMessage(owner, (message) => "method" in message && message.method === "Runtime.consoleAPICalled" && message.params?.timestamp === timestamp)
+          emit("Runtime.consoleAPICalled", { type: "log", args: [], executionContextId: 1, timestamp })
+          await delivered
+        }
+        try {
+          expect((await send(owner, { method: "Target.createTarget", params: { url: "about:blank" } })).result).toEqual({ targetId: "root-target" })
+          await send(hidden, { method: "Target.setAutoAttach", params: { autoAttach: true, flatten: true, waitForDebuggerOnStart: false } })
+          const parentInfo = targetInfo("child-target", "iframe")
+          emit("Target.attachedToTarget", { sessionId: "child", targetInfo: parentInfo, waitingForDebugger: false })
+          emit("Target.attachedToTarget", { sessionId: "grandchild", targetInfo: targetInfo("grandchild-target", "worker"), waitingForDebugger: false }, "child")
+          await flush()
+          const aliases: string[] = []
+          for (const targetId of ["child-target", "grandchild-target"]) {
+            const reply = await send(owner, { method: "Target.attachToTarget", params: { targetId, flatten: true } })
+            const alias = reply.result?.sessionId
+            if (typeof alias !== "string") throw new Error("Expected target alias")
+            aliases.push(alias)
+          }
+          events.length = 0
+          const replacementSessionId = transition === "same-session" ? "child" : "child-new"
+          const replacementInfo = transition === "held-page"
+            ? { ...parentInfo, type: "page" as const, url: "" }
+            : { ...parentInfo, targetId: transition === "same-session" ? "child-new-target" : parentInfo.targetId }
+          if (transition === "detach") {
+            emit("Target.detachedFromTarget", { sessionId: "child", targetId: parentInfo.targetId })
+          } else {
+            emit("Target.attachedToTarget", { sessionId: replacementSessionId, targetInfo: replacementInfo, waitingForDebugger: false })
+          }
+          await flush()
+          expect(events.filter((event) => event.method.startsWith("Target.")).map((event) => [event.method, event.params?.sessionId])).toEqual([
+            ["Target.detachedFromTarget", "grandchild"],
+            ["Target.detachedFromTarget", "child"],
+            ...(transition === "detach" || transition === "held-page" ? [] : [["Target.attachedToTarget", replacementSessionId]]),
+          ])
+
+          const beforeCommands = extensionCommands.length
+          expect((await send(owner, { method: "Target.attachToTarget", params: { targetId: "grandchild-target" } })).error?.message).toBe("Target not found: grandchild-target")
+          for (const sessionId of ["grandchild", ...aliases]) {
+            expect((await send(owner, { method: "Page.getFrameTree", sessionId })).error?.message).toBe(`Unknown CDP session ${sessionId} for Page.getFrameTree`)
+          }
+          expect(extensionCommands).toHaveLength(beforeCommands)
+
+          emit("Runtime.consoleAPICalled", { type: "log", args: [], executionContextId: 9, timestamp: 999 }, "grandchild")
+          emit("Target.attachedToTarget", { sessionId: "late-child", targetInfo: targetInfo("late-target", "worker"), waitingForDebugger: false }, "grandchild")
+          await flush()
+          expect(events.some((event) => event.method === "Runtime.consoleAPICalled" && event.sessionId === "grandchild")).toBe(false)
+          expect(events.some((event) => event.method === "Target.attachedToTarget" && event.params?.sessionId === "late-child")).toBe(false)
+          const listed = await send(owner, { method: "Target.getTargets" })
+          expect(listed.error).toBeUndefined()
+          expect(listed.result?.targetInfos).toEqual([
+            expect.objectContaining({ targetId: "root-target" }),
+            ...(transition === "detach" || transition === "held-page" ? [] : [expect.objectContaining({ targetId: replacementInfo.targetId })]),
+          ])
+
+          if (transition === "held-page") {
+            emit("Target.targetInfoChanged", { targetInfo: { ...replacementInfo, url: "https://example.com/visible" } })
+            await flush()
+            expect(events.filter((event) => event.method === "Target.attachedToTarget").map((event) => event.params?.sessionId)).toEqual([replacementSessionId])
+          }
+          await send(hidden, { method: "Browser.getVersion" })
+          expect(hiddenEvents).toEqual([])
+        } finally {
+          owner.close()
+          hidden.close()
+          extension.close()
+        }
+      })
+    })))
+  })
+
   it("keeps an extension-owned child from replacing the tab root", async () => {
     const port = await freePort()
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {

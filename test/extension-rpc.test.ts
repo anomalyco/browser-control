@@ -1,9 +1,11 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { Effect } from "effect"
 import { WebSocket } from "ws"
 import { ExtensionRpc } from "../src/extension-rpc.ts"
 
 type SentMessage = { readonly id: number; readonly method: string }
+
+afterEach(() => vi.useRealTimers())
 
 type FakeSocket = WebSocket & {
   readonly sent: SentMessage[]
@@ -63,13 +65,16 @@ const connect = (rpc: ExtensionRpc): FakeSocket => {
 
 describe("ExtensionRpc", () => {
   it("resolves responses", async () => {
+    vi.useFakeTimers()
     const rpc = new ExtensionRpc()
     const socket = connect(rpc)
     const pending = Effect.runPromise(rpc.send({ method: "tabs.create", params: {} }))
     const request = socket.sent[0]
     expect(request?.method).toBe("tabs.create")
-    rpc.handleResponse({ id: request?.id ?? 0, result: { tabId: 7 } })
+    expect(rpc.handleResponse({ id: request?.id ?? 0, result: { tabId: 7 } })).toBe(true)
+    expect(rpc.handleResponse({ id: request?.id ?? 0, error: "duplicate" })).toBe(false)
     await expect(pending).resolves.toEqual({ tabId: 7 })
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it("fails without a connected socket", async () => {
@@ -98,6 +103,7 @@ describe("ExtensionRpc", () => {
     await expect(Effect.runPromise(rpc.send({ method: "tabs.create", params: {} }))).rejects.toThrow("timed out")
     expect(socket.closes).toHaveLength(0)
     expect(socket.pings()).toBe(1)
+    expect(rpc.handleResponse({ id: socket.sent[0]?.id ?? 0, result: {} })).toBe(false)
     // A healthy socket answers the liveness probe and stays open.
     socket.emitPong()
     const pending = Effect.runPromise(rpc.send({ method: "tabs.remove", params: {} }))
@@ -161,6 +167,46 @@ describe("ExtensionRpc", () => {
     connect(rpc)
     await expect(pending).rejects.toThrow("Extension replaced")
     expect(first.closes[0]?.code).toBe(4001)
+  })
+
+  it.each(["all", "tab"] as const)("removes every matching pending request when rejecting %s", async (scope) => {
+    vi.useFakeTimers()
+    const rpc = new ExtensionRpc()
+    const socket = connect(rpc)
+    const tabIds = [7, 8, 7]
+    const pending = tabIds.map((tabId) => Effect.runPromise(
+      rpc.send({ method: "debugger.sendCommand", params: { tabId, method: "Runtime.evaluate" } }).pipe(Effect.result),
+    ))
+    const error = new Error("cancelled")
+    if (scope === "all") rpc.rejectPending(error)
+    else rpc.rejectDebuggerCommandsForTab(7, error)
+    expect(vi.getTimerCount()).toBe(scope === "all" ? 0 : 1)
+    for (const [index, request] of socket.sent.entries()) {
+      const rejected = scope === "all" || tabIds[index] === 7
+      expect(rpc.handleResponse({ id: request.id, result: {} })).toBe(!rejected)
+      expect(await pending[index]).toEqual(rejected
+        ? expect.objectContaining({ _tag: "Failure", failure: error })
+        : expect.objectContaining({ _tag: "Success", success: {} }))
+    }
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it("removes an interrupted request without probing or accepting a late response", async () => {
+    vi.useFakeTimers()
+    const rpc = new ExtensionRpc()
+    const socket = connect(rpc)
+    const controller = new AbortController()
+    const pending = Effect.runPromise(rpc.send({ method: "tabs.create", params: {} }), { signal: controller.signal })
+    const interrupted = expect(pending).rejects.toThrow()
+    expect(socket.sent).toHaveLength(1)
+    expect(vi.getTimerCount()).toBe(1)
+    controller.abort()
+    await interrupted
+    expect(vi.getTimerCount()).toBe(0)
+    expect(rpc.handleResponse({ id: socket.sent[0]?.id ?? 0, result: {} })).toBe(false)
+    await vi.runAllTimersAsync()
+    expect(socket.pings()).toBe(0)
+    expect(socket.closes).toEqual([])
   })
 
   it("rejects pending commands on disconnect", async () => {

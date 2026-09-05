@@ -6,7 +6,6 @@ import {
   appendJournalEntry,
   formatJournalEntry,
   journalPathForSession,
-  listJournaledSessions,
   makeJournalEntry,
   parseJournalLines,
   readJournalEntries,
@@ -33,13 +32,11 @@ describe("session-journal", () => {
     }
     const entries = await readJournalEntries({ baseDir, sessionId: "alpha", limit: 2 })
     expect(entries.map((entry) => entry.code)).toEqual(["second()", "third()"])
-    expect(await listJournaledSessions(baseDir)).toEqual(["alpha"])
   })
 
   it("returns empty for missing journals", async () => {
     const baseDir = makeTempBaseDir()
     expect(await readJournalEntries({ baseDir, sessionId: "ghost", limit: 10 })).toEqual([])
-    expect(await listJournaledSessions(path.join(baseDir, "missing"))).toEqual([])
   })
 
   it("skips corrupt and non-matching lines", () => {

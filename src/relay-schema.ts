@@ -94,9 +94,11 @@ export const SessionEnsureRequest = Schema.Struct({
 
 export interface SessionEnsureRequest extends Schema.Schema.Type<typeof SessionEnsureRequest> {}
 
-export const SessionEnsureResponse = SessionContainer
+export const SessionEnsureResponse = Schema.Struct({
+  session: SessionSummary,
+})
 
-export type SessionEnsureResponse = SessionContainer
+export interface SessionEnsureResponse extends Schema.Schema.Type<typeof SessionEnsureResponse> {}
 
 export const SessionIdRequest = Schema.Struct({
   id: Schema.String,
@@ -112,13 +114,13 @@ export const SessionAdoptResponse = Schema.Struct({
 
 export interface SessionAdoptResponse extends Schema.Schema.Type<typeof SessionAdoptResponse> {}
 
-export const ExecuteLogLocation = Schema.Struct({
+const ExecuteLogLocation = Schema.Struct({
   url: Schema.String,
   lineNumber: Schema.Number,
   columnNumber: Schema.Number,
 })
 
-export interface ExecuteLogLocation extends Schema.Schema.Type<typeof ExecuteLogLocation> {}
+interface ExecuteLogLocation extends Schema.Schema.Type<typeof ExecuteLogLocation> {}
 
 export const ExecuteLogEntry = Schema.Struct({
   source: Schema.Literals(["script", "page"]),
@@ -281,12 +283,24 @@ export const RelayVersion = Schema.Struct({
   startedAt: Schema.optionalKey(Schema.String),
   pid: Schema.optionalKey(Schema.Number),
   managed: Schema.optionalKey(Schema.Boolean),
+  shutdownProtocol: Schema.optionalKey(Schema.Literal(2)),
 })
 
 export interface RelayVersion extends Schema.Schema.Type<typeof RelayVersion> {}
 
+// Unlike $, this end assertion rejects trailing line breaks in audit identifiers.
+const RelayIdentity = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(?![\s\S])/))
+const RelayBuildId = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:+-]{0,255}(?![\s\S])/))
+
 export const RelayShutdownRequest = Schema.Struct({
-  instanceId: Schema.NonEmptyString,
+  instanceId: RelayIdentity,
+  requestId: RelayIdentity,
+  reason: Schema.Literal("explicit-restart"),
+  client: Schema.Struct({
+    kind: Schema.Literals(["cli", "mcp", "sdk"]),
+    instanceId: RelayIdentity,
+    buildId: RelayBuildId,
+  }),
 })
 
 export interface RelayShutdownRequest extends Schema.Schema.Type<typeof RelayShutdownRequest> {}
@@ -297,7 +311,7 @@ export const RelayShutdownResponse = Schema.Struct({
 
 export interface RelayShutdownResponse extends Schema.Schema.Type<typeof RelayShutdownResponse> {}
 
-export const NetworkContentMode = Schema.Literals(["omit", "embed"])
+const NetworkContentMode = Schema.Literals(["omit", "embed"])
 
 export const NetworkStartRequest = Schema.Struct({
   sessionId: Schema.NonEmptyString,
@@ -336,7 +350,7 @@ export const NetworkStatusResponse = Schema.Struct({
 })
 export interface NetworkStatusResponse extends Schema.Schema.Type<typeof NetworkStatusResponse> {}
 
-export const AuthProfileSlotSummary = Schema.Struct({
+const AuthProfileSlotSummary = Schema.Struct({
   ref: Schema.String,
   sources: Schema.Array(Schema.String),
   expiresAt: Schema.optionalKey(Schema.String),
@@ -396,9 +410,9 @@ export const AuthRunResponse = Schema.Struct({
 })
 export interface AuthRunResponse extends Schema.Schema.Type<typeof AuthRunResponse> {}
 
-export const RecordingMode = Schema.Literals(["tab-capture", "cdp"])
+const RecordingMode = Schema.Literals(["tab-capture", "cdp"])
 
-export const RecordingRequestedMode = Schema.Literals(["auto", "tab-capture", "cdp"])
+const RecordingRequestedMode = Schema.Literals(["auto", "tab-capture", "cdp"])
 
 export const RecordingTargetRequest = Schema.Struct({
   profileId: Schema.optionalKey(Schema.NonEmptyString),
@@ -420,7 +434,7 @@ export const RecordingStartRequest = RecordingTargetRequest.pipe(Schema.fieldsAs
 
 export interface RecordingStartRequest extends Schema.Schema.Type<typeof RecordingStartRequest> {}
 
-export const RecordingArtifactType = Schema.Literals(["webm", "mp4"])
+const RecordingArtifactType = Schema.Literals(["webm", "mp4"])
 
 export const RecordingStartResponse = Schema.Struct({
   success: Schema.Boolean,
@@ -475,6 +489,7 @@ export const RelayErrorCode = Schema.Literals([
   "profile-not-found",
   "profile-mismatch",
   "relay-starting",
+  "relay-busy",
   "auth-profile-not-found",
   "capture-conflict",
   "session-already-exists",

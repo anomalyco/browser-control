@@ -1,4 +1,4 @@
-import { Deferred, Effect, Fiber, Option, Schema, Semaphore } from "effect"
+import { Deferred, Effect, Fiber, Latch, Schema, Semaphore } from "effect"
 import { defaultPageClosedWarning, ExecuteSandbox, hasExplicitTargetSelection, type ExecuteResult, type ExecuteTargetSelection } from "./execute.ts"
 import type { NetworkCaptureOptions, NetworkCaptureResult, NetworkCaptureStatus, NetworkCaptureStopOptions } from "./network-capture.ts"
 import { generateSessionId } from "./relay-helpers.ts"
@@ -85,23 +85,27 @@ export const shouldAppendAdoptionTip = (options: {
 
 export class BrowserControlSessions {
   readonly sessions = new Map<string, BrowserControlSession>()
-  private readonly createSandbox: (id: string) => ExecuteSandboxLike
+  private readonly createSandbox: (id: string, onDefaultTargetChange: (target: SessionTarget | undefined) => void) => ExecuteSandboxLike
   private readonly hooks: SessionHooks
   private readonly executing = new Set<string>()
   private readonly adoptSemaphore = Semaphore.makeUnsafe(1)
   private readonly targetOwnership: TargetOwnership
   private persistenceTail = Promise.resolve()
-  private closing = false
+  private drainedPersistenceTail: Promise<void> | undefined
+  private admission: "open" | "draining" | "closed" = "open"
+  private pendingWork = 0
+  private readonly pendingSessionWork = new Map<string, number>()
+  private readonly idle = Latch.makeUnsafe(true)
   private userAttachedPageUrlsProvider: (() => readonly string[]) | undefined
   private profileName: string | undefined
 
   constructor(
     private readonly endpointUrl: string,
-    createSandbox?: (id: string) => ExecuteSandboxLike,
+    createSandbox?: (id: string, onDefaultTargetChange: (target: SessionTarget | undefined) => void) => ExecuteSandboxLike,
     hooks?: SessionHooks,
     targetOwnership?: TargetOwnership,
   ) {
-    this.createSandbox = createSandbox ?? ((id) => new ExecuteSandbox({ endpointUrl: this.endpointUrl, sessionId: id }))
+    this.createSandbox = createSandbox ?? ((id, onDefaultTargetChange) => new ExecuteSandbox({ endpointUrl: this.endpointUrl, sessionId: id, onDefaultTargetChange }))
     this.hooks = hooks ?? {}
     this.profileName = this.hooks.profileName
     this.targetOwnership = targetOwnership ?? new MemoryTargetOwnership()
@@ -113,14 +117,14 @@ export class BrowserControlSessions {
   }
 
   setProfileName(name: string): Effect.Effect<void, Error> {
-    return Effect.suspend(() => {
+    return this.withAdmission(undefined, Effect.suspend(() => {
       this.profileName = name
       for (const session of this.sessions.values()) {
         session.profileName = name
       }
       this.schedulePersistence()
       return this.flushPersistence()
-    })
+    }).pipe(Effect.uninterruptible))
   }
 
   listSummaries(): SessionSummary[] {
@@ -130,6 +134,7 @@ export class BrowserControlSessions {
   }
 
   restore(entries: readonly PersistedSession[]): void {
+    this.assertAdmission()
     if (this.sessions.size > 0) throw new Error("Cannot restore sessions after session management has started")
     const ids = new Set<string>()
     const targetOwners = new Set<string>()
@@ -161,7 +166,7 @@ export class BrowserControlSessions {
     persist: () => Promise<void>,
   ): Effect.Effect<SessionSummary, Error> {
     const source = this
-    return Effect.suspend(() => {
+    return source.withAdmission(id, Effect.suspend(() => {
       const existing = source.sessions.get(id)
       if (!existing) return Effect.fail(sessionError("not-found", `Session not found: ${id}`, id))
       if (source === destination) return Effect.succeed(source.sessionSummary(existing))
@@ -169,8 +174,8 @@ export class BrowserControlSessions {
         try: persist,
         catch: (cause) => cause instanceof Error ? cause : new Error("Persist browser profile binding", { cause }),
       })
-      return source.withLifecyclePermit(existing, "bind profile", Effect.gen(function* () {
-        if (source.closing || destination.closing || source.sessions.get(id) !== existing) {
+      return destination.withAdmission(id, source.withLifecyclePermit(existing, "bind profile", Effect.gen(function* () {
+        if (source.sessions.get(id) !== existing) {
           return yield* Effect.fail(sessionError("inactive", `Session is no longer available for profile binding: ${id}`, id))
         }
         if (source.hooks.profileId !== undefined && source.hooks.profileId !== "unbound" && source.hooks.profileId !== "legacy") {
@@ -181,14 +186,11 @@ export class BrowserControlSessions {
         }
         yield* source.flushPersistence()
         yield* destination.flushPersistence()
-        if (source.closing || destination.closing || destination.sessions.has(id)) {
+        if (destination.sessions.has(id)) {
           return yield* Effect.fail(sessionError("inactive", `Destination profile is no longer available for session ${id}`, id))
         }
-        const replacement = {
-          ...destination.createBrowserControlSession(id, existing.readOnly, existing),
-          executeSemaphore: existing.executeSemaphore,
-          ...(existing.target ? { target: existing.target } : {}),
-        }
+        const replacement = destination.createBrowserControlSession(id, existing.readOnly, existing, existing.executeSemaphore)
+        if (existing.target) replacement.target = existing.target
         replacement.sandbox.restore(existing.target)
         let reservation: TargetOwnershipReservation | undefined
         const transaction = Effect.gen(function* () {
@@ -223,8 +225,8 @@ export class BrowserControlSessions {
           yield* save()
           return yield* Effect.fail(error)
         })))
-      }).pipe(Effect.uninterruptible))
-    })
+      })))
+    }))
   }
 
   persistedTargetOwner(targetId: string): { readonly sessionId: string; readonly owner: "relay" | "user" } | undefined {
@@ -235,9 +237,8 @@ export class BrowserControlSessions {
     return undefined
   }
 
-  updateTarget(id: string, target: SessionTarget | undefined): void {
-    const session = this.sessions.get(id)
-    if (!session) return
+  private updateTarget(session: BrowserControlSession, target: SessionTarget | undefined): void {
+    if (this.sessions.get(session.id) !== session) return
     if (session.target?.id === target?.id && session.target?.owner === target?.owner) return
     if (target) session.target = target
     else delete session.target
@@ -246,9 +247,11 @@ export class BrowserControlSessions {
   }
 
   createNew(id: string | undefined, options?: { readonly readOnly?: boolean }): BrowserControlSession {
-    if (this.closing) {
-      throw sessionError("inactive", "Browser Control sessions are closing")
-    }
+    this.assertAdmission()
+    return this.createAcceptedSession(id, options)
+  }
+
+  private createAcceptedSession(id: string | undefined, options?: { readonly readOnly?: boolean }): BrowserControlSession {
     let sessionId = id ?? generateSessionId(this.sessions)
     for (let attempt = 0; id === undefined && this.hooks.isSessionIdTaken?.(sessionId) && attempt < 100; attempt++) {
       sessionId = generateSessionId(this.sessions)
@@ -263,26 +266,12 @@ export class BrowserControlSessions {
   }
 
   create(id: string | undefined, options?: { readonly readOnly?: boolean }): Effect.Effect<BrowserControlSession, Error> {
-    const manager = this
-    return Effect.gen(function* () {
-      const session = manager.createNew(id, options)
-      yield* manager.flushPersistence().pipe(Effect.catch((error) => Effect.gen(function* () {
-        if (manager.sessions.get(session.id) === session) manager.sessions.delete(session.id)
-        yield* manager.closeBrowserControlSession(session)
-        manager.schedulePersistence()
-        yield* manager.flushPersistence().pipe(Effect.ignore)
-        return yield* Effect.fail(error)
-      })))
-      return session
-    })
+    return this.withAdmission(id, this.createPersistedSession(id, options).pipe(Effect.uninterruptible))
   }
 
   ensure(id: string, options?: { readonly readOnly?: boolean }): Effect.Effect<SessionSummary, Error> {
     const manager = this
-    return Effect.gen(function* () {
-      if (manager.closing) {
-        return yield* Effect.fail(sessionError("inactive", "Browser Control sessions are closing", id))
-      }
+    return this.withAdmission(id, Effect.gen(function* () {
       const existing = manager.sessions.get(id)
       if (existing) {
         if (options?.readOnly === true && !existing.readOnly) {
@@ -294,28 +283,35 @@ export class BrowserControlSessions {
         }
         return manager.sessionSummary(existing)
       }
-      const session = manager.createNew(id, options)
-      yield* manager.flushPersistence().pipe(Effect.catch((error) => Effect.gen(function* () {
-        if (manager.sessions.get(session.id) === session) manager.sessions.delete(session.id)
-        yield* manager.closeBrowserControlSession(session)
-        manager.schedulePersistence()
-        yield* manager.flushPersistence().pipe(Effect.ignore)
-        return yield* Effect.fail(error)
-      })))
+      const session = yield* manager.createPersistedSession(id, options)
       return manager.sessionSummary(session)
-    })
+    }).pipe(Effect.uninterruptible))
   }
 
+  private readonly createPersistedSession = Effect.fnUntraced(function* (this: BrowserControlSessions, id: string | undefined, options?: { readonly readOnly?: boolean }) {
+    const manager = this
+    const session = manager.createAcceptedSession(id, options)
+    yield* manager.flushPersistence().pipe(Effect.catch((error) => Effect.gen(function* () {
+      if (manager.sessions.get(session.id) === session) manager.sessions.delete(session.id)
+      yield* manager.closeBrowserControlSession(session)
+      manager.schedulePersistence()
+      yield* manager.flushPersistence().pipe(Effect.ignore)
+      return yield* Effect.fail(error)
+    })))
+    return session
+  })
+
   getOrCreate(id: string): { readonly session: BrowserControlSession; readonly created: boolean } {
-    if (this.closing) {
-      throw sessionError("inactive", "Browser Control sessions are closing", id)
-    }
+    this.assertAdmission()
+    return this.getOrCreateAcceptedSession(id)
+  }
+
+  private getOrCreateAcceptedSession(id: string): { readonly session: BrowserControlSession; readonly created: boolean } {
     const existing = this.sessions.get(id)
     if (existing) {
       return { session: existing, created: false }
     }
-    const session = this.createNew(id)
-    return { session, created: true }
+    return { session: this.createAcceptedSession(id), created: true }
   }
 
   isReadOnly(id: string): boolean {
@@ -324,6 +320,14 @@ export class BrowserControlSessions {
 
   isExecuting(id: string): boolean {
     return this.executing.has(id)
+  }
+
+  hasPendingWork(id: string): boolean {
+    return this.pendingSessionWork.has(id)
+  }
+
+  hasActiveNetworkCapture(): boolean {
+    return Array.from(this.sessions.values()).some((session) => session.sandbox.networkStatus().active)
   }
 
   markTargetCrashed(targetId: string): string[] {
@@ -346,7 +350,7 @@ export class BrowserControlSessions {
         this.notifyTargetOwnershipChange(this.targetOwnership.releaseTargetOwnership(targetId, session.id))
       }
       if (session.target?.id === targetId) {
-        this.updateTarget(session.id, undefined)
+        this.updateTarget(session, undefined)
       }
     }
     return affectedSessionIds
@@ -355,7 +359,7 @@ export class BrowserControlSessions {
   markTargetReplaced(previousTargetId: string, targetId: string): string[] {
     const affected: string[] = []
     for (const session of this.sessions.values()) {
-      if (session.target?.id === previousTargetId) this.updateTarget(session.id, { ...session.target, id: targetId })
+      if (session.target?.id === previousTargetId) this.updateTarget(session, { ...session.target, id: targetId })
       if (session.sandbox.markTargetReplaced(previousTargetId, targetId)) {
         affected.push(session.id)
       }
@@ -365,10 +369,7 @@ export class BrowserControlSessions {
 
   delete(id: string): Effect.Effect<boolean, Error> {
     const manager = this
-    return Effect.gen(function* () {
-      if (manager.closing) {
-        return yield* Effect.fail(sessionError("inactive", "Browser Control sessions are closing", id))
-      }
+    return this.withAdmission(id, Effect.gen(function* () {
       const session = manager.sessions.get(id)
       if (!session) {
         return false
@@ -390,15 +391,12 @@ export class BrowserControlSessions {
         yield* manager.closeBrowserControlSession(session)
         return true
       }))
-    })
+    }))
   }
 
   reset(id: string): Effect.Effect<SessionSummary | undefined, Error> {
     const manager = this
-    return Effect.gen(function* () {
-      if (manager.closing) {
-        return yield* Effect.fail(sessionError("inactive", "Browser Control sessions are closing", id))
-      }
+    return this.withAdmission(id, Effect.gen(function* () {
       const existing = manager.sessions.get(id)
       if (!existing) {
         return undefined
@@ -421,7 +419,7 @@ export class BrowserControlSessions {
         yield* manager.closeBrowserControlSession(existing)
         return manager.sessionSummary(session)
       }))
-    })
+    }))
   }
 
   adoptedTargetId(id: string): string | undefined {
@@ -430,7 +428,7 @@ export class BrowserControlSessions {
   }
 
   networkStart(id: string, options: NetworkCaptureOptions = {}): Effect.Effect<NetworkCaptureStatus, Error> {
-    return this.withActiveSession(id, "network start", (session) => session.sandbox.networkStart(options))
+    return this.withSessionOperation(id, "network start", (session) => session.sandbox.networkStart(options))
   }
 
   networkStatus(id: string): Effect.Effect<NetworkCaptureStatus, Error> {
@@ -441,30 +439,28 @@ export class BrowserControlSessions {
   }
 
   networkStop(id: string, options: NetworkCaptureStopOptions = {}): Effect.Effect<NetworkCaptureResult, Error> {
-    return this.withActiveSession(id, "network stop", (session) => session.sandbox.networkStop(options))
+    return this.withSessionOperation(id, "network stop", (session) => session.sandbox.networkStop(options))
   }
 
   networkCancel(id: string): Effect.Effect<{ readonly cancelled: boolean }, Error> {
-    return this.withActiveSession(id, "network cancel", (session) => session.sandbox.networkCancel())
+    return this.withSessionOperation(id, "network cancel", (session) => session.sandbox.networkCancel())
   }
 
   authRefresh(id: string, options: { readonly name: string; readonly urlFilter?: string; readonly timeoutMs?: number }): Effect.Effect<NetworkCaptureResult, Error> {
-    return this.withActiveSession(id, "auth refresh", (session) => session.sandbox.authRefresh(options))
+    return this.withSessionOperation(id, "auth refresh", (session) => session.sandbox.authRefresh(options))
   }
 
-  private withActiveSession<A>(
-    id: string,
-    operation: string,
-    run: (session: BrowserControlSession) => Effect.Effect<A, Error>,
-  ): Effect.Effect<A, Error> {
+  private withSessionOperation<A>(id: string, operation: string, use: (session: BrowserControlSession) => Effect.Effect<A, Error>): Effect.Effect<A, Error> {
     const manager = this
-    const session = this.sessions.get(id)
-    if (!session) return Effect.fail(sessionError("not-found", `Session not found: ${id}`, id))
-    return this.withLifecyclePermit(session, operation, Effect.gen(function* () {
-      if (manager.sessions.get(id) !== session) {
-        return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${id}`, id))
-      }
-      return yield* run(session)
+    return this.withAdmission(id, Effect.suspend(() => {
+      const session = manager.sessions.get(id)
+      if (!session) return Effect.fail(sessionError("not-found", `Session not found: ${id}`, id))
+      return manager.withLifecyclePermit(session, operation, Effect.gen(function* () {
+        if (manager.sessions.get(id) !== session) {
+          return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${id}`, id))
+        }
+        return yield* use(session)
+      }))
     }))
   }
 
@@ -472,31 +468,33 @@ export class BrowserControlSessions {
     request: AuthenticatedJsonRequest,
   ): Effect.Effect<AuthenticatedJsonOutcome, Error> {
     const manager = this
-    const session = this.sessions.get(request.sessionId)
-    if (!session) {
-      return Effect.fail(sessionError("not-found", `Session not found: ${request.sessionId}`, request.sessionId))
-    }
-    if (session.readOnly && request.method !== "GET") {
-      return Effect.fail(sessionError(
-        "invalid-request",
-        `Read-only session ${request.sessionId} cannot make ${request.method} authenticated requests`,
-        request.sessionId,
-      ))
-    }
-    const { sessionId: _sessionId, ...pageRequest } = request
-    return this.withLifecyclePermit(session, "authenticated request", Effect.gen(function* () {
-      if (manager.sessions.get(session.id) !== session) {
-        return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${session.id}`, session.id))
+    return this.withAdmission(request.sessionId, Effect.suspend(() => {
+      const session = manager.sessions.get(request.sessionId)
+      if (!session) {
+        return Effect.fail(sessionError("not-found", `Session not found: ${request.sessionId}`, request.sessionId))
       }
-      manager.setExecuting(session.id, true)
-      const result = yield* session.sandbox.authenticatedJson(pageRequest).pipe(
-        Effect.ensuring(Effect.sync(() => manager.setExecuting(session.id, false))),
-      )
-      session.updatedAt = new Date().toISOString()
-      manager.schedulePersistence()
-      yield* manager.flushPersistence()
-      return result
-    }).pipe(Effect.uninterruptible))
+      if (session.readOnly && request.method !== "GET") {
+        return Effect.fail(sessionError(
+          "invalid-request",
+          `Read-only session ${request.sessionId} cannot make ${request.method} authenticated requests`,
+          request.sessionId,
+        ))
+      }
+      const { sessionId: _sessionId, ...pageRequest } = request
+      return manager.withLifecyclePermit(session, "authenticated request", Effect.gen(function* () {
+        if (manager.sessions.get(session.id) !== session) {
+          return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${session.id}`, session.id))
+        }
+        manager.setExecuting(session.id, true)
+        const result = yield* session.sandbox.authenticatedJson(pageRequest).pipe(
+          Effect.ensuring(Effect.sync(() => manager.setExecuting(session.id, false))),
+        )
+        session.updatedAt = new Date().toISOString()
+        manager.schedulePersistence()
+        yield* manager.flushPersistence()
+        return result
+      }))
+    }))
   }
 
   execute(options: {
@@ -506,17 +504,14 @@ export class BrowserControlSessions {
     readonly targetSelection?: ExecuteTargetSelection
   }): Effect.Effect<{ readonly result: ExecuteResult; readonly session: SessionSummary & { readonly created?: boolean } }, Error> {
     const manager = this
-    return Effect.gen(function* () {
-      if (manager.closing) {
-        return yield* Effect.fail(sessionError("inactive", "Browser Control sessions are closing"))
-      }
+    return this.withAdmission(options.sessionId, Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
       if (options.sessionId === undefined && !options.createIfMissing) {
         return yield* Effect.fail(sessionError("invalid-request", "sessionId is required when createIfMissing is false"))
       }
       const resolved = options.sessionId === undefined
-        ? { session: manager.createNew(undefined), created: true }
+        ? { session: manager.createAcceptedSession(undefined), created: true }
         : options.createIfMissing
-        ? manager.getOrCreate(options.sessionId)
+        ? manager.getOrCreateAcceptedSession(options.sessionId)
         : { session: manager.sessions.get(options.sessionId), created: false }
       const session = resolved.session
       if (!session) {
@@ -565,25 +560,26 @@ export class BrowserControlSessions {
           const summary = manager.sessionSummary(session)
           return { result: resultWithHint, session: { ...summary, ...(resolved.created ? { created: true } : {}) } }
         })
-      const transaction = session.executeSemaphore.withPermit(operation)
-      const worker = transaction.pipe(Effect.matchEffect({
+      const worker = session.executeSemaphore.withPermit(operation.pipe(Effect.matchEffect({
         onFailure: (error) => (resolved.created
           ? manager.cleanupCreatedSession(session)
           : Effect.void).pipe(Effect.andThen(Deferred.fail(response, error))),
         onSuccess: (value) => Deferred.succeed(response, value),
-      }))
-      const workerFiber = yield* worker.pipe(Effect.forkDetach({ startImmediately: true }))
-      return yield* Deferred.await(response).pipe(
+      })))
+      const workerFiber = yield* manager.forkTracked(worker, session.id)
+      return yield* restore(Deferred.await(response)).pipe(
         Effect.onInterrupt(() => Effect.suspend(() => {
           if (started) return Effect.void
           cancelled = true
           return Fiber.interrupt(workerFiber).pipe(
             Effect.asVoid,
-            Effect.andThen(resolved.created ? manager.delete(session.id).pipe(Effect.ignore) : Effect.void),
+            Effect.andThen(resolved.created
+              ? session.executeSemaphore.withPermit(manager.cleanupCreatedSession(session))
+              : Effect.void),
           )
         })),
       )
-    })
+    })))
   }
 
   adopt(options: {
@@ -593,17 +589,14 @@ export class BrowserControlSessions {
     readonly targetUrl: string
   }): Effect.Effect<{ readonly adoptedUrl: string; readonly session: SessionSummary & { readonly created?: boolean }; readonly releasedTargetIds: readonly string[] }, Error> {
     const manager = this
-    return Effect.gen(function* () {
-      if (manager.closing) {
-        return yield* Effect.fail(sessionError("inactive", "Browser Control sessions are closing"))
-      }
+    return this.withAdmission(options.sessionId, Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
       if (options.sessionId === undefined && !options.createIfMissing) {
         return yield* Effect.fail(sessionError("invalid-request", "sessionId is required when createIfMissing is false"))
       }
       const resolved = options.sessionId === undefined
-        ? { session: manager.createNew(undefined), created: true }
+        ? { session: manager.createAcceptedSession(undefined), created: true }
         : options.createIfMissing
-        ? manager.getOrCreate(options.sessionId)
+        ? manager.getOrCreateAcceptedSession(options.sessionId)
         : { session: manager.sessions.get(options.sessionId), created: false }
       const session = resolved.session
       if (!session) {
@@ -698,26 +691,55 @@ export class BrowserControlSessions {
         onSuccess: () => Effect.void,
       })))
       const worker = manager.adoptSemaphore.withPermit(transaction)
-      yield* worker.pipe(Effect.forkDetach({ startImmediately: true }))
-      return yield* Deferred.await(result).pipe(
+      yield* manager.forkTracked(worker, session.id)
+      return yield* restore(Deferred.await(result).pipe(
         Effect.timeoutOrElse({
           duration: timeoutMs,
           orElse: () => cancel.pipe(Effect.andThen(Effect.fail(timeoutError))),
         }),
         Effect.onInterrupt(() => cancel),
-      )
+      ))
+    })))
+  }
+
+  /** Stop admission without cancelling accepted work or disconnecting sessions. */
+  beginDrain(): Effect.Effect<void, Error> {
+    const manager = this
+    return Effect.gen(function* () {
+      if (manager.admission === "open") manager.admission = "draining"
+      while (true) {
+        yield* manager.idle.await
+        const pending = manager.persistenceTail
+        yield* manager.flushPersistence()
+        // Target callbacks can append persistence while the previous tail settles.
+        if (manager.pendingWork === 0 && pending === manager.persistenceTail) {
+          manager.drainedPersistenceTail = pending
+          return
+        }
+      }
     })
+  }
+
+  /** Recheck synchronously at commit: late catalog writes invalidate a completed drain. */
+  isDrained(): boolean {
+    return this.admission !== "open"
+      && this.pendingWork === 0
+      && this.drainedPersistenceTail === this.persistenceTail
+  }
+
+  /** Call only after cancelling or completing the reversible drain waiter. */
+  resume(): void {
+    if (this.admission === "draining") this.admission = "open"
   }
 
   closeAll(): Effect.Effect<void> {
     const manager = this
     return Effect.gen(function* () {
-      manager.closing = true
+      manager.admission = "closed"
+      yield* manager.beginDrain().pipe(Effect.ignore)
       yield* manager.adoptSemaphore.withPermit(Effect.gen(function* () {
         const closedSessionIds = yield* Effect.forEach(Array.from(manager.sessions.values()), (session) => {
-          return manager.withLifecyclePermit(
-            session,
-            "close",
+          return session.executeSemaphore.withPermit(
             manager.disconnectBrowserControlSession(session),
           ).pipe(
             Effect.match({
@@ -732,7 +754,7 @@ export class BrowserControlSessions {
           manager.sessions.delete(id)
         }
       }))
-    })
+    }).pipe(Effect.uninterruptible)
   }
 
   summary(id: string): SessionSummary | undefined {
@@ -760,7 +782,14 @@ export class BrowserControlSessions {
     const hook = this.hooks.onExecuteRecord
     if (!hook) return Effect.void
     return Effect.tryPromise({
-      try: async () => hook(record),
+      try: async () => {
+        const release = this.retainWork(record.sessionId)
+        try {
+          return await hook(record)
+        } finally {
+          release()
+        }
+      },
       catch: (cause) => cause,
     }).pipe(
       Effect.timeoutOrElse({
@@ -776,19 +805,23 @@ export class BrowserControlSessions {
 
   private createBrowserControlSession(id: string, readOnly: boolean, timestamps?: {
     readonly createdAt: string
-    readonly updatedAt: string
-  }): BrowserControlSession {
+    readonly updatedAt?: string
+  }, executeSemaphore = Semaphore.makeUnsafe(1)): BrowserControlSession {
     const now = new Date().toISOString()
-    return {
+    let session: BrowserControlSession | undefined
+    session = {
       id,
       ...(this.hooks.profileId === undefined ? {} : { profileId: this.hooks.profileId }),
       ...(this.profileName === undefined ? {} : { profileName: this.profileName }),
       createdAt: timestamps?.createdAt ?? now,
       updatedAt: timestamps?.updatedAt ?? now,
       readOnly,
-      sandbox: this.createSandbox(id),
-      executeSemaphore: Semaphore.makeUnsafe(1),
+      sandbox: this.createSandbox(id, (target) => {
+        if (session) this.updateTarget(session, target)
+      }),
+      executeSemaphore,
     }
+    return session
   }
 
   private sessionSummary(session: BrowserControlSession): SessionSummary {
@@ -807,11 +840,18 @@ export class BrowserControlSessions {
   }
 
   private closeBrowserControlSession(session: BrowserControlSession): Effect.Effect<void> {
-    return this.withLifecycleTimeout(session.sandbox.close(), `Close session ${session.id}`).pipe(Effect.ignore)
+    return this.forkTracked(this.closeBrowserControlSessionSettled(session), session.id).pipe(
+      Effect.flatMap((worker) => this.withLifecycleTimeout(Fiber.join(worker), `Close session ${session.id}`)),
+      Effect.ignore,
+    )
   }
 
   private disconnectBrowserControlSession(session: BrowserControlSession): Effect.Effect<void> {
-    return this.withLifecycleTimeout(session.sandbox.disconnect(), `Disconnect session ${session.id}`).pipe(Effect.ignore)
+    return Effect.acquireUseRelease(
+      Effect.sync(() => this.retainWork(session.id)),
+      () => session.sandbox.disconnectSettled().pipe(Effect.ignore),
+      (release) => Effect.sync(release),
+    )
   }
 
   private closeBrowserControlSessionSettled(session: BrowserControlSession): Effect.Effect<void> {
@@ -862,9 +902,14 @@ export class BrowserControlSessions {
   private schedulePersistence(sessions = this.persistedSessions()): void {
     const hook = this.hooks.onSessionsChanged
     if (!hook) return
+    const release = this.retainWork()
     const previous = this.persistenceTail
     this.persistenceTail = previous.catch(() => {}).then(async () => {
-      await hook(sessions)
+      try {
+        await hook(sessions)
+      } finally {
+        release()
+      }
     })
     void this.persistenceTail.catch((error) => {
       console.error("Failed to persist Browser Control sessions", error)
@@ -872,9 +917,8 @@ export class BrowserControlSessions {
   }
 
   private flushPersistence(): Effect.Effect<void, Error> {
-    const pending = this.persistenceTail
     return Effect.tryPromise({
-      try: () => pending,
+      try: () => this.persistenceTail,
       catch: (cause) => cause instanceof Error ? cause : new Error("Persist Browser Control sessions", { cause }),
     })
   }
@@ -907,11 +951,10 @@ export class BrowserControlSessions {
         yield* manager.flushPersistence()
         return
       }
-      const replacement = manager.createBrowserControlSession(session.id, session.readOnly)
-      manager.sessions.set(session.id, {
-        ...replacement,
+      const replacement = manager.createBrowserControlSession(session.id, session.readOnly, {
         createdAt: session.createdAt,
       })
+      manager.sessions.set(session.id, replacement)
       manager.schedulePersistence()
       yield* manager.flushPersistence()
     })
@@ -929,23 +972,76 @@ export class BrowserControlSessions {
     })
   }
 
+  private assertAdmission(): void {
+    if (this.admission !== "open") {
+      throw sessionError("inactive", this.admission === "closed"
+        ? "Browser Control sessions are closing"
+        : "Browser Control sessions are draining")
+    }
+  }
+
+  private retainWork(sessionId?: string): () => void {
+    this.pendingWork += 1
+    if (sessionId !== undefined) this.pendingSessionWork.set(sessionId, (this.pendingSessionWork.get(sessionId) ?? 0) + 1)
+    this.idle.closeUnsafe()
+    return () => {
+      this.pendingWork -= 1
+      if (sessionId !== undefined) {
+        const remaining = (this.pendingSessionWork.get(sessionId) ?? 1) - 1
+        if (remaining === 0) this.pendingSessionWork.delete(sessionId)
+        else this.pendingSessionWork.set(sessionId, remaining)
+      }
+      if (this.pendingWork === 0) this.idle.openUnsafe()
+    }
+  }
+
+  private withAdmission<A, E, R>(sessionId: string | undefined, effect: Effect.Effect<A, E, R>): Effect.Effect<A, E | Error, R> {
+    return Effect.acquireUseRelease(
+      Effect.try({
+        try: () => {
+          this.assertAdmission()
+          return this.retainWork(sessionId)
+        },
+        catch: (cause) => cause instanceof Error ? cause : new Error("Admit session operation", { cause }),
+      }),
+      () => effect,
+      (release) => Effect.sync(release),
+    )
+  }
+
+  private forkTracked<A, E, R>(effect: Effect.Effect<A, E, R>, sessionId: string): Effect.Effect<Fiber.Fiber<A, E>, never, R> {
+    return Effect.uninterruptibleMask(() => Effect.suspend(() => {
+      // Transfer the lease before forking; caller interruption cannot strand it.
+      const release = this.retainWork(sessionId)
+      return effect.pipe(
+        Effect.ensuring(Effect.sync(release)),
+        Effect.forkDetach({ startImmediately: true }),
+      )
+    }))
+  }
+
   private withLifecyclePermit<A, E, R>(
     session: BrowserControlSession,
     operation: string,
     effect: Effect.Effect<A, E, R>,
   ): Effect.Effect<A, E | Error, R> {
-    const acquire = session.executeSemaphore.take(1).pipe(
-      Effect.timeoutOption(this.hooks.lifecycleTimeoutMs ?? 10_000),
-      Effect.flatMap(Option.match({
-        onNone: () => Effect.fail(sessionError("timeout", `Session ${operation} timed out waiting for active execute in ${session.id}`, session.id)),
-        onSome: () => Effect.void,
-      })),
-    )
-    return Effect.acquireUseRelease(
-      acquire,
-      () => effect,
-      () => session.executeSemaphore.release(1).pipe(Effect.asVoid),
-    )
+    return Effect.suspend(() => {
+      let state: "waiting" | "started" | "timed-out" = "waiting"
+      const timeout = sessionError("timeout", `Session ${operation} timed out waiting for active execute in ${session.id}`, session.id)
+      // withPermit installs release atomically; racing a bare take can lose a granted permit.
+      return Effect.raceFirst(
+        session.executeSemaphore.withPermit(Effect.suspend((): Effect.Effect<A, E | Error, R> => {
+          if (state === "timed-out") return Effect.fail(timeout)
+          state = "started"
+          return effect
+        }).pipe(Effect.uninterruptible)),
+        Effect.sleep(this.hooks.lifecycleTimeoutMs ?? 10_000).pipe(Effect.flatMap(() => {
+          if (state === "started") return Effect.never
+          state = "timed-out"
+          return Effect.fail(timeout)
+        })),
+      )
+    })
   }
 
   private withLifecycleTimeout<A, E, R>(effect: Effect.Effect<A, E, R>, label: string): Effect.Effect<A, E | Error, R> {

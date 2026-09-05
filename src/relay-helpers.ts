@@ -353,20 +353,6 @@ export function requiredSessionId(value: JsonObject[string] | undefined): string
   return id
 }
 
-export function requiredString(value: JsonObject[string] | undefined, field: string): string {
-  if (typeof value !== "string") {
-    throw new Error(`${field} is required`)
-  }
-  return value
-}
-
-export function requiredBoolean(value: JsonObject[string] | undefined, field: string): boolean {
-  if (typeof value !== "boolean") {
-    throw new Error(`${field} is required`)
-  }
-  return value
-}
-
 export function parseTargetSelection(value: JsonObject[string] | undefined): ExecuteTargetSelection | undefined {
   if (value === undefined) {
     return undefined
@@ -411,7 +397,7 @@ export function sendCdpResponse(socket: WebSocket, response: CdpResponse): void 
   socket.send(JSON.stringify(response))
 }
 
-export function sendCdpEvent(socket: WebSocket, event: CdpEvent): void {
+export function sendCdpEvent(socket: Pick<WebSocket, "send">, event: CdpEvent): void {
   socket.send(JSON.stringify(event))
 }
 

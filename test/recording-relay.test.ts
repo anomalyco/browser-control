@@ -13,6 +13,53 @@ afterEach(async () => {
 })
 
 describe("RecordingRelay tab capture", () => {
+  it.each(["failed", "inactive", "missing-time", "missing-status", "active"] as const)("preserves %s poll semantics and includes chunks received during the poll", async (outcome) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "browser-control-tab-recording-"))
+    temporaryPaths.push(directory)
+    const outputPath = path.join(directory, "status.webm")
+    const pollEntered = deferred<void>()
+    const releasePoll = deferred<void>()
+    const relay = new RecordingRelay({
+      isExtensionConnected: () => true,
+      sendDebuggerCommand: async () => ({}),
+      sendToExtension: async (command) => {
+        if (command.method === "recording.start") return { success: true, tabId: 7, startedAt: 1_000 }
+        if (command.method === "recording.status") {
+          pollEntered.resolve()
+          await releasePoll.promise
+          if (outcome === "failed") throw new Error("poll failed")
+          if (outcome === "missing-status") return {}
+          return {
+            isRecording: outcome !== "inactive",
+            tabId: 99,
+            ...(outcome === "missing-time" ? {} : { startedAt: 0 }),
+          }
+        }
+        return { success: true }
+      },
+    })
+    try {
+      await expect(relay.startRecording({ tabId: 7, owner: "user", outputPath })).resolves.toMatchObject({ success: true })
+      const status = relay.statusRecording({ tabId: 7 })
+      await pollEntered.promise
+      relay.handleBinaryData(Buffer.from(encodeRecordingFrame({ tabId: 7, sequence: 0, final: false, payload: Uint8Array.of(1, 2, 3) })))
+      releasePoll.resolve()
+      await expect(status).resolves.toEqual({
+        isRecording: outcome !== "inactive" && outcome !== "missing-status",
+        tabId: 7,
+        startedAt: outcome === "active" || outcome === "inactive" ? 0 : 1_000,
+        path: outputPath,
+        size: 3,
+        mode: "tab-capture",
+        artifactType: "webm",
+      })
+      expect(relay.hasActiveRecordings()).toBe(true)
+    } finally {
+      releasePoll.resolve()
+      await relay.cancelRecording({ tabId: 7 })
+    }
+  })
+
   it("streams intrinsically framed chunks to an atomic output", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "browser-control-tab-recording-"))
     temporaryPaths.push(directory)
@@ -189,6 +236,52 @@ describe("RecordingRelay tab capture", () => {
     expect((await fs.readdir(directory)).some((entry) => entry.includes(".partial-"))).toBe(false)
   })
 
+  it("preserves the successful stop result while finalized file cleanup is still pending", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "browser-control-tab-recording-"))
+    temporaryPaths.push(directory)
+    const cleanupEntered = deferred<void>()
+    const releaseCleanup = deferred<void>()
+    const open = fs.open.bind(fs)
+    const openSpy = vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+      const file = await open(...args)
+      const close = file.close.bind(file)
+      let calls = 0
+      vi.spyOn(file, "close").mockImplementation(async () => {
+        if (++calls === 2) {
+          cleanupEntered.resolve()
+          await releaseCleanup.promise
+        }
+        return close()
+      })
+      return file
+    })
+    const relay = new RecordingRelay({
+      isExtensionConnected: () => true,
+      sendDebuggerCommand: async () => ({}),
+      sendToExtension: async (command) => {
+        if (command.method === "recording.start") return { success: true, tabId: 7, startedAt: 1_000 }
+        if (command.method === "recording.stop") {
+          queueMicrotask(() => relay.handleBinaryData(Buffer.from(encodeRecordingFrame({ tabId: 7, sequence: 1, final: true, payload: new Uint8Array() }))))
+        }
+        return { success: true, tabId: 7, duration: 100 }
+      },
+    })
+    try {
+      await relay.startRecording({ tabId: 7, owner: "user", outputPath: path.join(directory, "finalized.webm") })
+      relay.handleBinaryData(Buffer.from(encodeRecordingFrame({ tabId: 7, sequence: 0, final: false, payload: Uint8Array.of(1) })))
+      const result = await relay.stopRecording({ tabId: 7 })
+      await cleanupEntered.promise
+      expect(result.success).toBe(true)
+      expect(relay.hasActiveRecordings()).toBe(true)
+      await expect(relay.stopRecording({ tabId: 7 })).resolves.toEqual(result)
+    } finally {
+      releaseCleanup.resolve()
+      await relay.cleanupAll("test finished")
+      openSpy.mockRestore()
+    }
+    expect(relay.hasActiveRecordings()).toBe(false)
+  })
+
   it("accepts frames that arrive before the extension start response", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "browser-control-tab-recording-"))
     temporaryPaths.push(directory)
@@ -312,6 +405,73 @@ describe("RecordingRelay tab capture", () => {
       expect((await fs.readdir(directory)).some((entry) => entry.includes(".partial-"))).toBe(false)
     })
     expect(commands).toContain("recording.cancel")
+  })
+
+  it.each(["cancelled-event", "sequence-error"] as const)("keeps %s cleanup busy until cancellation and file removal settle", async (trigger) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "browser-control-tab-recording-"))
+    temporaryPaths.push(directory)
+    const outputPath = path.join(directory, "cleanup.webm")
+    const cancelEntered = deferred<void>()
+    const releaseCancel = deferred<void>()
+    const removeEntered = deferred<void>()
+    const releaseRemove = deferred<void>()
+    const commands: string[] = []
+    const relay = new RecordingRelay({
+      isExtensionConnected: () => true,
+      sendDebuggerCommand: async () => ({}),
+      sendToExtension: async (command) => {
+        commands.push(command.method)
+        if (command.method === "recording.start") return { success: true, tabId: 7, startedAt: 1_000 }
+        if (command.method === "recording.cancel") {
+          cancelEntered.resolve()
+          await releaseCancel.promise
+        }
+        return { success: true }
+      },
+    })
+    await relay.startRecording({ tabId: 7, owner: "user", outputPath })
+    const remove = fs.rm.bind(fs)
+    const removeSpy = vi.spyOn(fs, "rm").mockImplementation(async (file, options) => {
+      if (String(file).includes(".partial-")) {
+        removeEntered.resolve()
+        await releaseRemove.promise
+      }
+      return remove(file, options)
+    })
+    try {
+      if (trigger === "cancelled-event") relay.handleRecordingCancelled({ params: { tabId: 7 } })
+      else {
+        relay.handleBinaryData(Buffer.from(encodeRecordingFrame({ tabId: 7, sequence: 1, final: false, payload: Uint8Array.of(1) })))
+        await cancelEntered.promise
+        expect(relay.hasActiveRecordings()).toBe(true)
+      }
+      const settled: string[] = []
+      const cleanup = relay.cleanupAll("Extension disconnected").then(() => { settled.push("cleanup") })
+      const cancel = relay.cancelRecording({ tabId: 7 }).then((result) => { settled.push("cancel"); return result })
+      const stop = relay.stopRecording({ tabId: 7 }).then((result) => { settled.push("stop"); return result })
+      releaseCancel.resolve()
+      await removeEntered.promise
+      expect(relay.hasActiveRecordings()).toBe(true)
+      expect(settled).toEqual([])
+      await expect(relay.startRecording({ tabId: 7, owner: "user", outputPath })).resolves.toEqual({
+        success: false,
+        error: "Recording already in progress for this tab",
+      })
+      expect(commands.filter((command) => command === "recording.cancel")).toHaveLength(trigger === "sequence-error" ? 1 : 0)
+      expect(commands).not.toContain("recording.stop")
+      releaseRemove.resolve()
+      await cleanup
+      await expect(cancel).resolves.toEqual({ success: true })
+      await expect(stop).resolves.toEqual({ success: false, error: "Recording was cancelled" })
+      expect(relay.hasActiveRecordings()).toBe(false)
+      expect(await fs.readdir(directory)).toEqual([])
+      await expect(relay.startRecording({ tabId: 7, owner: "user", outputPath })).resolves.toMatchObject({ success: true })
+    } finally {
+      releaseCancel.resolve()
+      releaseRemove.resolve()
+      await relay.cleanupAll("test finished")
+      removeSpy.mockRestore()
+    }
   })
 })
 
@@ -522,6 +682,64 @@ describe("RecordingRelay CDP screencast", () => {
     await expect(relay.statusRecording({ tabId: 10 })).resolves.toEqual({ isRecording: false })
   })
 
+  it.each(["encoder", "debugger"] as const)("keeps detached recording cleanup busy until %s cancellation settles", async (pending) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "browser-control-recording-"))
+    temporaryPaths.push(directory)
+    const outputPath = path.join(directory, "detached.webm")
+    const entered = deferred<void>()
+    const release = deferred<void>()
+    const debuggerMethods: string[] = []
+    const cancelEncoder = vi.fn(async () => {
+      if (pending === "encoder") {
+        entered.resolve()
+        await release.promise
+      }
+    })
+    const finishEncoder = vi.fn(async () => {})
+    const relay = new RecordingRelay({
+      isExtensionConnected: () => true,
+      sendToExtension: async () => ({}),
+      sendDebuggerCommand: async (command) => {
+        debuggerMethods.push(command.method)
+        if (command.method === "Page.stopScreencast" && pending === "debugger") {
+          entered.resolve()
+          await release.promise
+        }
+        return {}
+      },
+      startVideoEncoder: async () => ({ write: async () => {}, finish: finishEncoder, cancel: cancelEncoder }),
+    })
+    await relay.startRecording({ tabId: 10, owner: "relay", outputPath, mode: "cdp" })
+    const aborted = relay.abortRecordingForTab({ tabId: 10, reason: "Tab detached" })
+    try {
+      await entered.promise
+      const settled: string[] = []
+      const cleanup = relay.cleanupAll("Extension disconnected").then(() => { settled.push("cleanup") })
+      const cancel = relay.cancelRecording({ tabId: 10 }).then((result) => { settled.push("cancel"); return result })
+      const stop = relay.stopRecording({ tabId: 10 }).then((result) => { settled.push("stop"); return result })
+      await expect(relay.startRecording({ tabId: 10, owner: "relay", outputPath, mode: "cdp" })).resolves.toEqual({
+        success: false,
+        error: "Recording already in progress for this tab",
+      })
+      expect(relay.hasActiveRecordings()).toBe(true)
+      expect(settled).toEqual([])
+      expect(cancelEncoder).toHaveBeenCalledOnce()
+      expect(finishEncoder).not.toHaveBeenCalled()
+      expect(debuggerMethods.filter((method) => method === "Page.stopScreencast")).toHaveLength(1)
+      expect(debuggerMethods).not.toContain("Page.captureScreenshot")
+      release.resolve()
+      await Promise.all([aborted, cleanup])
+      await expect(cancel).resolves.toEqual({ success: true })
+      await expect(stop).resolves.toEqual({ success: false, error: "Recording was cancelled" })
+      expect(relay.hasActiveRecordings()).toBe(false)
+      await expect(relay.startRecording({ tabId: 10, owner: "relay", outputPath, mode: "cdp" })).resolves.toMatchObject({ success: true })
+    } finally {
+      release.resolve()
+      await aborted
+      await relay.cleanupAll("test finished")
+    }
+  })
+
   it("prevents tabCapture WebM data from being mislabeled as MP4", async () => {
     const relay = new RecordingRelay({
       isExtensionConnected: () => true,
@@ -641,12 +859,13 @@ describe("RecordingRelay CDP screencast", () => {
     await expect(relay.statusRecording({ tabId: 14 })).resolves.toEqual({ isRecording: false })
   })
 
-  it("keeps a stopping recording reserved until the encoder finishes", async () => {
+  it.each(["cleanupAll", "abortRecordingForTab"] as const)("keeps a stopping recording reserved through %s until the encoder finishes", async (entryPoint) => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "browser-control-recording-"))
     temporaryPaths.push(directory)
     const outputPath = path.join(directory, "stopping.mp4")
     const finishStarted = deferred<void>()
     const releaseFinish = deferred<void>()
+    const cancelEncoder = vi.fn(async () => {})
     let now = 0
     const relay = new RecordingRelay({
       isExtensionConnected: () => true,
@@ -659,7 +878,7 @@ describe("RecordingRelay CDP screencast", () => {
           await releaseFinish.promise
           await fs.writeFile(outputPath, "video")
         },
-        cancel: async () => {},
+        cancel: cancelEncoder,
       }),
       now: () => now,
     })
@@ -669,13 +888,25 @@ describe("RecordingRelay CDP screencast", () => {
     now = 200
     const stop = relay.stopRecording({ tabId: 12 })
     await finishStarted.promise
-
-    await expect(relay.startRecording({ tabId: 12, owner: "relay", outputPath, mode: "cdp" })).resolves.toEqual({
-      success: false,
-      error: "Recording already in progress for this tab",
-    })
-    releaseFinish.resolve()
-    await expect(stop).resolves.toMatchObject({ success: true })
+    let cleanupSettled = false
+    const cleanup = (entryPoint === "cleanupAll"
+      ? relay.cleanupAll("Relay closed")
+      : relay.abortRecordingForTab({ tabId: 12, reason: "Tab detached" })
+    ).then(() => { cleanupSettled = true })
+    try {
+      await expect(relay.startRecording({ tabId: 12, owner: "relay", outputPath, mode: "cdp" })).resolves.toEqual({
+        success: false,
+        error: "Recording already in progress for this tab",
+      })
+      expect(cleanupSettled).toBe(false)
+      expect(cancelEncoder).not.toHaveBeenCalled()
+    } finally {
+      releaseFinish.resolve()
+      await cleanup
+      await expect(stop).resolves.toMatchObject({ success: true })
+    }
+    expect(cancelEncoder).not.toHaveBeenCalled()
+    expect(relay.hasActiveRecordings()).toBe(false)
   })
 
   it("turns encoder write failures into a stop result and cancels the encoder", async () => {

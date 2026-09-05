@@ -33,12 +33,26 @@ local Node relay.
   path. MCP uses the same detached relay lifecycle instead of owning an
   in-process relay, so an MCP restart cannot interrupt CLI handoffs. The first
   session is created atomically in the execute request.
+- Ordinary CLI, MCP, and SDK calls never replace a running relay. Replacement
+  requires `browser-control relay restart`, an exact managed instance, and safe
+  shutdown protocol 2. Legacy, foreground, source, and newer relays fail closed;
+  never add a force-kill or implicit downgrade fallback.
+- `RelayShutdown` owns admission and the reversible restart drain. Keep debugger
+  RPCs and handoffs alive until accepted session work, queued work, native
+  operations, and persistence settle. Timeout or pre-commit cancellation reopens
+  admission and must never cause a delayed shutdown. Raw CDP clients and active
+  recordings/captures require deliberate completion before restart.
+- Record bounded requester/build/instance metadata in the private endpoint
+  `lifecycle.jsonl` before committing a restart. Do not log expressions, URLs,
+  command arguments, or credential values. The successor records the acknowledged
+  request id; attribution is diagnostic metadata, not authenticated identity.
 - Each Browser Control session owns one default page and persistent JavaScript
   `state`; do not default to arbitrary shared tabs for normal execute calls.
 - Use stock `playwright-core` for v1.
-- Use Effect v4 for Node-side code. Treat a local `Effect-TS/effect` checkout as
-  the source of truth for current Effect APIs and patterns; `effect-smol` is the
-  archived former v4 repository.
+- Use Effect v4 for Node-side code, keeping `effect`, `@effect/platform-node`,
+  and `@effect/platform-node-shared` exactly pinned to the same release. The local
+  `/Users/kit/code/open-source/effect` checkout is the source of truth for APIs and
+  patterns; `effect-smol` is archived.
 - Prefer `Effect.fn` / `Effect.fnUntraced` for functions that return Effects,
   and use scoped resources (`Effect.acquireRelease`, `Effect.scoped`) for
   Playwright and relay lifecycles.
@@ -79,9 +93,10 @@ local Node relay.
 - CDP guardrails are pure logic in `src/cdp-guardrails.ts`, enforced at the top
   of `routeCdpCommand`. Destructive browser-state methods are always blocked;
   read-only sessions additionally reject `Input.*`.
-- Browser-context CDP methods route through a session-owned root for named
-  clients or exactly one visible root for raw clients. A named client never
-  falls back to an unrelated unowned tab.
+- Browser-context CDP methods route through a non-crashed session-owned root for
+  named clients or exactly one visible root for raw clients. A named client never
+  falls back to an unrelated unowned tab. Crashed roots remain visible and count
+  toward raw-client ambiguity; explicit target routes remain available.
 - Human handoff waiters live in `src/handoff.ts`; derive their stable CDP target
   id from the actual Playwright `Page`, then bind the exact registry
   target/tab/session. The relay resolves only a matching handoff id from that
@@ -102,6 +117,32 @@ local Node relay.
   profile ID, default-target identity, and owner. Adoption reserves,
   commits, or rolls back registry ownership transactionally and reconciles CDP
   visibility, grouping, and page status for every changed target.
+- `CdpClientPool` owns client announcements and aliases as private state. Its
+  transitions dedupe attachments, detach descendants before parents, and
+  invalidate aliases together. Callers supply visibility policy, never mutate
+  announcement indexes. Keep its event sink browser-free for transition tests.
+- A named CDP client is not necessarily an Execute Sandbox. Only the sandbox's
+  internal client-kind header identifies its transport; other clients remain raw
+  for restart safety even when they carry a session id. Track accepted CDP work
+  beyond socket closure and permit sandbox continuation RPCs during drain.
+- `RootTargetLifecycle` owns per-tab setup, staging, verification, commit, retry,
+  and generation invalidation. Stale workers must never detach a successor tab.
+  Drain its scoped workers before closing extension RPCs; keep presentation
+  best-effort and outside authoritative ownership. Exhausted committed or staged
+  root probes fail readiness; preserve original RPC errors. Readiness rejection
+  closes the extension socket with 1011 and disconnect cleanup clears live targets.
+- `BrowserControlSessions` installs the sandbox's default-target callback and
+  binds it to the exact session instance. Retired sandbox callbacks must never
+  update a reset or recreated session with the same id.
+- Sandbox teardown exposes only settled close/disconnect operations. Bound the
+  caller's wait in the manager while retaining the cleanup worker; do not add
+  bounded sandbox variants that can hide unfinished browser work.
+- `CdpRuntime` owns Runtime enable observation and the bounded reset fallback.
+  Start context windows before sending commands. Recovery and idle cleanup must
+  recheck captured root/child identity, extension generation, and caller
+  visibility before each unsent command. Disconnected clients never fall back
+  to raw-client visibility. Keep reset failures best-effort and return the
+  original enable result.
 - Same-tab root target generations are explicit replacements, never map
   overwrites. Preserve committed ownership, roll back provisional adoption
   ownership, detach the old generation before announcing the new one, rebind
@@ -180,9 +221,6 @@ local Node relay.
   managed-relay process-fault diagnostics are retained with mode `0600` in
   `~/.browser-control/relay.log` so same-build restarts and session loss are
   diagnosable instead of appearing as eviction.
-- Operational commands may replace only an older managed relay after confirming
-  its exact instance id, and must wait for it to exit before starting the
-  current build. Never auto-stop source, foreground, or newer relays.
 - `dist/mcp.js` self-runs via the dedicated `src/mcp-main.ts` entrypoint. Do not
   add `process.argv[1] === import.meta.url` self-run guards to modules that get
   bundled into `dist/cli.js`; esbuild inlining makes the guard fire inside the
@@ -219,11 +257,29 @@ local Node relay.
 ## Development
 
 - Run `pnpm typecheck` after TypeScript changes.
+- Run `pnpm check:unused` (Knip) and `pnpm check:locals` during cleanup; both are
+  CI gates. Keep `knip.ts` aligned with CLI/MCP, published SDK, browser-loaded,
+  and sandbox-script entry points. Review findings before deleting declarations:
+  an unused export can still be used inside its module. Never hide public SDK
+  exports or dynamic entry points to make the audit green.
+- For occasional whole-codebase audits, run `pnpm exec knip --production`.
+  Trailing `!` patterns retain runtime roots while excluding tests. Findings are
+  advisory: test-only exports may still have live same-file callers. Keep this
+  separate from the normal Knip CI gate.
+- Run `pnpm audit:duplicates` alongside larger cleanups. It is advisory: shared
+  text does not prove shared behavior, especially around permits and cleanup.
 - Run `pnpm test` (vitest) after changes to schemas, relay-client, session
   store/manager, extension-rpc, or execute auto-return logic. Unit tests live in
   `test/` and must not require a browser.
-- Run `pnpm build:cli` after CLI or relay source changes that should affect the
-  linked `browser-control` binary.
+- Do not link the active CLI/MCP installation to a mutable checkout. Use
+  `pnpm runtime:prepare --staging <fresh-absolute-dir> --install <fresh-absolute-dir>`
+  to build and validate a standalone candidate without changing the live tool.
+  `pnpm runtime:select --install <validated-dir> --active <shared-symlink>` changes
+  only future command selection; it never restarts a relay or reloads an extension.
+  Retain previous installation directories while any process may still use them.
+- Use `pnpm build:cli --outdir <external-directory>` to validate CLI/relay changes
+  without overwriting a linked installation. The default build still writes
+  checkout `dist`; never run it against an installation used by other agents.
 - Run `pnpm build:extension` after extension changes.
 - Extension shim changes require reloading the unpacked extension once in Brave.
 - Relay-only changes should not require reloading the extension.
@@ -244,10 +300,14 @@ local Node relay.
 pnpm typecheck
 pnpm test
 pnpm build:cli
+pnpm runtime:prepare --help
+pnpm runtime:select --help
+pnpm runtime:check-lifecycle --help
 pnpm build:extension
 SMOKE_CASE=oopif-reconnect pnpm smoke
 browser-control serve
 browser-control status
+browser-control relay restart
 browser-control session new
 browser-control session new inspect --read-only
 browser-control session list

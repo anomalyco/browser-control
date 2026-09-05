@@ -142,20 +142,27 @@ describe("createDoctorReport", () => {
         filePath: path.join(packageRoot, "session.json"),
         read: Effect.succeed(undefined),
       } as unknown as SessionStore.Interface
-      const report = await Effect.runPromise(createDoctorReport({ packageRoot }).pipe(
+      const check = createDoctorReport({ packageRoot }).pipe(
         Effect.provide(Layer.mergeAll(
           NodeFileSystem.layer,
           NodePath.layer,
           Layer.succeed(RelayClient.Service, relay),
           Layer.succeed(SessionStore.Service, store),
         )),
-      ))
+      )
+      const report = await Effect.runPromise(check)
 
       expect(report.extension).toMatchObject({ expectedVersion: "0.0.23", versionMatches: true })
       expect(report.checks.find((check) => check.id === "extension-version")).toMatchObject({
         status: "ok",
         message: "matches bundled extension (0.0.23)",
       })
+      expect(report.recommendations).toContainEqual(expect.stringContaining("browser-control relay restart"))
+      expect(report.recommendations.join("\n")).not.toContain("Restart the relay with `browser-control serve`")
+      await fs.unlink(path.join(packageRoot, "dist", "mcp.js"))
+      const missingArtifact = await Effect.runPromise(check)
+      expect(missingArtifact.recommendations).toContainEqual(expect.stringContaining("pnpm runtime:prepare"))
+      expect(missingArtifact.recommendations.join("\n")).not.toContain("pnpm build")
       expect(report.extension.rejectedConnections).toBe(rejectedConnections ?? null)
       const conflict = report.checks.find((check) => check.id === "extension-connection-conflicts")
       if (rejectedConnections === undefined) expect(conflict).toBeUndefined()

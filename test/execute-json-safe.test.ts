@@ -85,6 +85,18 @@ describe("toJsonSafeValue", () => {
     }
   })
 
+  it("classifies a proxy container once before converting its contents", () => {
+    let probes = 0
+    const value = new Proxy({ ok: true }, {
+      getPrototypeOf() {
+        if (++probes > 3) throw new Error("extra prototype probe")
+        return Object.prototype
+      },
+    })
+    expect(toJsonSafeValue(value)).toEqual({ serializable: true, value: { ok: true } })
+    expect(probes).toBe(3)
+  })
+
   it("handles nested throwing getters inside objects and arrays", () => {
     const nested = {
       keep: "nested",
@@ -118,6 +130,43 @@ describe("toJsonSafeValue", () => {
     const value: { name: string; self?: unknown } = { name: "loop" }
     value.self = value
     expect(toJsonSafeValue(value)).toEqual({ serializable: true, value: { name: "loop" } })
+  })
+
+  it.each(["map", "set"])("preserves %s iterator failure outcomes and cleans up shared references", (kind) => {
+    for (const phase of ["acquire", "advance"]) {
+      const collection = kind === "map" ? new Map() : new Set()
+      Object.defineProperty(collection, kind === "map" ? "entries" : "values", {
+        value: phase === "acquire"
+          ? () => { throw new Error("unavailable") }
+          : function* () { throw new Error("iteration failed") },
+      })
+      const reason = phase === "advance" ? `${kind} iteration failed` : `${kind} ${kind === "map" ? "entries" : "values"} unavailable`
+      expect(toJsonSafeValue(collection)).toEqual({ serializable: false, reason })
+      expect(toJsonSafeValue({ first: collection, second: collection, items: [collection], keep: true }))
+        .toEqual({ serializable: true, value: { items: [null], keep: true } })
+    }
+  })
+
+  it("distinguishes collection cycles from shared noncyclic children", () => {
+    const shared = { ok: true }
+    const map = new Map<string, unknown>([["first", shared], ["second", shared]])
+    map.set("self", map)
+    const set = new Set<unknown>([shared])
+    set.add(set)
+    expect(toJsonSafeValue({ map, set, shared })).toEqual({
+      serializable: true,
+      value: { map: { first: shared, second: shared }, set: [shared, null], shared },
+    })
+  })
+
+  it.each([7, 8])("applies the same depth limit to collections at depth %s", (depth) => {
+    for (const collection of [new Map([["item", 1]]), new Set([1])]) {
+      let input: unknown = collection
+      for (let index = 0; index < depth; index++) input = { child: input }
+      let expected: unknown = depth === 8 ? {} : collection instanceof Map ? { item: 1 } : [1]
+      for (let index = 0; index < (depth === 8 ? depth - 1 : depth); index++) expected = { child: expected }
+      expect(toJsonSafeValue(input)).toEqual({ serializable: true, value: expected })
+    }
   })
 })
 

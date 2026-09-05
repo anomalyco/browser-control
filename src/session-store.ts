@@ -38,7 +38,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("browser-control/SessionStore") {}
 
-export const defaultFilePath = (): string => {
+const defaultFilePath = (): string => {
   return `${os.homedir()}/.browser-control/session.json`
 }
 

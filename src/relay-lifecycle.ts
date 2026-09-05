@@ -1,15 +1,21 @@
 import { Effect, Schedule, Schema } from "effect"
 import { spawn } from "node:child_process"
+import crypto from "node:crypto"
 import path from "node:path"
 import process from "node:process"
+import { fileURLToPath } from "node:url"
 import * as RelayClient from "./relay-client.ts"
-import type { ExtensionStatus, RelayVersion } from "./relay-schema.ts"
+import { RelayShutdownRequest, type ExtensionStatus, type RelayVersion } from "./relay-schema.ts"
 import { browserControlBuildId } from "./version.ts"
+
+const loadedCliEntrypoint = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./cli.ts" : "./cli.js", import.meta.url))
+const clientInstanceId = crypto.randomUUID()
 
 export type RelayReadiness = {
   readonly version: RelayVersion
   readonly started: boolean
   readonly buildProblem?: string
+  readonly waitForReconnect?: true
 }
 
 export type EnsureRelayOptions = {
@@ -20,9 +26,13 @@ export type EnsureRelayOptions = {
   readonly retryDelayMs?: number
 }
 
+export function shouldWaitForExtensionReconnect(readiness: RelayReadiness): boolean {
+  return readiness.started || readiness.waitForReconnect === true
+}
+
 class RelayStillRunning extends Error {}
 
-export class RelayStartFailed extends Schema.TaggedError<RelayStartFailed>()(
+class RelayStartFailed extends Schema.TaggedError<RelayStartFailed>()(
   "RelayLifecycle.RelayStartFailed",
   {
     message: Schema.String,
@@ -46,10 +56,13 @@ export class ExtensionProtocolIncompatible extends Schema.TaggedError<ExtensionP
 
 export function relayBuildProblem(version: RelayVersion, buildId = browserControlBuildId): string | undefined {
   if (!version.buildId) {
-    return `Running relay does not report a build id; restart it with the current CLI (${buildId}).`
+    return `Running relay does not report a build id; use \`browser-control relay restart\` for upgrade guidance (${buildId}).`
   }
   if (version.buildId !== buildId) {
-    return `Running relay build ${version.buildId} does not match CLI build ${buildId}; restart the relay.`
+    if (isNewerBuild(version.buildId, buildId)) {
+      return `Running relay build ${version.buildId} is newer than CLI build ${buildId}; refresh or restart this CLI or MCP client. Only use \`browser-control relay restart\` from the current installation.`
+    }
+    return `Running relay build ${version.buildId} does not match CLI build ${buildId}; run \`browser-control relay restart\` explicitly. This leaves browser tabs open but resets in-memory JavaScript state.`
   }
   return undefined
 }
@@ -60,49 +73,10 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
   const initial = yield* Effect.result(probe)
   if (initial._tag === "Success") {
     const buildProblem = relayBuildProblem(initial.success, buildId)
-    if (!buildProblem) {
-      return { version: initial.success, started: false } satisfies RelayReadiness
-    }
-
-    const restart = yield* prepareStaleRelayRestart({
-      relay: options.relay,
-      version: initial.success,
-      currentBuildId: buildId,
-    })
-    if (restart._tag === "Unsupported") {
-      return { version: initial.success, started: false, buildProblem } satisfies RelayReadiness
-    }
-    if (restart._tag === "Changed") {
-      const replacementProblem = relayBuildProblem(restart.version, buildId)
-      return {
-        version: restart.version,
-        started: false,
-        ...(replacementProblem ? { buildProblem: replacementProblem } : {}),
-      } satisfies RelayReadiness
-    }
-
-    const replacement = yield* waitForRelayExitOrReplacement({
-      relay: options.relay,
-      version: initial.success,
-      ...(options.retryTimes === undefined ? {} : { retryTimes: options.retryTimes }),
-      ...(options.retryDelayMs === undefined ? {} : { retryDelayMs: options.retryDelayMs }),
-    })
-    if (replacement) {
-      const replacementProblem = relayBuildProblem(replacement, buildId)
-      return {
-        version: replacement,
-        started: false,
-        ...(replacementProblem ? { buildProblem: replacementProblem } : {}),
-      } satisfies RelayReadiness
-    }
-
-    yield* options.start ?? startManagedRelay()
-    const version = yield* waitForRelayReady(options)
-    const replacementProblem = relayBuildProblem(version, buildId)
     return {
-      version,
-      started: true,
-      ...(replacementProblem ? { buildProblem: replacementProblem } : {}),
+      version: initial.success,
+      started: false,
+      ...(buildProblem ? { buildProblem } : {}),
     } satisfies RelayReadiness
   }
   const relayWasAbsent = isRelayUnreachable(initial.failure)
@@ -133,41 +107,72 @@ function waitForRelayReady(options: EnsureRelayOptions): Effect.Effect<RelayVers
   )
 }
 
-function prepareStaleRelayRestart(options: {
-  readonly relay: RelayClient.Interface
-  readonly version: RelayVersion
-  readonly currentBuildId: string
-}): Effect.Effect<
-  { readonly _tag: "Stopped" } | { readonly _tag: "Changed"; readonly version: RelayVersion } | { readonly _tag: "Unsupported" },
-  Error | RelayClient.RelayClientError
-> {
-  return Effect.gen(function* () {
+export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (options: EnsureRelayOptions & {
+  readonly clientKind?: RelayShutdownRequest["client"]["kind"]
+}) {
+  const buildId = options.buildId ?? browserControlBuildId
+  const initial = yield* Effect.result(options.relay.version)
+  let original: RelayVersion | undefined
+  let replacement: RelayVersion | undefined
+  let restartRequestId: string | undefined
+  if (initial._tag === "Success") {
+    original = initial.success
+  } else if (isRelayStarting(initial.failure)) {
+    original = yield* waitForRelayReady(options)
+  } else if (!isRelayUnreachable(initial.failure)) {
+    return yield* Effect.fail(initial.failure)
+  }
+
+  if (original) {
+    if (original.managed !== true || !original.instanceId) {
+      return yield* Effect.fail(new Error("Cannot restart a foreground or unidentified relay. Stop it manually, then run `browser-control relay restart`."))
+    }
+    if (original.shutdownProtocol !== 2) {
+      return yield* Effect.fail(new Error("This legacy relay does not support safe shutdown protocol 2. Stop it manually once, then run `browser-control relay restart` to upgrade; no shutdown request was sent."))
+    }
+    if (!Number.isFinite(Date.parse(buildId)) || !original.buildId || !Number.isFinite(Date.parse(original.buildId))) {
+      return yield* Effect.fail(new Error("Cannot explicitly replace a source or unorderable relay build. Stop it manually, then launch the intended build."))
+    }
+    if (isNewerBuild(original.buildId, buildId)) {
+      return yield* Effect.fail(new Error(`Refusing to downgrade relay build ${original.buildId} to ${buildId}; refresh or restart this CLI or MCP client.`))
+    }
+
     const confirmed = yield* Effect.result(options.relay.version)
     if (confirmed._tag === "Failure") {
-      if (isRelayUnreachable(confirmed.failure)) return { _tag: "Stopped" } as const
-      return yield* Effect.fail(confirmed.failure)
+      if (!isRelayUnreachable(confirmed.failure)) return yield* Effect.fail(confirmed.failure)
+    } else if (!isSameRelayInstance(original, confirmed.success)) {
+      replacement = confirmed.success
+    } else {
+      if (confirmed.success.managed !== true || confirmed.success.shutdownProtocol !== 2 || confirmed.success.buildId !== original.buildId) {
+        return yield* Effect.fail(new Error("Relay identity metadata changed during restart; no shutdown request was sent."))
+      }
+      const request = yield* RelayShutdownRequest.makeEffect({
+        instanceId: original.instanceId,
+        requestId: crypto.randomUUID(),
+        reason: "explicit-restart",
+        client: { kind: options.clientKind ?? "sdk", instanceId: clientInstanceId, buildId },
+      })
+      const shutdown = yield* Effect.result(options.relay.shutdown(request))
+      if (shutdown._tag === "Success") restartRequestId = request.requestId
+      else if (!isRelayUnreachable(shutdown.failure) && !isRelayInstanceChanged(shutdown.failure)) {
+        return yield* Effect.fail(shutdown.failure)
+      }
+      replacement = yield* waitForRelayExitOrReplacement({ ...options, version: original })
     }
-    if (!isSameRelayInstance(options.version, confirmed.success)) {
-      return { _tag: "Changed", version: confirmed.success } as const
-    }
-    const instanceId = confirmed.success.instanceId
-    const shutdown = options.relay.shutdown
-    if (
-      confirmed.success.managed !== true
-      || !instanceId
-      || !shutdown
-      || !isNewerBuild(options.currentBuildId, confirmed.success.buildId)
-    ) {
-      return { _tag: "Unsupported" } as const
-    }
-    yield* shutdown(instanceId).pipe(
-      Effect.catch((error) => isRelayUnreachable(error) || isRelayInstanceChanged(error)
-        ? Effect.void
-        : Effect.fail(error)),
-    )
-    return { _tag: "Stopped" } as const
-  })
-}
+  }
+
+  const started = replacement === undefined
+  if (started) {
+    yield* options.start ?? startManagedRelay(undefined, undefined, undefined, { ...(restartRequestId ? { restartRequestId } : {}) })
+    replacement = yield* waitForRelayReady(options)
+  }
+  if (!replacement || !replacement.instanceId || replacement.managed !== true || (original && isSameRelayInstance(original, replacement))) {
+    return yield* Effect.fail(new Error("Relay restart did not produce a new managed instance; no further shutdown was attempted."))
+  }
+  const buildProblem = relayBuildProblem(replacement, buildId)
+  if (buildProblem) return yield* Effect.fail(new Error(`${buildProblem} A competing relay was left untouched.`))
+  return { version: replacement, started, waitForReconnect: true } satisfies RelayReadiness
+})
 
 function waitForRelayExitOrReplacement(options: {
   readonly relay: RelayClient.Interface
@@ -177,7 +182,7 @@ function waitForRelayExitOrReplacement(options: {
 }): Effect.Effect<RelayVersion | undefined, Error | RelayClient.RelayClientError> {
   return options.relay.version.pipe(
     Effect.flatMap((version) => isSameRelayInstance(options.version, version)
-      ? Effect.fail(new RelayStillRunning("Stale Browser Control relay is still running"))
+      ? Effect.fail(new RelayStillRunning("Browser Control relay is still draining; no replacement was started"))
       : Effect.succeed(version)),
     Effect.catch((error) => isRelayUnreachable(error) ? Effect.succeed(undefined) : Effect.fail(error)),
     Effect.retry({
@@ -189,8 +194,7 @@ function waitForRelayExitOrReplacement(options: {
 }
 
 function isSameRelayInstance(left: RelayVersion, right: RelayVersion): boolean {
-  if (left.instanceId || right.instanceId) return left.instanceId !== undefined && left.instanceId === right.instanceId
-  return left.pid !== undefined && right.pid !== undefined && left.pid === right.pid
+  return left.instanceId !== undefined && left.instanceId === right.instanceId
 }
 
 function isNewerBuild(current: string, running: string | undefined): boolean {
@@ -201,7 +205,7 @@ function isNewerBuild(current: string, running: string | undefined): boolean {
 }
 
 function isRelayInstanceChanged(error: unknown): boolean {
-  return error instanceof RelayClient.RelayRejected && error.status === 409
+  return error instanceof RelayClient.RelayRejected && error.status === 409 && error.code === "invalid-request"
 }
 
 export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensionConnected")(function* (options: {
@@ -223,7 +227,7 @@ export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensio
     return status.connected
       ? Effect.succeed(status)
       : Effect.fail(new ExtensionDisconnected({
-        message: "Browser Control extension is not connected. Load extension/dist in Chromium; it reconnects automatically when the relay starts.",
+        message: "Browser Control extension is not connected. Load extension/dist in Chromium; it reconnects automatically after relay or browser startup.",
       }))
   }))
   if (!options.waitForReconnect) {
@@ -256,9 +260,10 @@ export function statusCollections(status: ExtensionStatus): {
 }
 
 export function startManagedRelay(
-  entrypoint = process.argv[1],
+  entrypoint = loadedCliEntrypoint,
   executable = process.execPath,
   execArgv: readonly string[] = process.execArgv,
+  options: { readonly restartRequestId?: string } = {},
 ): Effect.Effect<void, Error> {
   return Effect.try({
     try: () => {
@@ -266,10 +271,11 @@ export function startManagedRelay(
         throw new Error("Cannot locate the browser-control CLI entrypoint")
       }
       const launch = managedRelayLaunch(entrypoint, executable, execArgv)
+      const { BROWSER_CONTROL_RESTART_REQUEST_ID: _inheritedRestartRequestId, ...env } = process.env
       const child = spawn(launch.executable, launch.args, {
         detached: true,
         stdio: "ignore",
-        env: { ...process.env, BROWSER_CONTROL_MANAGED_RELAY: "1" },
+        env: { ...env, BROWSER_CONTROL_MANAGED_RELAY: "1", ...(options.restartRequestId ? { BROWSER_CONTROL_RESTART_REQUEST_ID: options.restartRequestId } : {}) },
       })
       child.unref()
     },
@@ -278,7 +284,7 @@ export function startManagedRelay(
 }
 
 export function managedRelayLaunch(
-  entrypoint: string,
+  entrypoint = loadedCliEntrypoint,
   executable = process.execPath,
   execArgv: readonly string[] = process.execArgv,
 ): { readonly executable: string; readonly args: string[] } {

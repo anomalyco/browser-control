@@ -36,7 +36,7 @@ type PackageInfo = {
   }
 }
 
-export type DoctorArtifact = {
+type DoctorArtifact = {
   readonly path: string
   readonly exists: boolean
   readonly version?: string
@@ -283,7 +283,6 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
     checks,
     recommendations: buildDoctorRecommendations({
       relayResult,
-      relayBuildMatches,
       extensionResult,
       artifacts,
       staleCurrent,
@@ -331,7 +330,7 @@ function buildDoctorChecks(options: {
       id: `artifact-${artifact.path}`,
       label: artifact.path,
       status: artifact.exists ? "ok" : "warn",
-      message: artifact.exists ? artifact.version ? `exists (${artifact.version})` : "exists" : "missing; run pnpm build",
+      message: artifact.exists ? artifact.version ? `exists (${artifact.version})` : "exists" : "missing; prepare a fresh runtime",
     }
   })
   return [
@@ -540,7 +539,6 @@ export function extensionProtocolCheck(extensionResult: ProbeResult<ExtensionSta
 
 function buildDoctorRecommendations(options: {
   readonly relayResult: ProbeResult<RelayVersion>
-  readonly relayBuildMatches: boolean | null
   readonly extensionResult: ProbeResult<ExtensionStatus>
   readonly artifacts: readonly DoctorArtifact[]
   readonly staleCurrent: boolean
@@ -552,9 +550,9 @@ function buildDoctorRecommendations(options: {
   const relayRecommendations = options.relayResult.ok ? [] : [
     "Run a relay-backed command to start the detached relay automatically; use `browser-control serve` only for foreground debugging.",
   ]
-  const relayBuildRecommendations = options.relayResult.ok && options.relayBuildMatches !== true ? [
-    "Restart the relay with `browser-control serve` so it uses the current CLI build.",
-  ] : []
+  const relayBuildRecommendations = options.relayResult.ok
+    ? [relayBuildProblem(options.relayResult.value)].filter((message) => message !== undefined)
+    : []
   const extensionRecommendations = options.relayResult.ok && options.extensionResult.ok && !options.extensionResult.value.connected
     ? options.extensionResult.value.protocolCompatible === false
       ? ["Update the Browser Control extension or npm package so their extension protocols are compatible."]
@@ -562,7 +560,7 @@ function buildDoctorRecommendations(options: {
     : []
   const artifactRecommendations = options.artifacts.some((artifact) => {
     return !artifact.exists
-  }) ? ["Run `pnpm build` to regenerate missing CLI or extension artifacts."] : []
+  }) ? ["Prepare and select a fresh validated runtime with `pnpm runtime:prepare` / `pnpm runtime:select`; do not rebuild the active installation."] : []
   const connectionConflictRecommendations = options.extensionResult.ok && (options.extensionResult.value.rejectedConnections ?? 0) > 0
     ? ["Reload older Browser Control extensions so each profile advertises its own persistent identity. Use `browser-control profile list` and select a profile with `--profile`; existing sessions remain pinned."]
     : []

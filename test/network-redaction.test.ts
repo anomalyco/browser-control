@@ -50,6 +50,16 @@ describe("SecretCollector", () => {
       .toBe("csrf_token=${BC_SECRET_1}&name=kit")
   })
 
+  it("preserves duplicate form fields and counts empty secret occurrences", () => {
+    const collector = new SecretCollector()
+    expect(collector.protectBody("token=&name=one&token=first&name=two&token=second", "application/x-www-form-urlencoded", "request", "POST /api"))
+      .toBe("token=&name=one&token=${BC_SECRET_1}&name=two&token=${BC_SECRET_2}")
+    expect(collector.slots()).toEqual([
+      { ref: "BC_SECRET_1", value: "first", sources: ["POST /api.request.form.token.1"] },
+      { ref: "BC_SECRET_2", value: "second", sources: ["POST /api.request.form.token.2"] },
+    ])
+  })
+
   it("redacts multipart credential fields and preserves their placement", () => {
     const collector = new SecretCollector()
     const body = [

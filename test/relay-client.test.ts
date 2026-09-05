@@ -3,6 +3,7 @@ import { Effect } from "effect"
 import { FetchHttpClient } from "effect/unstable/http"
 import http from "node:http"
 import * as RelayClient from "../src/relay-client.ts"
+import type { RelayShutdownRequest } from "../src/relay-schema.ts"
 
 type CannedResponse = {
   readonly status: number
@@ -66,11 +67,26 @@ const session = {
 }
 
 describe("RelayClient", () => {
-  it("sends the guarded relay shutdown request", async () => {
+  it("requests shutdown for an exact relay instance", async () => {
     routes.set("POST /shutdown", { status: 200, body: { stopping: true } })
-    const result = await withClient((client) => client.shutdown!("relay-instance"))
+    const request: RelayShutdownRequest = {
+      instanceId: "relay-test",
+      requestId: "request-test",
+      reason: "explicit-restart",
+      client: { kind: "cli", instanceId: "client-test", buildId: "2026-08-31T12:00:00.000Z" },
+    }
+    const result = await withClient((client) => client.shutdown(request))
     expect(result).toEqual({ stopping: true })
-    expect(lastRequestBody).toEqual({ instanceId: "relay-instance" })
+    expect(lastRequestBody).toEqual(request)
+  })
+
+  it("preserves the relay-busy shutdown rejection", async () => {
+    routes.set("POST /shutdown", { status: 409, body: { error: "Relay is busy", code: "relay-busy" } })
+    const error = await withClient((client) => client.shutdown({
+      instanceId: "relay-test", requestId: "request-test", reason: "explicit-restart",
+      client: { kind: "sdk", instanceId: "client-test", buildId: "2026-08-31T12:00:00.000Z" },
+    }).pipe(Effect.flip))
+    expect(error).toMatchObject({ message: "Relay is busy", status: 409, code: "relay-busy" })
   })
 
   it("decodes sessions", async () => {

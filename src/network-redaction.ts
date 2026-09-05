@@ -84,16 +84,8 @@ export class SecretCollector {
       }
     }
     if (type.includes("application/x-www-form-urlencoded")) {
-      const params = new URLSearchParams(body)
-      const protectedParams = new URLSearchParams()
-      const occurrences = new Map<string, number>()
-      for (const [name, value] of params) {
-        const occurrence = occurrences.get(name) ?? 0
-        occurrences.set(name, occurrence + 1)
-        protectedParams.append(name, value && secretNamePattern.test(name)
-          ? this.reference(value, sourceName(requestScope, `${location}.form.${name}`, occurrence))
-          : value)
-      }
+      const protectedParams = protectSearchParams(new URLSearchParams(body), (name, value, occurrence) =>
+        this.reference(value, sourceName(requestScope, `${location}.form.${name}`, occurrence)))
       return restoreReferencePlaceholders(protectedParams.toString())
     }
     if (type.includes("multipart/form-data")) {
@@ -314,7 +306,7 @@ export function redactKnownValues(text: string, slots: readonly CredentialSlot[]
     .reduce((output, slot) => replaceOutsideReferences(output, slot.value, `\${${slot.ref}}`), text)
 }
 
-export function redactSecretShapedValue(value: unknown): unknown {
+function redactSecretShapedValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redactSecretShapedValue)
   if (!value || typeof value !== "object") return value
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [

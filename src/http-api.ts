@@ -40,13 +40,14 @@ import type { RecordingStartOptions, RecordingTargetOptions } from "./recording-
 import type { RelayProfiles, RelayProfileRuntime } from "./relay.ts"
 import { TargetOwnershipError, type TargetRegistry } from "./target-registry.ts"
 import { browserControlBuildId, browserControlVersion } from "./version.ts"
+import { RelayShutdown, RelayShutdownError } from "./relay-shutdown.ts"
 
 export function createHttpRequestHandler(options: {
   readonly host: string
   readonly port: number
   readonly browserId: string
   readonly relayInstance: { readonly id: string; readonly startedAt: string; readonly pid: number; readonly managed: boolean }
-  readonly shutdown: () => void
+  readonly shutdown: RelayShutdown
   readonly profiles: RelayProfiles
   readonly extensionStatus?: () => Pick<ExtensionStatus, "connected" | "version" | "protocolVersion" | "protocolCompatible" | "protocolLegacy" | "rejectedConnections" | "cdpClients" | "profiles">
 }): (request: http.IncomingMessage, response: http.ServerResponse) => void {
@@ -63,6 +64,10 @@ export function createHttpRequestHandler(options: {
     }
     const requestUrl = new URL(request.url ?? "/", `http://${formatHostForUrl(options.host)}:${options.port}`)
     const pathname = requestUrl.pathname.replace(/\/$/, "") || "/"
+    const observational = request.method === "GET" || pathname === "/network/status" || pathname === "/auth/status"
+    const run = (effect: Effect.Effect<void, Error>, settle = false): void => {
+      runRequestEffect(response, observational ? effect : options.shutdown.track(settle ? Effect.uninterruptible(effect) : effect))
+    }
     if (pathname === "/" || pathname === "/version") {
       sendJson(response, {
         version: browserControlVersion,
@@ -71,20 +76,14 @@ export function createHttpRequestHandler(options: {
         startedAt: options.relayInstance.startedAt,
         pid: options.relayInstance.pid,
         managed: options.relayInstance.managed,
+        shutdownProtocol: 2,
       })
       return
     }
     if (pathname === "/shutdown" && request.method === "POST") {
       runRequestEffect(response, Effect.gen(function* () {
         const body = yield* decodeRequest(RelayShutdownRequest, yield* readJsonBody(request), "relay shutdown")
-        if (!options.relayInstance.managed || body.instanceId !== options.relayInstance.id) {
-          return yield* Effect.fail(new HttpRouteError({
-            message: "Relay shutdown does not match the active managed instance",
-            status: 409,
-            code: "invalid-request",
-          }))
-        }
-        response.once("finish", options.shutdown)
+        yield* options.shutdown.request(body)
         sendJson(response, { stopping: true })
       }))
       return
@@ -152,7 +151,7 @@ export function createHttpRequestHandler(options: {
       return
     }
     if (pathname === "/profiles/name" && request.method === "POST") {
-      runRequestEffect(response, Effect.gen(function* () {
+      run(Effect.gen(function* () {
         const body = yield* decodeRequest(BrowserProfileNameRequest, yield* readJsonBody(request), "profile name")
         const runtime = options.profiles.select({ profileId: body.profileId })
         const profile = yield* Effect.tryPromise({
@@ -160,23 +159,23 @@ export function createHttpRequestHandler(options: {
           catch: (cause) => cause instanceof Error ? cause : new Error("Rename browser profile", { cause }),
         })
         sendJson(response, profile)
-      }))
+      }), true)
       return
     }
     if (pathname.startsWith("/recording/")) {
-      runRequestEffect(response, handleRecordingRequest({ request, response, pathname, requestUrl, profiles: options.profiles }))
+      run(handleRecordingRequest({ request, response, pathname, requestUrl, profiles: options.profiles }), true)
       return
     }
     if (pathname.startsWith("/network/")) {
-      runRequestEffect(response, handleNetworkRequest({ request, response, pathname, profiles: options.profiles }))
+      run(handleNetworkRequest({ request, response, pathname, profiles: options.profiles }))
       return
     }
     if (pathname.startsWith("/auth/")) {
-      runRequestEffect(response, handleAuthRequest({ request, response, pathname, profiles: options.profiles }))
+      run(handleAuthRequest({ request, response, pathname, profiles: options.profiles }), pathname === "/auth/run")
       return
     }
     if (pathname.startsWith("/v1/")) {
-      runRequestEffect(response, handleClientRequest({
+      run(handleClientRequest({
         request,
         response,
         pathname,
@@ -185,7 +184,7 @@ export function createHttpRequestHandler(options: {
       return
     }
     if (pathname.startsWith("/cli/")) {
-      runRequestEffect(response, handleCliRequest({
+      run(handleCliRequest({
         request,
         response,
         pathname,
@@ -244,7 +243,7 @@ function handleNetworkRequest(options: {
     }
     if (options.pathname === "/network/status" && options.request.method === "POST") {
       const request = yield* decodeRequest(NetworkSessionRequest, yield* readJsonBody(options.request), "network status")
-      const { sessions } = yield* options.profiles.bind({ sessionId: request.sessionId })
+      const { sessions } = options.profiles.select({ sessionId: request.sessionId })
       sendJson(options.response, yield* sessions.networkStatus(request.sessionId))
       return
     }
@@ -323,18 +322,13 @@ function handleRecordingRequest(options: {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(RecordingStartRequest, body, "recording start")
       const { registry, recordingRelay } = recordingProfile(options.profiles, request)
-      const target = resolveAttachedRecordingTarget({ registry, tabId: request.tabId, sessionId: request.sessionId })
+      const { tabId, sessionId, profileId: _profileId, ...recordingOptions } = request
+      const target = resolveAttachedRecordingTarget({ registry, tabId, sessionId })
       const startOptions: RecordingStartOptions = {
+        ...recordingOptions,
         tabId: target.tabId,
         ...(target.sessionId ? { sessionId: target.sessionId } : {}),
         owner: target.owner,
-        outputPath: request.outputPath,
-        ...(request.mode === undefined ? {} : { mode: request.mode }),
-        ...(request.frameRate === undefined ? {} : { frameRate: request.frameRate }),
-        ...(request.audio === undefined ? {} : { audio: request.audio }),
-        ...(request.videoBitsPerSecond === undefined ? {} : { videoBitsPerSecond: request.videoBitsPerSecond }),
-        ...(request.audioBitsPerSecond === undefined ? {} : { audioBitsPerSecond: request.audioBitsPerSecond }),
-        ...(request.maxDurationMs === undefined ? {} : { maxDurationMs: request.maxDurationMs }),
       }
       const result = yield* Effect.tryPromise({
         try: () => recordingRelay.startRecording(startOptions),
@@ -453,10 +447,9 @@ function handleCliRequest(options: {
         ...(requestedSessionId ? { sessionId: requestedSessionId } : {}),
         ...(request.profileId ? { profileId: request.profileId } : {}),
       })
-      const targetSelection = request.targetSelection
       const selectedTarget = selectTarget({
         targets: registry.listRootTargets(),
-        selection: targetSelection,
+        selection: request.targetSelection,
         getUrl: (target) => target.targetInfo.url,
       })
       if (!selectedTarget) {
@@ -480,12 +473,11 @@ function handleCliRequest(options: {
         ...(requestedSessionId ? { sessionId: requestedSessionId } : {}),
         ...(request.profileId ? { profileId: request.profileId } : {}),
       })
-      const targetSelection = request.targetSelection
       const { result, session } = yield* sessions.execute({
         ...(requestedSessionId ? { sessionId: requestedSessionId } : {}),
         code: request.code,
         createIfMissing: request.createIfMissing,
-        ...(targetSelection ? { targetSelection } : {}),
+        ...(request.targetSelection ? { targetSelection: request.targetSelection } : {}),
       })
       const { setupFailed: _setupFailed, ...wireResult } = result
       sendJson(options.response, { ...wireResult, session })
@@ -598,13 +590,11 @@ function recordingTargetFromValues(options: { readonly registry: TargetRegistry;
 
 function recordingTargetFromQuery(options: { readonly registry: TargetRegistry; readonly searchParams: URLSearchParams }): RecordingTargetOptions {
   const tabIdText = options.searchParams.get("tabId")
-  const sessionId = options.searchParams.get("sessionId") ?? undefined
-  const tabId = tabIdText ? optionalInteger(Number(tabIdText), "tabId") : undefined
-  const target = sessionId ? options.registry.getRootTargetBySessionId(sessionId) : undefined
-  return {
-    ...(tabId === undefined ? {} : { tabId }),
-    ...(target?.sessionId ? { sessionId: target.sessionId } : sessionId ? { sessionId } : {}),
-  }
+  return recordingTargetFromValues({
+    registry: options.registry,
+    tabId: tabIdText ? Number(tabIdText) : undefined,
+    sessionId: options.searchParams.get("sessionId") ?? undefined,
+  })
 }
 
 function optionalInteger(value: unknown, field: string): number | undefined {
@@ -617,7 +607,10 @@ function optionalInteger(value: unknown, field: string): number | undefined {
   return value
 }
 
-export function relayHttpError(error: unknown): HttpRouteError {
+function relayHttpError(error: unknown): HttpRouteError {
+  if (error instanceof RelayShutdownError) {
+    return new HttpRouteError({ message: error.message, status: 409, code: error.reason === "busy" ? "relay-busy" : "invalid-request" })
+  }
   if (error instanceof HttpRouteError) {
     return error
   }

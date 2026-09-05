@@ -1,5 +1,40 @@
 # @opencode-ai/browser-control
 
+## 0.6.0
+
+### Minor Changes
+
+- bb6b3d2: Require explicit `browser-control relay restart` for managed relay replacement.
+  Ordinary clients still start an absent relay, but never upgrade one behind other
+  clients. Safe shutdown protocol 2 attributes restart requests and drains accepted
+  work without cancelling its browser transport; legacy relays require a coordinated
+  manual stop once. Add isolated candidate preparation and installation selection.
+  
+  Preserve nested staged targets during root replacement and report catalog sync
+  failures instead of treating readable bytes as proof of durability.
+
+### Patch Changes
+
+- 26dd2d5: Pin the shared Node platform to the same Effect prerelease as the CLI runtime,
+  preventing incompatible scope layouts in fresh standalone installations. Validate
+  the packed dependency cohort, CLI, and SDK in an isolated pnpm consumer before
+  accepting a runtime candidate or publishing through the release workflow.
+- 6bda258: Preserve the active browser connection when another browser or profile connects, with contention diagnostics and bounded liveness recovery. Keep pages intact when Chromium blocks protected password-manager extension UI and explain the required user action.
+  
+  Restore opt-in defaults for CLI boolean flags so commands work without explicitly passing `--json`, `--read-only`, or `--audio`.
+- bb6b3d2: Upgrade Effect and its Node platform to 4.0.0-rc.112 while preserving explicit CLI boolean defaults and the existing MCP protocol adapters. Obsolete 2024-10-07 MCP offers negotiate 2025-06-18.
+- 9c5b377: Skip crashed session-owned roots when routing named browser-context commands,
+  without changing raw-client ambiguity or explicit target visibility and routing.
+  Preserve exhausted root-probe errors and reject malformed target information for
+  committed roots as well as staged roots. Failed inventory readiness closes the
+  extension connection and clears live target state rather than reporting success.
+- bb6b3d2: Keep CDP attachment and alias cleanup consistent across target replacement,
+  detachment, and ownership changes. Ignore target updates from retired session
+  sandboxes so reset or recreated sessions retain their own persisted identity.
+- bb6b3d2: Keep Runtime enable recovery tied to the original target generation and client
+  visibility instead of resetting a successor target after a delayed response.
+  Verify handoff readiness against the selected page, not an unrelated default page.
+
 ## 0.5.1
 
 ### Patch Changes
