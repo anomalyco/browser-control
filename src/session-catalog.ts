@@ -28,7 +28,7 @@ export function defaultSessionCatalogPath(port: number, home = os.homedir()): st
 }
 
 export class SessionCatalog {
-  constructor(readonly filePath: string) {}
+  constructor(readonly filePath: string, private readonly platform: NodeJS.Platform = process.platform) {}
 
   async load(): Promise<readonly PersistedSession[]> {
     let text: string
@@ -63,11 +63,16 @@ export class SessionCatalog {
       await temporaryFile.close()
       temporaryFile = undefined
       await fs.rename(temporaryPath, this.filePath)
-      const directoryHandle = await fs.open(directory, "r")
-      try {
-        await directoryHandle.sync()
-      } finally {
-        await directoryHandle.close()
+      // Windows cannot fsync a directory handle (Node reports EPERM), so the
+      // file sync before the atomic rename is the strongest durability
+      // guarantee available there. Keep the directory sync everywhere else.
+      if (this.platform !== "win32") {
+        const directoryHandle = await fs.open(directory, "r")
+        try {
+          await directoryHandle.sync()
+        } finally {
+          await directoryHandle.close()
+        }
       }
     } catch (error) {
       try {

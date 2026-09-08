@@ -90,6 +90,40 @@ describe("SessionCatalog", () => {
     await expect(catalog.load()).resolves.toEqual(next)
   })
 
+  it("skips the directory sync on Windows, where fsync on a directory handle fails with EPERM", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "browser-control-session-catalog-"))
+    temporaryDirectories.push(home)
+    const filePath = defaultSessionCatalogPath(20001, home)
+    const directory = path.dirname(filePath)
+    const catalog = new SessionCatalog(filePath, "win32")
+    const sessions: PersistedSession[] = [{ id: "alpha", createdAt: "now", updatedAt: "now", readOnly: false }]
+    const eperm = Object.assign(new Error("EPERM: operation not permitted, fsync"), { code: "EPERM", syscall: "fsync" })
+    const open = fsPromises.open.bind(fsPromises)
+    const directoryOpens: string[] = []
+    const fileSyncs: Array<ReturnType<typeof vi.fn>> = []
+    vi.spyOn(fsPromises, "open").mockImplementation(async (file, flags, mode) => {
+      if (file === directory) directoryOpens.push(String(file))
+      const handle = await open(file, flags, mode)
+      if (file === directory) {
+        vi.spyOn(handle, "sync").mockRejectedValue(eperm)
+      } else {
+        fileSyncs.push(vi.spyOn(handle, "sync"))
+      }
+      return handle
+    })
+
+    await expect(catalog.save(sessions)).resolves.toBeUndefined()
+
+    await expect(catalog.load()).resolves.toEqual(sessions)
+    expect(directoryOpens).toEqual([])
+    expect(fileSyncs).toHaveLength(1)
+    expect(fileSyncs[0]).toHaveBeenCalledOnce()
+    expect(fs.readdirSync(directory)).toEqual(["sessions.json"])
+
+    // The same injected failure still fails the save on platforms that support directory fsync.
+    await expect(new SessionCatalog(filePath, "linux").save(sessions)).rejects.toMatchObject({ cause: eperm })
+  })
+
   it("still removes the temporary file if closing it fails during cleanup", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "browser-control-session-catalog-"))
     temporaryDirectories.push(home)
