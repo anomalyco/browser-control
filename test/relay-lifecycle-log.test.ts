@@ -96,6 +96,18 @@ describe("relay lifecycle log", () => {
     expect(synced).toEqual(["file", "directory"])
   })
 
+  it.each(["EPERM", "EINVAL", "ENOTSUP"])("tolerates unsupported directory sync error %s", (code) => {
+    const failure = Object.assign(new Error(`${code}: directory sync is unsupported`), { code })
+    const sync = fs.fsyncSync.bind(fs)
+    vi.spyOn(fs, "fsyncSync").mockImplementation((fd) => {
+      if (fs.fstatSync(fd).isDirectory()) throw failure
+      sync(fd)
+    })
+
+    expect(() => appendRelayLifecycleEvent(file, RelayLifecycleEvent.cases.Requested.make(fields))).not.toThrow()
+    expect(fs.readFileSync(file, "utf8")).toContain('"_tag":"Requested"')
+  })
+
   it("omits expressions, URLs, credentials, and unknown nested metadata", () => {
     const event = {
       ...RelayLifecycleEvent.cases.Requested.make(fields),
