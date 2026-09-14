@@ -9,6 +9,11 @@ Browser Control is a **driver**, not an agent. The calling agent decides what to
 do; Browser Control runs deterministic Playwright code in the user's visible
 browser.
 
+When Browser Control is installed as an OpenCode plugin, the plugin already
+registers this MCP server and exposes the packaged workflow as the `@browser`
+skill. Do not ask the user to install this skill separately or add an MCP
+configuration. Browser extension approval remains a separate user step.
+
 Use one loop throughout: **inspect, act, verify**. Inspect the real page before
 choosing locators, act through the narrowest stable control, then verify the
 result through a URL or fresh page read. Never treat a successful click or human

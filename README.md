@@ -18,9 +18,44 @@ the result, logs, warnings, and a summary of what changed.
 Browser Control requires Node.js 22.19 or newer and a Chromium-family browser such
 as Chrome, Brave, Edge, Arc, or Chromium.
 
-Setup has three parts: install the npm package, install the agent skill, and
-load the included browser extension. Add MCP only when your agent prefers MCP
-tools over shell commands.
+OpenCode can install Browser Control as one managed plugin. Other agents use
+the manual CLI, skill, and optional MCP setup below. Every path still requires
+the user-approved browser extension.
+
+### OpenCode plugin
+
+Install the package through OpenCode:
+
+```bash
+opencode plugin add @opencode-ai/browser-control
+```
+
+OpenCode installs the package and its dependencies in its managed cache,
+registers the packaged MCP entrypoint, and registers its bundled workflow as the
+`browser` skill. OpenCode's existing skill autocomplete then exposes `@browser`.
+Do not separately install the Browser Control skill or add an MCP configuration
+when using this path.
+
+```text
+@browser Open example.com and return the page title.
+```
+
+Selecting `@browser` attaches the complete bundled workflow through OpenCode's
+existing skill system. The Chromium extension remains a manual, user-approved
+installation. If it is not connected, ask:
+
+```text
+@browser Check Browser Control setup and show me the extension directory.
+```
+
+The registered skill supplies the exact unpacked-extension directory from
+OpenCode's managed package installation.
+
+### Manual setup
+
+Manual setup has three parts: install the npm package, install the agent skill,
+and load the included browser extension. Add MCP only when your agent prefers
+MCP tools over shell commands.
 
 ### 1. Install the CLI
 
@@ -59,7 +94,7 @@ The skill and MCP server do different jobs. The skill teaches the workflow; MCP
 exposes Browser Control as tools. Agents that can run shell commands need only
 the skill. Add MCP when your client prefers MCP tools.
 
-For OpenCode:
+For OpenCode installations that do not use the package plugin:
 
 ```jsonc
 // opencode.json
