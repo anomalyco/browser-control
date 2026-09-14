@@ -134,6 +134,16 @@ _Avoid_: Current-session store, session journal, sandbox snapshot
 The implicit persistent execute sandbox owned by one running MCP server process.
 _Avoid_: Explicit MCP session id
 
+**OpenCode Plugin Installation**:
+The package-managed Browser Control installation selected by OpenCode. Its
+server entrypoint registers the adjacent packaged MCP executable and the
+packaged workflow as an OpenCode skill, then exposes the `@browser` capability
+through OpenCode's existing skill mentions, without global npm installation,
+install scripts, separate skill installation, or hand-written MCP configuration. Browser
+extension approval remains separate, with its package-local directory supplied
+through skill guidance.
+_Avoid_: Global Browser Control installation, postinstall bootstrap
+
 **Network Capture**:
 A session-owned recording of normalized request/response exchanges from the
 session's current default page and its child frames. It survives individual

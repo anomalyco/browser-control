@@ -32,6 +32,7 @@ await Promise.all([
       cli: path.join(root, "src", "cli.ts"),
       index: path.join(root, "src", "index.ts"),
       mcp: path.join(root, "src", "mcp-main.ts"),
+      opencode: path.join(root, "src", "opencode.ts"),
     },
     bundle: true,
     format: "esm",

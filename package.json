@@ -16,6 +16,10 @@
     ".": {
       "types": "./dist/types/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/types/opencode.d.ts",
+      "import": "./dist/opencode.js"
     }
   },
   "files": [
