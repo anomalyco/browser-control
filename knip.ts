@@ -7,6 +7,7 @@ export default {
     "src/index.ts!",
     "src/cli.ts!",
     "src/mcp-main.ts!",
+    "src/opencode.ts!",
     // Browser-loaded roots from manifest.json, offscreen.html, and build-extension.ts.
     "extension/src/background.ts!",
     "extension/src/content-script.ts!",

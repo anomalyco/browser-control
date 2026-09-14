@@ -124,6 +124,19 @@ Verification:
 
 ## Recently Shipped
 
+### OpenCode installs Browser Control as one managed plugin
+
+The published package exposes an OpenCode server entrypoint. `opencode plugin
+add @opencode-ai/browser-control` installs one managed package that registers
+its adjacent MCP bundle, registers its packaged workflow as an OpenCode skill,
+and exposes it as `@browser` through OpenCode's existing skill mentions;
+OpenCode users do not separately install the skill or edit MCP configuration.
+OpenCode disables dependency
+install scripts, and this integration does not rely on lifecycle scripts or a
+global executable. The unpacked browser extension remains a separate,
+user-approved installation; skill guidance carries its exact directory from
+the managed package.
+
 ### Session cleanup is safely repeatable
 
 Deleting a resolved session id is idempotent across HTTP, CLI, and MCP. The

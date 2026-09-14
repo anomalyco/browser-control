@@ -26,7 +26,16 @@ async function fixture(options: { readonly mcpProbe?: "startup" | "initialize" |
   for (const relative of ["src", "scripts", "extension/src", "extension/icons", "extension/dist", "dist", "node_modules", "skills/browser-control"]) {
     await fs.mkdir(path.join(source, relative), { recursive: true })
   }
-  await fs.writeFile(path.join(source, "package.json"), JSON.stringify({ name: packageName, version: "1.2.3", packageManager: "pnpm@11.20.0", type: "module", exports: "./dist/index.js" }))
+  await fs.writeFile(path.join(source, "package.json"), JSON.stringify({
+    name: packageName,
+    version: "1.2.3",
+    packageManager: "pnpm@11.20.0",
+    type: "module",
+    exports: {
+      ".": "./dist/index.js",
+      "./server": "./dist/opencode.js",
+    },
+  }))
   for (const relative of ["pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.json", "tsconfig.build.json", "extension/manifest.json", "README.md", "LICENSE"]) {
     await fs.writeFile(path.join(source, relative), "fixture")
   }
@@ -76,6 +85,14 @@ async function fixture(options: { readonly mcpProbe?: "startup" | "initialize" |
       await fs.copyFile(path.join(staging, "package.json"), path.join(pkg, "package.json"))
       await fs.cp(path.join(staging, "skills"), path.join(pkg, "skills"), { recursive: true })
       await fs.writeFile(path.join(pkg, "dist/index.js"), "export const BrowserControlClient = { Service: {} }; export const AuthenticatedOrigin = { reveal() {} }; export const SecretProfile = { run() {}, Error: class extends Error {} };\n")
+      await fs.writeFile(path.join(pkg, "dist/opencode.js"), `
+import { fileURLToPath } from 'node:url';
+import fs from 'node:fs/promises';
+export const mcpServerConfig = () => ({ type: 'local', command: ['node', fileURLToPath(new URL('./mcp.js', import.meta.url))] });
+export const extensionDirectory = () => fileURLToPath(new URL('../extension/dist', import.meta.url));
+export const skillDefinition = async () => ({ id: 'browser', location: fileURLToPath(new URL('../skills/browser-control/SKILL.md', import.meta.url)), content: await fs.readFile(new URL('../skills/browser-control/SKILL.md', import.meta.url), 'utf8') + extensionDirectory() });
+export default { id: 'browser-control' };
+`)
       await fs.writeFile(path.join(pkg, "dist/cli.js"), `#!/usr/bin/env node
 import fs from 'node:fs';
 const argument = process.argv[2];
