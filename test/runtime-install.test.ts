@@ -26,7 +26,7 @@ async function fixture(options: { readonly mcpProbe?: "startup" | "initialize" |
   for (const relative of ["src", "scripts", "extension/src", "extension/icons", "extension/dist", "dist", "node_modules", "skills/browser-control"]) {
     await fs.mkdir(path.join(source, relative), { recursive: true })
   }
-  await fs.writeFile(path.join(source, "package.json"), JSON.stringify({ name: packageName, version: "1.2.3", packageManager: "pnpm@11.20.0", type: "module", exports: "./dist/index.js" }))
+  await fs.writeFile(path.join(source, "package.json"), JSON.stringify({ name: packageName, version: "1.2.3", packageManager: "pnpm@11.20.0", type: "module", exports: "./dist/index.js", dependencies: { effect: "4.0.0-rc.112", "@effect/platform-node": "4.0.0-rc.112" } }))
   for (const relative of ["pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.json", "tsconfig.build.json", "extension/manifest.json", "README.md", "LICENSE"]) {
     await fs.writeFile(path.join(source, relative), "fixture")
   }
@@ -69,6 +69,7 @@ async function fixture(options: { readonly mcpProbe?: "startup" | "initialize" |
       return "package.tgz\n"
     }
     if (command === "npm" && args[0] === "install") {
+      expect(JSON.parse(await fs.readFile(path.join(install, "package.json"), "utf8")).overrides).toEqual({ effect: "4.0.0-rc.112", "@effect/platform-node-shared": "4.0.0-rc.112" })
       expect(args).toContain("--ignore-scripts")
       expect(cwd).toBe(install)
       const pkg = path.join(install, "node_modules", packageName)

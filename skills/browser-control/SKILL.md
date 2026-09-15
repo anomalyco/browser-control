@@ -71,6 +71,13 @@ browser-control execute --target-url github.com 'return page.url()'
 browser-control session adopt --target-url github.com --session github
 ```
 
+`execute --target-url` selects a page for that call only. Continuing with just
+`--session` uses the session's default page, which may still be `about:blank`.
+For a multi-step task in an existing user tab, adopt it first. Always include
+`page.url()` when diagnosing an empty snapshot. Snapshot labels are compact
+descriptions; use `ref()` for actions rather than assuming their text is an
+exact Playwright accessible name.
+
 `targetUrl` and `targetIndex` select existing attached pages; they never
 navigate. A URL selector must match exactly one page, and URL and index selectors
 cannot be combined. Adoption makes that tab the session default, closes the

@@ -13,6 +13,10 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const packageName = "@opencode-ai/browser-control"
 const markerName = ".browser-control-runtime.json"
 const manifestSchema = Schema.Struct({ name: Schema.Literal(packageName), version: Schema.String })
+const sourceManifestSchema = Schema.Struct({
+  name: Schema.Literal(packageName), version: Schema.String,
+  dependencies: Schema.Struct({ effect: Schema.String, "@effect/platform-node": Schema.String }),
+})
 const markerSchema = Schema.Struct({ format: Schema.Literal(1), version: Schema.String, digest: Schema.String })
 const inputs = [
   "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.json", "tsconfig.build.json",
@@ -253,7 +257,7 @@ export const prepareRuntime = Effect.fn("RuntimeInstall.prepare")(function* (
     }
   })
   const manifest = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Struct({
-    ...manifestSchema.fields, packageManager: Schema.String,
+    ...sourceManifestSchema.fields, packageManager: Schema.String,
   })))(
     yield* attempt(() => fs.readFile(path.join(staging, "package.json"), "utf8")),
   )
@@ -265,7 +269,14 @@ export const prepareRuntime = Effect.fn("RuntimeInstall.prepare")(function* (
   if (archives.length !== 1 || !archives[0]?.endsWith(".tgz")) return yield* Effect.fail(new Error("Expected one packed tarball"))
   const archive = path.join(staging, "artifacts", archives[0])
   yield* validatePnpmConsumer(staging, archive, manifest.version, manifest.packageManager, run)
-  yield* attempt(() => fs.writeFile(path.join(install, "package.json"), '{"private":true,"type":"module"}\n', { flag: "wx" }))
+  // npm can satisfy platform-node's peer with a newer Effect prerelease while
+  // nesting our pinned Effect, splitting service identities at runtime.
+  yield* attempt(() => fs.writeFile(path.join(install, "package.json"), JSON.stringify({
+    private: true, type: "module", overrides: {
+      effect: manifest.dependencies.effect,
+      "@effect/platform-node-shared": manifest.dependencies["@effect/platform-node"],
+    },
+  }) + "\n", { flag: "wx" }))
   yield* run("npm", ["install", "--prefix", install, "--ignore-scripts", "--no-audit", "--no-fund", "--omit=dev", archive], install)
   yield* attempt(() => fs.symlink("node_modules/.bin", path.join(install, "bin")))
   const installedPackage = path.join(install, "node_modules", packageName)

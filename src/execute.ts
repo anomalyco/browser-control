@@ -1324,11 +1324,11 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         return normalize(element.getAttribute("title") ?? "")
       }
       const safeText = (element: Element): string => {
-        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT)
+        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT)
         const parts: string[] = []
         let node = walker.nextNode()
         while (node) {
-          const parent = node.parentElement
+          const parent = node instanceof Element ? node : node.parentElement
           let hidden = false
           let ancestor = parent
           while (ancestor && element.contains(ancestor)) {
@@ -1341,7 +1341,8 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
             ancestor = ancestor.parentElement
           }
           if (!hidden && !parent?.closest("input, textarea, select, script, style")) {
-            parts.push(node.textContent ?? "")
+            if (node.nodeType === Node.TEXT_NODE) parts.push(node.textContent ?? "")
+            else if (node instanceof HTMLImageElement) parts.push(node.getAttribute("alt") ?? "")
           }
           node = walker.nextNode()
         }
