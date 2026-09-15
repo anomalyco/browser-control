@@ -221,7 +221,7 @@ function startGroupReconciliation(currentGeneration: number): void {
 }
 
 async function reannounceAttachedTabs(currentSocket: WebSocket): Promise<void> {
-  for (const tabId of await getAttachedTabIds()) {
+  for (const tabId of await getOwnedDebuggerTabIds(chrome.debugger)) {
     sendOnSocket(currentSocket, { method: "debugger.attached", params: { tabId } })
   }
 }
@@ -465,7 +465,7 @@ async function reconcileBrowserControlGroups(currentGeneration: number): Promise
   }
   const groups = await chrome.tabGroups.query({})
   assertCurrentGeneration(currentGeneration)
-  const attachedTabIds = await getAttachedTabIds()
+  const attachedTabIds = await getOwnedDebuggerTabIds(chrome.debugger)
   assertCurrentGeneration(currentGeneration)
   for (const group of groups) {
     if (!isBrowserControlGroupTitle(group.title)) {
@@ -489,10 +489,6 @@ async function reconcileBrowserControlGroups(currentGeneration: number): Promise
   }
 }
 
-async function getAttachedTabIds(): Promise<Set<number>> {
-  return getOwnedDebuggerTabIds(chrome.debugger)
-}
-
 async function groupBrowserControlTab(tabId: number, currentSocket: WebSocket): Promise<JsonObject> {
   const tab = await chrome.tabs.get(tabId)
   if (tab.groupId !== undefined && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
@@ -503,7 +499,7 @@ async function groupBrowserControlTab(tabId: number, currentSocket: WebSocket): 
   }
   const groups = await chrome.tabGroups.query({ windowId: tab.windowId })
   assertCurrentSocket(currentSocket)
-  const attachedTabIds = await getAttachedTabIds()
+  const attachedTabIds = await getOwnedDebuggerTabIds(chrome.debugger)
   assertCurrentSocket(currentSocket)
   let existingGroup: chrome.tabGroups.TabGroup | undefined
   for (const group of groups) {
@@ -558,7 +554,7 @@ async function guardedUngroupBrowserControlTab(tabId: number, options: {
     if (!shouldUngroupBrowserControlTab(groupTitle)) {
       return
     }
-    if (options.preserveAttached && (await getAttachedTabIds()).has(tabId)) {
+    if (options.preserveAttached && (await getOwnedDebuggerTabIds(chrome.debugger)).has(tabId)) {
       return
     }
     assertCurrent()

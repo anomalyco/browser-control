@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { chromium } from "playwright-core"
+import { chromium, type BrowserContext, type Worker } from "playwright-core"
 import { WebSocketServer } from "ws"
 
 // An isolated profile and relay keep this proof away from the user's browser.
@@ -39,22 +39,12 @@ try {
     channel: "chromium", headless: true,
     args: [`--disable-extensions-except=${shim},${foreign}`, `--load-extension=${shim},${foreign}`],
   })
-  await context.waitForEvent("serviceworker", { predicate: () => context!.serviceWorkers().length >= 2, timeout: 10_000 }).catch((error) => {
-    if (context!.serviceWorkers().length < 2) throw error
-  })
-  const owner = context.serviceWorkers().find((worker) => worker.url().endsWith("/background.js"))!
-  const other = context.serviceWorkers().find((worker) => worker.url().endsWith("/foreign.js"))!
-  assert.ok(owner && other)
-  const ownedId = await owner.evaluate(async () => {
-    const tab = await chrome.tabs.create({ url: "about:blank" })
-    await chrome.debugger.attach({ tabId: tab.id! }, "1.3")
-    return tab.id!
-  })
-  const foreignId = await other.evaluate(async () => {
-    const tab = await chrome.tabs.create({ url: "about:blank" })
-    await chrome.debugger.attach({ tabId: tab.id! }, "1.3")
-    return tab.id!
-  })
+  const [owner, other] = await Promise.all([
+    extensionWorker(context, "/background.js"),
+    extensionWorker(context, "/foreign.js"),
+  ])
+  const ownedId = await owner.evaluate(attachTab)
+  const foreignId = await other.evaluate(attachTab)
   const globalIds = await owner.evaluate(async () => (await chrome.debugger.getTargets()).filter((target) => target.attached).map((target) => target.tabId))
   assert.ok(globalIds.includes(ownedId) && globalIds.includes(foreignId), "Reproduce the ambiguous global attached flag")
   inventories.length = 0
@@ -68,4 +58,17 @@ try {
   for (const client of server.clients) client.terminate()
   await new Promise<void>((resolve) => server.close(() => resolve()))
   await fs.rm(root, { recursive: true, force: true })
+}
+
+async function extensionWorker(context: BrowserContext, suffix: string): Promise<Worker> {
+  const predicate = (worker: Worker) => worker.url().endsWith(suffix)
+  return context.serviceWorkers().find(predicate)
+    ?? context.waitForEvent("serviceworker", { predicate, timeout: 10_000 })
+}
+
+async function attachTab(): Promise<number> {
+  const tab = await chrome.tabs.create({ url: "about:blank" })
+  if (tab.id === undefined) throw new Error("Fixture tab has no id")
+  await chrome.debugger.attach({ tabId: tab.id }, "1.3")
+  return tab.id
 }
