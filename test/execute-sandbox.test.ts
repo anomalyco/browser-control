@@ -14,6 +14,7 @@ vi.mock("playwright-core", () => ({
 }))
 
 class FakePage extends EventEmitter {
+  title = async () => "Fixture"
   closed = false
   readonly screenshot = vi.fn(async () => PNG.sync.write(new PNG({ width: 2, height: 2 })))
   readonly frame = { url: () => this.url() }
@@ -71,6 +72,25 @@ beforeEach(() => {
 })
 
 describe("ExecuteSandbox", () => {
+  it("finishes an execute with a stalled title and keeps the adopted page usable", async () => {
+    vi.useFakeTimers()
+    const context = new FakeContext()
+    const page = context.addPage("stalled-title")
+    page.title = () => new Promise(() => {})
+    connect(context)
+    const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test" })
+    try {
+      await Effect.runPromise(sandbox.adoptPage({ targetId: page.targetId, url: page.url() }))
+      const read = Effect.runPromise(sandbox.execute("return await page.title()"))
+      await vi.advanceTimersByTimeAsync(5_100)
+      expect(await read).toMatchObject({ isError: true, text: expect.stringContaining("page.title() timed out") })
+      expect(await Effect.runPromise(sandbox.execute("return page.url()"))).toMatchObject({ isError: false, value: page.url() })
+      expect(page.close).not.toHaveBeenCalled()
+    } finally {
+      await Effect.runPromise(sandbox.disconnectSettled())
+      vi.useRealTimers()
+    }
+  })
   it("binds screenshotDiff to the session page and returns its image as execute media", async () => {
     const context = new FakeContext()
     connect(context)

@@ -1,4 +1,5 @@
 import { Effect, Schema } from "effect"
+import { installPageReadTimeout } from "./page-read-timeout.ts"
 import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type ElementHandle, type Frame, type Locator, type Page } from "playwright-core"
 import * as acorn from "acorn"
 import fs from "node:fs"
@@ -728,6 +729,7 @@ export class ExecuteSandbox {
     installDownloadCapabilityGuards(context)
     const targetSelection = options.targetSelection
     const page = await this.getSessionPage({ context, ...(targetSelection ? { targetSelection } : {}) })
+    installPageReadTimeout(page)
     this.networkCapture.bindPage(this.page)
     const showGhostCursor = async (options?: ShowGhostCursorOptions) => {
       const cursorOptions = ghostCursorOptions(options)

@@ -48,6 +48,12 @@ Completion: one execute returns a page result and a readable session id, or
 
 ### 2. Choose The Page Deliberately
 
+The bundled shim 0.0.25 verifies debugger ownership during reconnection. Reload
+the unpacked extension after installing this shim update. DevTools-attached tabs
+are excluded from Browser Control's inventory. `page.title()` reads time out
+after five seconds if the page execution context remains unavailable; the read
+timeout does not close or replace the tab.
+
 A bare CLI execute creates a fresh session-owned page and prints the exact
 `--session <id>` continuation command. Every later CLI call must pass that id or
 set `BROWSER_CONTROL_SESSION`; bare execute never guesses from human-shell

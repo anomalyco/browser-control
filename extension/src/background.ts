@@ -10,6 +10,7 @@ import type {
 import { finalizeBrowserControlGrouping, isBrowserControlGroupTitle, shouldUngroupBrowserControlTab, tabGroupColor, tabGroupTitle } from "./tab-groups.ts"
 import { pageStatusFromJson } from "./page-status.ts"
 import { debuggerDetachedEvent } from "./debugger-detach.ts"
+import { getOwnedDebuggerTabIds } from "./debugger-ownership.ts"
 import { completeExtensionHandshake, reconnectAlarmName, startConnectionLifecycle, startSocketKeepAlive } from "./connection-lifecycle.ts"
 
 const relayHost = "127.0.0.1"
@@ -220,11 +221,8 @@ function startGroupReconciliation(currentGeneration: number): void {
 }
 
 async function reannounceAttachedTabs(currentSocket: WebSocket): Promise<void> {
-  const targets = await chrome.debugger.getTargets()
-  for (const target of targets) {
-    if (target.attached && typeof target.tabId === "number") {
-      sendOnSocket(currentSocket, { method: "debugger.attached", params: { tabId: target.tabId } })
-    }
+  for (const tabId of await getAttachedTabIds()) {
+    sendOnSocket(currentSocket, { method: "debugger.attached", params: { tabId } })
   }
 }
 
@@ -492,14 +490,7 @@ async function reconcileBrowserControlGroups(currentGeneration: number): Promise
 }
 
 async function getAttachedTabIds(): Promise<Set<number>> {
-  const attachedTabIds = new Set<number>()
-  const targets = await chrome.debugger.getTargets()
-  for (const target of targets) {
-    if (target.attached && typeof target.tabId === "number") {
-      attachedTabIds.add(target.tabId)
-    }
-  }
-  return attachedTabIds
+  return getOwnedDebuggerTabIds(chrome.debugger)
 }
 
 async function groupBrowserControlTab(tabId: number, currentSocket: WebSocket): Promise<JsonObject> {

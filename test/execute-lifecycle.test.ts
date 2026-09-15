@@ -19,6 +19,7 @@ describe("execute lifecycle", () => {
     const page = {
       isClosed: () => false,
       url: () => "https://example.test/form",
+      title: async () => "Fixture",
       context: (): BrowserContext => context as unknown as BrowserContext,
       on: vi.fn(),
       off: vi.fn(),

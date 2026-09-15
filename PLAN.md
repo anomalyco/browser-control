@@ -7,6 +7,12 @@ description: Current product direction, architecture decisions, and prioritized 
 
 ## Standalone installation validation
 
+Debugger inventory must prove this extension owns each attachment with a
+read-only command; Chrome's global `attached` flag also includes DevTools.
+`page.title()` has a five-second read deadline because Playwright exposes no
+timeout for that method. This bounds the observed missing-context title hang;
+it is not a general cancellation mechanism for arbitrary user scripts.
+
 Runtime candidates constrain npm's Effect and shared Node adapter resolution to
 the checkout's pinned releases. Otherwise npm can install a newer prerelease peer
 beside the CLI's pinned Effect, causing missing services or missing module exports.

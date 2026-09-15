@@ -53,7 +53,9 @@
     "runtime:check-lifecycle": "tsx scripts/check-runtime-lifecycle.ts",
     "smoke": "tsx scripts/smoke.ts",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "smoke:snapshot-image": "tsx scripts/check-snapshot-image-name.ts",
+    "smoke:debugger-ownership": "pnpm build:extension && tsx scripts/check-debugger-ownership.ts"
   },
   "dependencies": {
     "@effect/platform-node": "4.0.0-rc.112",
