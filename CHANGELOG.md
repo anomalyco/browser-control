@@ -1,5 +1,18 @@
 # @opencode-ai/browser-control
 
+## 0.7.1
+
+### Patch Changes
+
+- 1cdd1e4: Include visible image alt text in compact snapshot labels and clarify that explicit execute target selection is per-call. Keep Effect and its shared Node adapter aligned in standalone runtime installations so clean npm installs can start successfully.
+- 6785d65: Initialize MCP without probing or starting the relay. Tool discovery, skill
+  retrieval, and current-session lookup remain available while the relay is down;
+  operational tools still ensure readiness and reject build mismatches on each call.
+  
+  Remove redundant shutdown bookkeeping and network-capture copies while preserving
+  drain guarantees, body limits, and output redaction.
+- 1cdd1e4: Verify extension debugger ownership before reconnect announcements and tab grouping, excluding DevTools and other extensions. Bound page.title() reads to five seconds so a missing execution context does not indefinitely hold a session execute. Bundled extension version is now 0.0.25 and requires reloading the unpacked extension.
+
 ## 0.7.0
 
 ### Minor Changes
