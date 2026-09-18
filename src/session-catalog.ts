@@ -27,6 +27,12 @@ export function defaultSessionCatalogPath(port: number, home = os.homedir()): st
   return path.join(home, ".browser-control", "relays", String(port), "sessions.json")
 }
 
+// Error codes that mean "this platform or filesystem cannot fsync a directory
+// handle", not that the flush failed. Windows reports EPERM (libuv's
+// FlushFileBuffers needs write access, and directories open read-only); some
+// Linux filesystems and network mounts report EINVAL or ENOTSUP.
+const unsupportedDirectorySyncCodes = new Set(["EPERM", "EINVAL", "ENOTSUP"])
+
 export class SessionCatalog {
   constructor(readonly filePath: string) {}
 
@@ -63,12 +69,7 @@ export class SessionCatalog {
       await temporaryFile.close()
       temporaryFile = undefined
       await fs.rename(temporaryPath, this.filePath)
-      const directoryHandle = await fs.open(directory, "r")
-      try {
-        await directoryHandle.sync()
-      } finally {
-        await directoryHandle.close()
-      }
+      await syncDirectory(directory)
     } catch (error) {
       try {
         await temporaryFile?.close()
@@ -78,6 +79,21 @@ export class SessionCatalog {
       } catch {}
       throw new Error(`Could not write Browser Control session catalog at ${this.filePath}`, { cause: error })
     }
+  }
+}
+
+// Makes the rename durable where the platform supports directory fsync. Where
+// it does not, the file sync before the atomic rename is the strongest
+// guarantee available, so an unsupported-sync error is not a failed save.
+// Any other error (EIO, EBADF, ...) still fails the save.
+async function syncDirectory(directory: string): Promise<void> {
+  const handle = await fs.open(directory, "r")
+  try {
+    await handle.sync()
+  } catch (error) {
+    if (!(isNodeError(error) && error.code !== undefined && unsupportedDirectorySyncCodes.has(error.code))) throw error
+  } finally {
+    await handle.close()
   }
 }
 

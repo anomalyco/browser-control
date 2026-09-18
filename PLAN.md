@@ -370,7 +370,11 @@ arbitrary tab from the attached pool.
 - Corrupt session catalogs fail relay startup without being overwritten.
 - The relay wins the endpoint port before loading the catalog or enabling
   catalog writes. Lifecycle responses wait for atomic file replacement, file
-  sync, and directory sync before acknowledging durable state.
+  sync, and directory sync before acknowledging durable state. Where the
+  platform cannot fsync a directory handle (Windows reports `EPERM`; some
+  filesystems report `EINVAL` or `ENOTSUP`), the file sync before the rename is
+  the strongest available guarantee and the save still succeeds; any other
+  directory sync error still fails the save.
 - Session-owned tabs share a purple `control` group within each browser window.
   Merely attached, unowned tabs stay in their existing location.
 - Explicit URL selection must match exactly one page. URL and index selectors
