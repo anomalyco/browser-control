@@ -3,6 +3,8 @@ import path from "node:path"
 import { Schema } from "effect"
 import { RelayShutdownRequest } from "./relay-schema.ts"
 
+const unsupportedDirectorySyncCodes = new Set(["EPERM", "EINVAL", "ENOTSUP"])
+
 const requestFields = {
   instanceId: RelayShutdownRequest.fields.instanceId,
   requestId: RelayShutdownRequest.fields.requestId,
@@ -40,8 +42,16 @@ export function appendRelayLifecycleEvent(filePath: string, event: RelayLifecycl
   }
   const parent = fs.openSync(directory, "r")
   try {
-    fs.fsyncSync(parent)
+    try {
+      fs.fsyncSync(parent)
+    } catch (error) {
+      if (!(isNodeError(error) && error.code !== undefined && unsupportedDirectorySyncCodes.has(error.code))) throw error
+    }
   } finally {
     fs.closeSync(parent)
   }
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error
 }
