@@ -49,20 +49,24 @@ export class CdpRouter<Client extends object> {
     return rootTarget ? this.canSeeTarget(client, rootTarget) : false
   }
 
-  preferredRoot(client: Client): ConnectedTarget | undefined {
+  preferredRoot(client: Client, browserContextId?: string): ConnectedTarget | undefined {
     const clientSessionId = this.clients.sessionId(client)
-    let preferred: ConnectedTarget | undefined
-    for (const target of this.registry.listRootTargets()) {
-      if (clientSessionId !== undefined) {
-        if (target.browserControlSessionId === clientSessionId && target.crashed !== true) return target
-        continue
-      }
-      const matches = this.canSeeTarget(client, target)
-      if (!matches) continue
-      if (preferred) return undefined
-      preferred = target
+    const candidates = this.registry.listRootTargets().filter((target) => {
+      if (target.crashed) return false
+      if (browserContextId !== undefined && target.targetInfo.browserContextId !== browserContextId) return false
+      return clientSessionId !== undefined
+        ? target.browserControlSessionId === clientSessionId
+        : this.canSeeTarget(client, target)
+    })
+    if (candidates.length === 0) return undefined
+    if (clientSessionId !== undefined || candidates.length === 1) return candidates[0]
+    const contexts = new Set(candidates.map((target) => target.targetInfo.browserContextId))
+    // CDP omits browserContextId for the singleton default context. Matching
+    // absence is therefore a validated default-context identity, not a guess.
+    if (contexts.size === 1) {
+      return candidates[0]
     }
-    return preferred
+    return undefined
   }
 
   isBrowserAlias(client: Client, sessionId: string): boolean {

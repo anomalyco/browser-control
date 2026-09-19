@@ -337,6 +337,61 @@ export const cases: readonly SmokeCase[] = [
     }),
   },
   {
+    name: "browser-context-routing",
+    run: Effect.fnUntraced(function* () {
+      return yield* Effect.scoped(Effect.gen(function* () {
+        const marker = `bc-context-${Date.now()}`
+        const smokeSession = `${marker}-session`
+        const fixture = yield* scopedNetworkFixture(marker)
+        return yield* Effect.gen(function* () {
+          yield* runBrowserControl(["session", "new", smokeSession])
+          const output = yield* runBrowserControl([
+          "execute",
+          "--session",
+          smokeSession,
+          `
+const origin = ${JSON.stringify(fixture.url)}
+await page.goto(origin, { waitUntil: 'domcontentloaded' })
+await context.addCookies([{ name: ${JSON.stringify(marker)}, value: 'present', url: origin, expires: Date.now() / 1000 + 60 }])
+const present = (await context.cookies(origin)).some((cookie) => cookie.name === ${JSON.stringify(marker)} && cookie.value === 'present')
+await context.grantPermissions(['geolocation'], { origin })
+const firstPermission = await page.evaluate(async () => (await navigator.permissions.query({ name: 'geolocation' })).state)
+const second = await context.newPage()
+await second.goto(origin, { waitUntil: 'domcontentloaded' })
+const secondPermission = await second.evaluate(async () => (await navigator.permissions.query({ name: 'geolocation' })).state)
+await context.clearPermissions()
+const clearedPermission = await second.evaluate(async () => (await navigator.permissions.query({ name: 'geolocation' })).state)
+await context.addCookies([{ name: ${JSON.stringify(marker)}, value: 'expired', url: origin, expires: Date.now() / 1000 - 60 }])
+const expired = !(await context.cookies(origin)).some((cookie) => cookie.name === ${JSON.stringify(marker)})
+const browserSession = await browser.newBrowserCDPSession()
+let mismatch
+try {
+  await browserSession.send('Storage.getCookies', { browserContextId: 'browser-control-mismatched-context' })
+} catch (error) {
+  mismatch = error instanceof Error ? error.message : String(error)
+} finally {
+  await browserSession.detach()
+  await second.close()
+}
+return { present, expired, firstPermission, secondPermission, clearedPermission, mismatch }
+          `,
+          ])
+          if (
+            !output.includes("present: true") ||
+            !output.includes("expired: true") ||
+            !output.includes("firstPermission: 'granted'") ||
+            !output.includes("secondPermission: 'granted'") ||
+            output.includes("clearedPermission: 'granted'") ||
+            !output.includes("browser-control-mismatched-context")
+          ) {
+            return yield* Effect.fail(new Error(`browser-context routing smoke failed: ${output}`))
+          }
+          return output.trim()
+        }).pipe(Effect.ensuring(runBrowserControl(["session", "delete", smokeSession]).pipe(Effect.ignore)))
+      }))
+    }),
+  },
+  {
     name: "local-cart",
     run: runLocalCartFlow,
   },
@@ -665,6 +720,12 @@ await page.evaluate(() => {
   })
   setTimeout(() => document.body.append(controlled), 100)
 
+  const editor = document.createElement('div')
+  editor.id = 'editor'
+  editor.contentEditable = 'true'
+  editor.addEventListener('input', () => { editor.dataset.state = editor.textContent ?? '' })
+  document.body.append(editor)
+
   const frame = document.createElement('iframe')
   frame.id = 'fixture-frame'
   frame.srcdoc = '<input id="frame-input">'
@@ -673,6 +734,7 @@ await page.evaluate(() => {
 await fillInput(page.locator('#one'), 'alpha')
 await fillInput('#shadow-input', 'delta')
 await fillInput(page.locator('#controlled'), 'epsilon')
+await fillInput(page.locator('#editor'), 'rich text')
 await fillInputs(page, [
   { selector: page.getByRole('textbox').nth(1), value: 'beta' },
   { selector: '#three', value: 'gamma' },
@@ -699,6 +761,8 @@ const values = await page.evaluate(() => ({
   shadow: document.querySelector('div')?.shadowRoot?.querySelector('div')?.shadowRoot?.querySelector('input')?.value,
   controlled: document.querySelector('#controlled')?.value,
   controlledState: document.querySelector('#controlled')?.dataset.state,
+  editor: document.querySelector('#editor')?.textContent,
+  editorState: document.querySelector('#editor')?.dataset.state,
   focusEvents: document.documentElement.dataset.fillFocusEvents,
 }))
 return {
@@ -710,7 +774,7 @@ return {
           `,
           ],
         )
-        if (!output.includes("alpha") || !output.includes("beta") || !output.includes("gamma") || !output.includes("delta") || !output.includes("controlled: 'epsilon'") || !output.includes("controlledState: 'epsilon'") || !output.includes("frame: 'zeta'") || !output.includes("focusEvents: '0'") || !output.includes("frameFocusEvents: '0'") || !output.includes("closed shadow roots")) {
+        if (!output.includes("alpha") || !output.includes("beta") || !output.includes("gamma") || !output.includes("delta") || !output.includes("controlled: 'epsilon'") || !output.includes("controlledState: 'epsilon'") || !output.includes("editor: 'rich text'") || !output.includes("editorState: 'rich text'") || !output.includes("frame: 'zeta'") || !output.includes("focusEvents: '0'") || !output.includes("frameFocusEvents: '0'") || !output.includes("closed shadow roots")) {
           return yield* Effect.fail(new Error(`execute fill helpers did not fill fields: ${output}`))
         }
         return output.trim()
@@ -805,21 +869,22 @@ return await snapshot({ diff: true })
           "--session",
           smokeSession,
           `
-let previousRefError
-try { ref('e1') } catch (error) { previousRefError = error instanceof Error ? error.message : String(error) }
+const previousRefCount = await ref('e1').count()
 const addedRefCount = await ref('e7').count()
 await page.evaluate(() => {
   document.querySelector('#saved-status')?.remove()
   document.querySelector('#undo')?.remove()
 })
 const restored = await snapshot()
-return { previousRefError, addedRefCount, restored }
+const found = await snapshot({ find: 'Continue', context: 0 })
+return { previousRefCount, addedRefCount, restored, found }
           `,
         ])
         if (
-          !diffRefOutput.includes("Unknown snapshot ref: e1") ||
+          !diffRefOutput.includes("previousRefCount: 1") ||
           !diffRefOutput.includes("addedRefCount: 1") ||
-          !diffRefOutput.includes('button "Continue" [ref=e6]')
+          !diffRefOutput.includes('button "Continue" [ref=e6]') ||
+          !diffRefOutput.includes("1 matching snapshot line")
         ) {
           return yield* Effect.fail(new Error(`snapshot diff refs were unsafe or unusable: ${diffRefOutput}`))
         }
@@ -917,7 +982,7 @@ await page.setContent(
   '<input name="q">' +
   '<dialog open aria-modal="true" aria-label="Confirmation"><button>Cancel</button></dialog></main>'
 )
-return await snapshot({ interactive: true })
+return await snapshot({ interactive: true, within: 'main' })
           `,
         ])
         if (

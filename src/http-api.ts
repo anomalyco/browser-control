@@ -15,12 +15,15 @@ import {
   validateHostHeader,
 } from "./relay-helpers.ts"
 import { selectTarget, TargetSelectionError } from "./execute.ts"
+import type { FlightRecorderRelay } from "./flight-recorder.ts"
 import {
   AuthProfileRequest,
   AuthenticatedJsonRequest,
   AuthRefreshRequest,
   AuthRunRequest,
   ExecuteRequest,
+  FlightRecorderSaveRequest,
+  FlightRecorderStartRequest,
   NetworkSessionRequest,
   NetworkStartRequest,
   NetworkStopRequest,
@@ -50,6 +53,7 @@ export function createHttpRequestHandler(options: {
     "connected" | "version" | "protocolVersion" | "protocolCompatible" | "protocolLegacy" | "rejectedConnections" | "cdpClients"
   >
   readonly recordingRelay: RecordingRelay
+  readonly flightRecorder: FlightRecorderRelay
   readonly registry: TargetRegistry
   readonly sessions: BrowserControlSessions
 }): (request: http.IncomingMessage, response: http.ServerResponse) => void {
@@ -131,6 +135,10 @@ export function createHttpRequestHandler(options: {
     }
     if (pathname.startsWith("/recording/")) {
       run(handleRecordingRequest({ request, response, pathname, requestUrl, registry: options.registry, recordingRelay: options.recordingRelay }), true)
+      return
+    }
+    if (pathname.startsWith("/flight-recorder/")) {
+      run(handleFlightRecorderRequest({ request, response, pathname, requestUrl, registry: options.registry, flightRecorder: options.flightRecorder }), true)
       return
     }
     if (pathname.startsWith("/network/")) {
@@ -326,6 +334,59 @@ function handleRecordingRequest(options: {
         catch: (cause) => new Error(formatCauseMessage({ label: "cancel recording", cause }), { cause }),
       })
       sendJson(options.response, result, result.success ? 200 : 500)
+      return
+    }
+    options.response.writeHead(404)
+    options.response.end("Not found")
+  })
+}
+
+function handleFlightRecorderRequest(options: {
+  readonly request: http.IncomingMessage
+  readonly response: http.ServerResponse
+  readonly pathname: string
+  readonly requestUrl: URL
+  readonly registry: TargetRegistry
+  readonly flightRecorder: FlightRecorderRelay
+}): Effect.Effect<void, Error> {
+  return Effect.gen(function* () {
+    if (options.pathname === "/flight-recorder/start" && options.request.method === "POST") {
+      const request = yield* decodeRequest(FlightRecorderStartRequest, yield* readJsonBody(options.request), "flight recorder start")
+      const target = resolveAttachedRecordingTarget({ registry: options.registry, tabId: request.tabId, sessionId: request.sessionId })
+      const result = yield* Effect.tryPromise({
+        try: () => options.flightRecorder.start({
+          tabId: target.tabId,
+          ...(target.sessionId ? { sessionId: target.sessionId } : {}),
+          ...(request.retentionMs === undefined ? {} : { retentionMs: request.retentionMs }),
+          ...(request.frameRate === undefined ? {} : { frameRate: request.frameRate }),
+        }),
+        catch: (cause) => new Error(formatCauseMessage({ label: "start flight recorder", cause }), { cause }),
+      })
+      sendJson(options.response, result)
+      return
+    }
+    if (options.pathname === "/flight-recorder/status" && options.request.method === "GET") {
+      sendJson(options.response, options.flightRecorder.status(recordingTargetFromQuery({ registry: options.registry, searchParams: options.requestUrl.searchParams })))
+      return
+    }
+    if (options.pathname === "/flight-recorder/save-last" && options.request.method === "POST") {
+      const request = yield* decodeRequest(FlightRecorderSaveRequest, yield* readJsonBody(options.request), "flight recorder save-last")
+      const target = recordingTargetFromValues({ registry: options.registry, tabId: request.tabId, sessionId: request.sessionId })
+      const result = yield* Effect.tryPromise({
+        try: () => options.flightRecorder.saveLast({
+          ...target,
+          outputPath: request.outputPath,
+          ...(request.durationMs === undefined ? {} : { durationMs: request.durationMs }),
+        }),
+        catch: (cause) => new Error(formatCauseMessage({ label: "save flight recorder", cause }), { cause }),
+      })
+      sendJson(options.response, result)
+      return
+    }
+    if (options.pathname === "/flight-recorder/cancel" && options.request.method === "POST") {
+      const request = yield* decodeRequest(RecordingTargetRequest, yield* readJsonBody(options.request), "flight recorder cancel")
+      const target = recordingTargetFromValues({ registry: options.registry, tabId: request.tabId, sessionId: request.sessionId })
+      sendJson(options.response, yield* Effect.promise(() => options.flightRecorder.cancel(target)))
       return
     }
     options.response.writeHead(404)

@@ -207,6 +207,50 @@ describe("fillInputs", () => {
     expect(dispose).toHaveBeenCalledOnce()
   })
 
+  it("fills contenteditable elements and emits input and change without moving focus", async () => {
+    class MockEditable {
+      isContentEditable = true
+      textContent = "before"
+      readonly focus = vi.fn()
+      readonly blur = vi.fn()
+      readonly dispatchEvent = vi.fn()
+    }
+
+    const editable = new MockEditable()
+    const evaluate = vi.fn(async (run: (fields: Array<{ readonly target: string; readonly label: string; readonly value: string }>) => unknown, fields) => {
+      const previousDocument = globalThis.document
+      const previousInput = globalThis.HTMLInputElement
+      const previousTextArea = globalThis.HTMLTextAreaElement
+      const previousHtmlElement = globalThis.HTMLElement
+      const previousInputEvent = globalThis.InputEvent
+      Object.assign(globalThis, {
+        document: { querySelectorAll: vi.fn((selector: string) => selector === "#editor" ? [editable] : []) },
+        HTMLInputElement: class {},
+        HTMLTextAreaElement: class {},
+        HTMLElement: MockEditable,
+        InputEvent: class {},
+      })
+      try {
+        return run(fields as Array<{ readonly target: string; readonly label: string; readonly value: string }>)
+      } finally {
+        Object.assign(globalThis, {
+          document: previousDocument,
+          HTMLInputElement: previousInput,
+          HTMLTextAreaElement: previousTextArea,
+          HTMLElement: previousHtmlElement,
+          InputEvent: previousInputEvent,
+        })
+      }
+    })
+
+    await fillInputs({ evaluate } as unknown as Page, [{ selector: "#editor", value: "Rich text" }])
+
+    expect(editable.textContent).toBe("Rich text")
+    expect(editable.dispatchEvent).toHaveBeenCalledTimes(2)
+    expect(editable.focus).not.toHaveBeenCalled()
+    expect(editable.blur).not.toHaveBeenCalled()
+  })
+
   it("explains the open and closed shadow-root boundary without exposing the value", async () => {
     const evaluate = vi.fn(async (run: (fields: Array<{ readonly target: string; readonly label: string; readonly value: string }>) => unknown, fields) => {
       const previousDocument = globalThis.document
@@ -437,11 +481,11 @@ describe("snapshot helpers", () => {
     expect(evaluate.mock.calls[0]?.[1]).toMatchObject({ maxItems: 80, rootSelector: undefined })
     expect(helpers.ref("@e1")).toBe(resolvedLocator)
     expect(page.locator).toHaveBeenLastCalledWith("#save")
-    expect(page.getByRole).toHaveBeenCalledWith("button")
+    expect(page.getByRole).toHaveBeenCalledWith("button", { name: "Save", exact: true })
     expect(saveLocator.and).toHaveBeenCalledWith(saveRoleLocator)
   })
 
-  it("does not use the approximate snapshot name to constrain a stable selector", async () => {
+  it("combines a stable selector with the untruncated accessible identity", async () => {
     const evaluate = vi.fn().mockResolvedValue({
       entries: [{
         depth: 0,
@@ -468,10 +512,10 @@ describe("snapshot helpers", () => {
 
     await helpers.snapshot()
     expect(helpers.ref("e1")).toBe(resolvedLocator)
-    expect(page.getByRole).toHaveBeenCalledWith("textbox")
+    expect(page.getByRole).toHaveBeenCalledWith("textbox", { name: "Organization or user *", exact: true })
   })
 
-  it("diffs against the previous full snapshot and exposes only current changed refs", async () => {
+  it("diffs against the previous full snapshot while preserving compatible refs", async () => {
     const evaluate = vi.fn()
       .mockResolvedValueOnce({
         entries: [
@@ -512,15 +556,81 @@ describe("snapshot helpers", () => {
     await helpers.snapshot()
     await expect(helpers.snapshot({ diff: true })).resolves.toBe([
       '-   button "Save"',
-      '+   button "Save" [ref=e2 disabled]',
+      '+   button "Save" [ref=e1 disabled]',
       '+   status "Saved"',
       '2 additions, 1 removal, 1 unchanged',
     ].join("\n"))
-    expect(() => helpers.ref("e1")).toThrow("Unknown snapshot ref")
-    expect(helpers.ref("e2")).toBe(resolvedLocator)
+    expect(helpers.ref("e1")).toBe(resolvedLocator)
 
     await expect(helpers.snapshot({ diff: true })).resolves.toBe("0 additions, 0 removals, 3 unchanged")
-    expect(() => helpers.ref("e2")).toThrow("Unknown snapshot ref")
+    expect(helpers.ref("e1")).toBe(resolvedLocator)
+  })
+
+  it("returns a full baseline and then automatic deltas", async () => {
+    const evaluate = vi.fn()
+      .mockResolvedValueOnce({
+        entries: [{ depth: 0, role: "button", name: "Save", identityName: "Save", selector: "#save" }],
+        truncated: false,
+      })
+      .mockResolvedValueOnce({
+        entries: [
+          { depth: 0, role: "button", name: "Save", identityName: "Save", selector: "#save", details: "disabled" },
+          { depth: 0, role: "status", name: "Saved" },
+        ],
+        truncated: false,
+      })
+    const page = {
+      evaluate,
+      locator: vi.fn(() => ({ and: vi.fn(() => ({} as Locator)) })),
+      getByRole: vi.fn(() => ({} as Locator)),
+      url: vi.fn(() => "https://example.com/settings"),
+      mainFrame: vi.fn(() => ({})),
+      on: vi.fn(),
+      off: vi.fn(),
+    } as unknown as Page
+    const helpers = createSnapshotHelpers(page, { selectors: new Map() })
+
+    await expect(helpers.snapshot({ delta: true })).resolves.toBe('- button "Save" [ref=e1]')
+    await expect(helpers.snapshot({ delta: true })).resolves.toBe([
+      '- button "Save"',
+      '+ button "Save" [ref=e1 disabled]',
+      '+ status "Saved"',
+      '2 additions, 1 removal, 0 unchanged',
+    ].join("\n"))
+    await expect(helpers.snapshot({ diff: true, delta: true })).rejects.toThrow("either diff or delta")
+  })
+
+  it("finds bounded snapshot snippets while retaining actionable refs", async () => {
+    const evaluate = vi.fn().mockResolvedValue({
+      entries: [
+        { depth: 0, role: "heading", name: "Account", details: "level=1" },
+        { depth: 1, role: "link", name: "Profile", identityName: "Profile", selector: "#profile" },
+        { depth: 1, role: "link", name: "Checkout", identityName: "Checkout", selector: "#checkout" },
+        { depth: 1, role: "button", name: "Pay now", identityName: "Pay now", selector: "#pay" },
+        { depth: 0, role: "heading", name: "Footer", details: "level=2" },
+      ],
+      truncated: false,
+    })
+    const resolved = {} as Locator
+    const page = {
+      evaluate,
+      locator: vi.fn(() => ({ and: vi.fn(() => resolved) })),
+      getByRole: vi.fn(() => ({} as Locator)),
+      url: vi.fn(() => "https://example.com/account"),
+      mainFrame: vi.fn(() => ({})),
+      on: vi.fn(),
+      off: vi.fn(),
+    } as unknown as Page
+    const helpers = createSnapshotHelpers(page, { selectors: new Map() })
+
+    await expect(helpers.snapshot({ find: /checkout/i, context: 1 })).resolves.toBe([
+      "1 matching snapshot line:",
+      "...",
+      '  - link "Profile" [ref=e1]',
+      '  - link "Checkout" [ref=e2]',
+      '  - button "Pay now" [ref=e3]',
+    ].join("\n"))
+    expect(helpers.ref("e2")).toBe(resolved)
   })
 
   it("requires a compatible full snapshot before diffing", async () => {

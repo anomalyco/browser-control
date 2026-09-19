@@ -273,9 +273,16 @@ Snapshot controls include refs such as `[ref=e12]`. Use a ref in the next call:
 browser-control execute --session github 'await ref("e12").click(); return await snapshot({ diff: true })'
 ```
 
-Refs belong to the latest snapshot and become stale after navigation. They
-combine structural and accessible identity so DOM drift fails closed instead
-of silently targeting a different control.
+Compatible refs keep their ids across repeated same-document captures and become
+stale after navigation. They combine structural and accessible identity so DOM
+drift fails closed instead of silently targeting a different control.
+
+Use automatic deltas or semantic search when a full snapshot would be noisy:
+
+```js
+return await snapshot({ delta: true })
+return await snapshot({ find: /checkout|payment/i, context: 2 })
+```
 
 Other inspection helpers include:
 
@@ -285,8 +292,10 @@ Other inspection helpers include:
 - `screenshotWithLabels()` for an annotated screenshot and element metadata
 - `screenshotDiff({ baseline })` for changed-pixel metrics and a red-highlighted
   PNG against a saved baseline; capture both at the same CSS viewport scale
-- `fillInput()` and `fillInputs()` when browser extensions interfere with
-  Playwright's normal `locator.fill()`
+- `fillInput()` and `fillInputs()` for input, textarea, and contenteditable
+  fields when browser extensions interfere with Playwright's normal fill
+- `webmcp.list()` and `webmcp.call(name, input, { frame? })` for structured
+  tools registered by WebMCP-enabled pages
 
 The agent skill gives the operating workflow and canonical examples; command
 `--help` output remains the source of truth for detailed options.
@@ -320,6 +329,17 @@ or its target disappears first, it disconnects that sandbox's Playwright
 connection before releasing the execute permit, preventing a still-pending
 prompt action from mutating the page later. Keep `start` limited to the bounded
 browser action that opens the native prompt.
+
+Use `demonstrate()` when a person can show a workflow faster than describing it.
+It records the exact-tab handoff as editable Playwright code:
+
+```js
+return await demonstrate("Perform the workflow once, then continue")
+```
+
+The result includes structured steps and generated code for clicks, edits,
+checkbox/select changes, and navigations. Password values are replaced with a
+secret-source comment. Add independent outcome assertions before replaying it.
 
 ## Use Read-Only Sessions
 
@@ -365,6 +385,19 @@ before sharing either screenshots or diffs.
 Automatic mode uses browser tab capture for user-owned tabs and CDP screencast
 for relay-created tabs. Tab capture writes WebM and can include audio. CDP mode
 writes WebM or MP4, requires `ffmpeg` on `PATH`, and does not capture audio.
+
+For intermittent failures, retain a rolling video window and save it afterward
+without stopping the buffer:
+
+```bash
+browser-control flight-recorder start --session github --retention-ms 60000
+browser-control flight-recorder save-last ./failure.mp4 --session github --duration-ms 30000
+browser-control flight-recorder cancel --session github
+```
+
+The bounded in-memory recorder reports retained frames, bytes, duration, and
+drops, and writes a JSON receipt next to each clip. Recording and flight-recorder
+lifecycle commands are also available over MCP.
 
 ## Derive a Direct Client
 
@@ -487,6 +520,13 @@ For occasional whole-codebase audits, `pnpm exec knip --production` excludes tes
 usage. Review its findings rather than requiring a clean result: an export used
 only by tests can still have production callers inside its own module. Normal
 `pnpm check:unused` remains the CI gate.
+
+`pnpm smoke:snapshot` runs native-role/ref, portal-dialog, and dense-list
+regressions against an isolated Chromium browser using the real snapshot code.
+Install its browser with `pnpm exec playwright-core install chromium` if needed.
+It does not connect to the user's relay. `pnpm repro:screenshot-zoom` is a
+separate standalone reproduction of stock Playwright's full-page clipping at
+110% browser zoom; it intentionally fails while that upstream issue remains.
 
 Use the same `active/bin/browser-control-mcp` path in MCP configuration. Do not
 `bun link` the active tool into the checkout: changing dependencies or rebuilding

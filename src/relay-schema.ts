@@ -480,6 +480,46 @@ export const RecordingCancelResponse = Schema.Struct({
 
 export interface RecordingCancelResponse extends Schema.Schema.Type<typeof RecordingCancelResponse> {}
 
+export const FlightRecorderStartRequest = RecordingTargetRequest.pipe(Schema.fieldsAssign({
+  retentionMs: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isBetween({ minimum: 1_000, maximum: 120_000 }))),
+  frameRate: Schema.optionalKey(RecordingFrameRate),
+}))
+export interface FlightRecorderStartRequest extends Schema.Schema.Type<typeof FlightRecorderStartRequest> {}
+
+export const FlightRecorderStatusResponse = Schema.Struct({
+  active: Schema.Boolean,
+  tabId: Schema.optionalKey(Schema.Number),
+  sessionId: Schema.optionalKey(Schema.String),
+  startedAt: Schema.optionalKey(Schema.Number),
+  retentionMs: Schema.optionalKey(Schema.Number),
+  retainedDurationMs: Schema.optionalKey(Schema.Number),
+  frameRate: Schema.optionalKey(Schema.Number),
+  bufferedFrames: Schema.optionalKey(Schema.Number),
+  bufferedBytes: Schema.optionalKey(Schema.Number),
+  sourceFrameCount: Schema.optionalKey(Schema.Number),
+  droppedFrameCount: Schema.optionalKey(Schema.Number),
+  saving: Schema.optionalKey(Schema.Boolean),
+})
+export interface FlightRecorderStatusResponse extends Schema.Schema.Type<typeof FlightRecorderStatusResponse> {}
+
+export const FlightRecorderSaveRequest = RecordingTargetRequest.pipe(Schema.fieldsAssign({
+  outputPath: Schema.String,
+  durationMs: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0))),
+}))
+export interface FlightRecorderSaveRequest extends Schema.Schema.Type<typeof FlightRecorderSaveRequest> {}
+
+export const FlightRecorderSaveResponse = Schema.Struct({
+  path: Schema.String,
+  durationMs: Schema.Number,
+  frameCount: Schema.Number,
+  sourceFrameCount: Schema.Number,
+  droppedFrameCount: Schema.Number,
+})
+export interface FlightRecorderSaveResponse extends Schema.Schema.Type<typeof FlightRecorderSaveResponse> {}
+
+export const FlightRecorderCancelResponse = Schema.Struct({ cancelled: Schema.Boolean })
+export interface FlightRecorderCancelResponse extends Schema.Schema.Type<typeof FlightRecorderCancelResponse> {}
+
 export const RelayErrorCode = Schema.Literals([
   "invalid-request",
   "relay-starting",

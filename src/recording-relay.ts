@@ -219,6 +219,7 @@ export class RecordingRelay {
     readonly sendToExtension: (command: Omit<ExtensionCommand, "id">) => Promise<JsonObject>
     readonly sendDebuggerCommand: SendDebuggerCommand
     readonly isExtensionConnected: () => boolean
+    readonly isTabUnavailable?: (tabId: number) => boolean
     readonly startVideoEncoder?: StartVideoEncoder
     readonly now?: () => number
     readonly monotonicNow?: () => number
@@ -226,6 +227,10 @@ export class RecordingRelay {
 
   hasActiveRecordings(): boolean {
     return this.activeRecordings.size > 0 || this.startingRecordings.size > 0
+  }
+
+  isRecordingTab(tabId: number): boolean {
+    return this.activeRecordings.has(tabId) || this.startingRecordings.has(tabId)
   }
 
   async startRecording(options: RecordingStartOptions): Promise<RecordingStartResult> {
@@ -237,6 +242,9 @@ export class RecordingRelay {
     }
     if (this.activeRecordings.has(options.tabId) || this.startingRecordings.has(options.tabId)) {
       return { success: false, error: "Recording already in progress for this tab" }
+    }
+    if (this.options.isTabUnavailable?.(options.tabId)) {
+      return { success: false, error: "Stop the active flight recorder before starting a recording" }
     }
     const starting: StartingRecording = {
       tabId: options.tabId,
@@ -1013,7 +1021,7 @@ function recordingQuality(recording: CdpRecording, durationMs: number): Recordin
   }
 }
 
-function cdpRecordingSize(metrics: JsonObject): { readonly width: number; readonly height: number } {
+export function cdpRecordingSize(metrics: JsonObject): { readonly width: number; readonly height: number } {
   const viewport = getObject(metrics.cssVisualViewport) ?? getObject(metrics.visualViewport)
   const viewportWidth = typeof viewport?.clientWidth === "number" ? viewport.clientWidth : fallbackCdpWidth
   const viewportHeight = typeof viewport?.clientHeight === "number" ? viewport.clientHeight : fallbackCdpHeight
@@ -1023,7 +1031,7 @@ function cdpRecordingSize(metrics: JsonObject): { readonly width: number; readon
   }
 }
 
-async function startFfmpegVideoEncoder(options: Parameters<StartVideoEncoder>[0]): Promise<VideoEncoder> {
+export async function startFfmpegVideoEncoder(options: Parameters<StartVideoEncoder>[0]): Promise<VideoEncoder> {
   // Preserve start-time dependency errors even though geometry arrives later.
   await new Promise<void>((resolve, reject) => {
     execFile("ffmpeg", ["-version"], { timeout: 5_000 }, (error) => error ? reject(error) : resolve())

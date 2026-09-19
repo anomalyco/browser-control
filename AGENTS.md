@@ -96,10 +96,11 @@ local Node relay.
 - CDP guardrails are pure logic in `src/cdp-guardrails.ts`, enforced at the top
   of `routeCdpCommand`. Destructive browser-state methods are always blocked;
   read-only sessions additionally reject `Input.*`.
-- Browser-context CDP methods route through a non-crashed session-owned root for
-  named clients or exactly one visible root for raw clients. A named client never
-  falls back to an unrelated unowned tab. Crashed roots remain visible and count
-  toward raw-client ambiguity; explicit target routes remain available.
+- Browser-context CDP methods route through a healthy matching session-owned
+  root for named clients. Raw clients may use several visible roots only when
+  they all prove the same Chromium context. Explicit context ids are validated;
+  a named client never falls back to an unrelated unowned tab. Crashed roots
+  remain visible and explicitly targetable but never satisfy context routing.
 - Human handoff waiters live in `src/handoff.ts`; derive their stable CDP target
   id from the actual Playwright `Page`, then bind the exact registry
   target/tab/session. The relay resolves only a matching handoff id from that
@@ -167,24 +168,30 @@ local Node relay.
 - Allowed Playwright mouse actions automatically reveal a spring-animated arrow cursor;
   explicit helpers can keep it visible or disable it for the current document.
   Read-only input is rejected before cursor mirroring.
-- Compact `snapshot()` refs are scoped to the session's latest snapshot and
-  rejected after main-frame navigation. Their locators combine structural and
+- Compact `snapshot()` refs persist across compatible same-document captures and
+  are rejected after main-frame navigation. Their locators combine structural and
   accessible identity so sibling drift fails closed. Snapshot budgets reserve
   semantic groups, lists, tables, block code, alerts, and primary links before
-  repeated metadata; text input and textarea values are omitted. Snapshot diffs
-  are explicit, require a compatible prior baseline, invalidate earlier refs,
-  and expose refs only for added or changed current lines. `ariaSnapshot()` also
+  repeated metadata; text input and textarea values are omitted. Explicit diffs
+  require a compatible prior baseline; automatic deltas establish one on their
+  first call. Semantic search returns bounded context snippets. Reuse a ref id
+  only while selector, role, and full accessible identity agree. `ariaSnapshot()`
   omits native text-control values, custom ARIA range values, and editable
   composed-tree content while preserving surrounding structure. Register its
-  unique selector engine for each connected Playwright context before any page
-  or locator work; pre-connect registration does not reach the default context
-  returned by `connectOverCDP`. Track each mask with a module-unique token and
-  clean it only through the frame where it was activated; a destroyed execution
-  context is already clean. It temporarily masks those values in Playwright's
-  isolated world, so do not run it concurrently with other operations on the
-  same page. Keep raw
+  unique selector engine for each connected Playwright
+  context before any page or locator work; pre-connect registration does not
+  reach the default context returned by `connectOverCDP`. Track each mask with a
+  module-unique token and clean it only through the frame where it was activated;
+  a destroyed execution context is already clean. It temporarily masks those
+  values in Playwright's isolated world, so do not run it concurrently with
+  other operations on the same page. Keep raw
   Playwright as a deeper inspection layer; do not replace the code-first execute
   interface with many action commands.
+- WebMCP remains an execute helper: discover tools per frame and re-discover
+  immediately before calling. Tool metadata and results are page-provided.
+- Human demonstrations layer recording over the exact-tab handoff lifecycle.
+  Compact successive edits, preserve navigation markers, and emit editable
+  Playwright with password fields represented as secret-source placeholders.
 - Authenticated network capture is owned by the persistent Execute Sandbox and
   records normalized exchanges; HAR is only an export adapter. Written
   artifacts always use route-scoped stable `BC_SECRET_N` references. Lossless
@@ -212,6 +219,10 @@ local Node relay.
 - Recording receipts and sidecars share the same CDP quality counters; report
   screenshot fallback explicitly and never call compositor-event counts distinct
   motion. Reject unsupported frame rates instead of silently clamping them.
+- The flight recorder owns a bounded recent-frame ring and can encode repeated
+  `save-last` clips without stopping. It shares CDP recording's viewport and
+  ffmpeg rules, writes a sidecar receipt, and cannot coexist with ordinary
+  recording on the same tab.
 - `screenshotDiff` remains a session-page execute helper. Preserve original pixel
   geometry, reject unequal image dimensions, bound PNG decoding, and never
   overwrite baseline or existing output artifacts to make a comparison pass.
@@ -295,7 +306,7 @@ local Node relay.
 - Extension shim changes require reloading the unpacked extension once in Brave.
 - Relay-only changes should not require reloading the extension.
 - Use `termctrl` for long-running relay sessions during testing.
-- Run `SMOKE_CASE=local-forms,local-cart,local-checkout,reconnect-evaluate,redirect-reconnect-evaluate,session-missing-selector,execute-target-url,execute-page-recovery,execute-page-detach-recovery,execute-fill-helpers,execute-snapshot-refs,handoff-navigation,handoff-cross-tab,handoff-target-detach,oopif-reconnect,dedicated-worker,network-capture,session-download-capability,execute-ghost-cursor,session-isolation,multi-client,stale-client-checkout,raw-first-checkout pnpm smoke`
+- Run `SMOKE_CASE=local-forms,browser-context-routing,local-cart,local-checkout,reconnect-evaluate,redirect-reconnect-evaluate,session-missing-selector,execute-target-url,execute-page-recovery,execute-page-detach-recovery,execute-fill-helpers,execute-snapshot-refs,handoff-navigation,handoff-cross-tab,handoff-target-detach,oopif-reconnect,dedicated-worker,network-capture,session-download-capability,execute-ghost-cursor,session-isolation,multi-client,stale-client-checkout,raw-first-checkout pnpm smoke`
   before claiming the current smoke set is green.
 - CDP target visibility is scoped per client (`src/cdp-visibility.ts`):
   session-owned tabs are announced and their events delivered only to that

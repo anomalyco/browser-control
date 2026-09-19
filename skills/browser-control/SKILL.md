@@ -126,7 +126,7 @@ they rely on transient UI such as an open menu, selected rows, hover state, or
 an in-progress form.
 
 If native `locator.fill()` hangs because a browser extension interferes with
-focus, use the explicit `input`/`textarea` fallback:
+focus, use the explicit input, textarea, or contenteditable fallback:
 
 ```js
 await fillInput(page.getByPlaceholder("Username"), "standard_user")
@@ -207,6 +207,18 @@ without `start`. The default timeout is ten minutes.
 Completion: the prompt was presented only after WAIT was registered, the action
 settled, and the authenticated result was independently verified.
 
+To turn a user-demonstrated flow into reusable Playwright, use `demonstrate()`.
+It uses the same exact-tab handoff, records clicks, edits, checkbox/select
+changes, and same-tab navigations, then returns editable code:
+
+```ts
+return await demonstrate("Perform the workflow once, then continue")
+```
+
+Password fields become explicit secret-source comments rather than copied
+values. Review selectors and add outcome assertions before reusing generated
+code; a demonstration records actions, not proof that the workflow succeeded.
+
 ### Password Manager Prompts
 
 Ordinary webpage fields and accessible open-shadow-root controls remain usable.
@@ -230,11 +242,21 @@ Use the least expensive view that answers the question:
 - `snapshot()` is the compact read-before-act default. It prioritizes semantic
   groups, alerts, lists, tables, headings, links, and controls. Text input and
   textarea values are omitted.
+- The default snapshot scopes to a single visible modal when present; portal
+  dialogs outside `main` remain discoverable. Use an explicit `within` scope
+  when you intentionally need background content. Repeated list wrappers have
+  a bounded reservation so product links can still fit in a dense page.
+- Native number/search inputs are `spinbutton`/`searchbox`. Native disclosure
+  controls are labeled `summary`, which is an element kind rather than an ARIA
+  role; use the returned `ref()` to operate them.
 - `ref("e12")` resolves a control from the latest snapshot. Refs fail closed
-  after navigation or incompatible DOM drift.
+  after navigation or incompatible DOM drift. Compatible refs keep the same id
+  across repeated same-document captures.
 - `snapshot({ diff: true })` reports semantic changes from the compatible prior
-  baseline. A diff invalidates earlier refs and exposes refs only for added or
-  changed current lines.
+  baseline. `snapshot({ delta: true })` returns a full first baseline and compact
+  deltas afterward. Existing compatible refs remain usable.
+- `snapshot({ find: "checkout", context: 2 })` searches the bounded semantic
+  snapshot and returns matching lines with nearby context and actionable refs.
 - `ariaSnapshot(target?, { timeout })` returns Playwright's detailed YAML aria
   tree when the compact snapshot omits needed structure. Native text-control
   values, custom ARIA range values, and editable content are omitted so they do
@@ -250,6 +272,8 @@ Use the least expensive view that answers the question:
 
 ```js
 return await snapshot({ within: "main", maxItems: 200 })
+return await snapshot({ find: /checkout|payment/i, context: 2 })
+return await snapshot({ delta: true })
 // When layout matters, return the image through MCP so it can be inspected.
 return await screenshotWithLabels({ page })
 ```
@@ -295,6 +319,20 @@ Playwright downloads are unavailable through extension-backed tabs because
 Chromium blocks download artifact control through `chrome.debugger`. If the
 page exposes the payload through fetch or an API response, read the bytes in the
 page and write them with `fs`. Do not retry `page.waitForEvent("download")`.
+
+Pages with WebMCP enabled can expose structured page tools. Discover and call
+them through the execute helper; names, descriptions, schemas, and results come
+from the page:
+
+```ts
+const tools = await webmcp.list()
+const result = await webmcp.call("search_catalog", { query: "adapter" })
+return { tools, result }
+```
+
+Discovery covers all frames. If the same name appears in multiple frames, pass
+the exact reported frame label as `{ frame }`. Browser Control re-discovers the
+tool immediately before invoking it, so stale registrations fail directly.
 
 ## Safety
 
@@ -441,6 +479,21 @@ for smaller files. Actual motion still depends on Chrome delivering new frames;
 CPU, transport bandwidth, and storage. Set the viewport before recording and do
 not change viewport/emulation mid-recording. Odd dimensions round down to even.
 
+For failures that are hard to reproduce, keep a rolling CDP frame buffer and
+save recent history after the problem occurs:
+
+```bash
+browser-control flight-recorder start --session github --retention-ms 60000
+browser-control flight-recorder status --session github
+browser-control flight-recorder save-last ./tmp/failure.mp4 --session github --duration-ms 30000
+browser-control flight-recorder cancel --session github
+```
+
+Saving does not stop buffering. The recorder is memory-bounded, reports retained
+duration/frame/byte/drop counters, writes a JSON receipt beside each clip, and is
+mutually exclusive with ordinary recording on the same tab. CLI recording and
+flight-recorder lifecycle operations are also available as MCP tools.
+
 Inspect an encoded frame at native size before sharing: the whole viewport must
 fill the frame, small text must be readable, and motion must not be a repeated
 still image. Do not crop and upscale a low-resolution capture to call it HD.
@@ -494,6 +547,13 @@ Common diagnoses:
 - Fill timeout on login fields: inspect first, then try `fillInput` after
   confirming the selector or locator resolves. String selectors search open
   shadow roots recursively; closed shadow roots remain unavailable.
+- Click blocked by a verified dialog backdrop: inspect the exact target and
+  blocker first. If the target is the approved action and Playwright actionability
+  alone is stale, dispatch `await locator.evaluate((element) => element.click())`,
+  then verify the result. Do not make dispatched clicks the default.
+- Hidden checkbox/radio input: click its visible associated label or wrapper,
+  then verify `isChecked()`. Do not force-click an invisible input or infer an
+  arbitrary ancestor.
 - Download wait fails: use fetch plus `fs`; extension-backed Playwright cannot
   retain a native download artifact.
 - Hover on an infinitely animated target: Playwright may never consider the

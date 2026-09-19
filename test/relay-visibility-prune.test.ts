@@ -44,7 +44,7 @@ describe("relay target visibility pruning", () => {
             id: 3,
             method: "Storage.getCookies",
             params: { browserContextId: "session-context" },
-          })).rejects.toThrow("A session-owned root target is required for Storage.getCookies")
+          })).rejects.toThrow("A healthy visible root target in browser context session-context is required for Storage.getCookies")
         })
         expect(extension.commands).toEqual([])
 
@@ -340,6 +340,7 @@ function connectFakeExtension(relayUrl: string): Promise<WebSocket & { readonly 
             url: "about:blank",
             attached: true,
             canAccessOpener: false,
+            browserContextId: tabId === 1 ? "raw-context" : "session-context",
           },
         }
       }
