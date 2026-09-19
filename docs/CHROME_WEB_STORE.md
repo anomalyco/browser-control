@@ -4,6 +4,15 @@ This document is the source copy for the Browser Control Chrome Web Store
 listing and review questionnaire. The initial distribution should be
 **unlisted**.
 
+## Current Review Status
+
+September 6, 2026: version **0.0.24** was submitted for review on the existing
+item `gmjpoplfomnnjipeiojccjbpjlodkjhn`, with the replacement handoff screenshot
+and **Unlisted** visibility. The dashboard explicitly confirmed **Pending
+Review** and that the item had been submitted for compliance review. Google
+warned that broad host permissions may require an in-depth review. Approval and
+publication remain pending; the preparation steps below are retained as history.
+
 ## Single Purpose
 
 Connect user-authorized local browser automation programs to controlled tabs in
@@ -94,10 +103,47 @@ requires a separate explicit CLI request.
 
 ## Submission Artifact
 
+### September 6, 2026 resubmission preparation
+
+The existing item is `gmjpoplfomnnjipeiojccjbpjlodkjhn`. The last recorded
+rejection (July 22) was **Inaccurate Description — Irrelevant info**, specifically
+submitted media. Kit's September 6 dashboard screenshot confirms the item is
+still **Rejected**, with uploaded version **0.0.23**, last updated July 22.
+Chrome protects its developer dashboard from extension-driven automation; the
+remaining dashboard steps require a human.
+
+Prepared and inspected locally:
+
+- ZIP: `artifacts/browser-control-extension-0.0.24.zip`
+- SHA-256: `c39df8fd4f058ff95e03ffccfac264baefad0d11d2d2a50dbb244dcb48c1c49a`
+- Nine allowlisted runtime/icon files, Manifest V3, no source maps or unpacked key.
+- Replacement screenshot: `docs/chrome-web-store/browser-control-handoff-1280x800.png`
+  (1280×800). Captured from the real extension's WAIT prompt over the explicitly
+  labeled synthetic local `demo.html` page, using CLI/relay 0.6.0 and shim 0.0.24.
+  The form was filled through Playwright and the demonstration completed through
+  the real handoff control. It contains no account or payment data.
+
+Before submitting:
+
+1. Open the existing item in the Developer Dashboard. Do not create a duplicate
+   listing.
+2. Upload the prepared 0.0.24 ZIP over rejected version 0.0.23. If the draft has
+   changed since the screenshot, reconcile its uploaded version first.
+3. Replace the old Example Domain screenshot with the handoff screenshot below.
+   Remove other media that does not directly demonstrate the extension.
+4. Check the description, privacy declarations, reviewer instructions, and
+   initial **unlisted** distribution against the source copy in this document.
+5. Submit for review and record the dashboard receipt/status. Update install
+   documentation only after approval/publication is independently verified.
+
+Snapshot bug fixes in the local driver require a separate npm/runtime release;
+uploading this shim ZIP does not install those fixes in an already-running relay.
+
 Store assets live under `docs/chrome-web-store/`:
 
 - `icon-128.png`
-- `browser-control-1280x800.jpg`
+- `browser-control-handoff-1280x800.png` (use this replacement, not the old
+  `browser-control-1280x800.jpg` Example Domain capture)
 - `small-promo-440x280.png`
 
 Run:

@@ -10,7 +10,9 @@ function root(options: {
   readonly sessionId: string
   readonly targetId: string
   readonly browserControlSessionId?: string
+  readonly browserContextId?: string
   readonly owner?: "relay" | "user"
+  readonly crashed?: boolean
 }): ConnectedTarget {
   return {
     tabId: options.tabId,
@@ -22,9 +24,11 @@ function root(options: {
       url: `https://example.com/${options.targetId}`,
       attached: true,
       canAccessOpener: false,
+      ...(options.browserContextId ? { browserContextId: options.browserContextId } : {}),
     },
     owner: options.owner ?? "relay",
     ...(options.browserControlSessionId ? { browserControlSessionId: options.browserControlSessionId } : {}),
+    ...(options.crashed ? { crashed: true } : {}),
   }
 }
 
@@ -141,7 +145,7 @@ describe("CdpRouter", () => {
     expect(router.preferredRoot(client)).toBeUndefined()
   })
 
-  it("selects exactly one visible root for a raw client", () => {
+  it("groups raw roots in the default browser context", () => {
     const { clients, registry, router } = setup()
     const client = {}
     clients.register(client)
@@ -151,19 +155,70 @@ describe("CdpRouter", () => {
     expect(router.preferredRoot(client)).toBe(visible)
 
     registry.addRootTarget(root({ tabId: 2, sessionId: "root-2", targetId: "target-2" }))
-    expect(router.preferredRoot(client)).toBeUndefined()
+    expect(router.preferredRoot(client)).toBe(visible)
   })
 
-  it("keeps crashed roots in raw-client selection and ambiguity checks", () => {
+  it("groups multiple raw roots only when they prove the same browser context", () => {
+    const { clients, registry, router } = setup()
+    const client = {}
+    clients.register(client)
+    const first = root({ tabId: 1, sessionId: "root-1", targetId: "target-1", browserContextId: "context-a" })
+    registry.addRootTarget(first)
+    registry.addRootTarget(root({ tabId: 2, sessionId: "root-2", targetId: "target-2", browserContextId: "context-a" }))
+    expect(router.preferredRoot(client)).toBe(first)
+
+    registry.addRootTarget(root({ tabId: 3, sessionId: "root-3", targetId: "target-3", browserContextId: "context-b" }))
+    expect(router.preferredRoot(client)).toBeUndefined()
+    expect(router.preferredRoot(client, "context-a")).toBe(first)
+    expect(router.preferredRoot(client, "missing-context")).toBeUndefined()
+  })
+
+  it("validates context identity and skips crashed roots for named clients", () => {
+    const { clients, registry, router } = setup()
+    const client = {}
+    clients.register(client, "session-a")
+    registry.addRootTarget(root({
+      tabId: 1,
+      sessionId: "crashed-root",
+      targetId: "crashed-target",
+      browserControlSessionId: "session-a",
+      browserContextId: "context-a",
+      crashed: true,
+    }))
+    const healthy = root({
+      tabId: 2,
+      sessionId: "healthy-root",
+      targetId: "healthy-target",
+      browserControlSessionId: "session-a",
+      browserContextId: "context-a",
+    })
+    registry.addRootTarget(healthy)
+    registry.addRootTarget(root({
+      tabId: 3,
+      sessionId: "other-context-root",
+      targetId: "other-context-target",
+      browserControlSessionId: "session-a",
+      browserContextId: "context-b",
+    }))
+
+    expect(router.preferredRoot(client)).toBe(healthy)
+    expect(router.preferredRoot(client, "context-a")).toBe(healthy)
+    expect(router.preferredRoot(client, "context-b")?.tabId).toBe(3)
+    expect(router.preferredRoot(client, "context-missing")).toBeUndefined()
+  })
+
+  it("excludes crashed roots from raw context routing while keeping explicit access", () => {
     const { clients, registry, router } = setup()
     const client = {}
     clients.register(client)
     registry.addRootTarget(root({ tabId: 1, sessionId: "root-1", targetId: "target-1" }))
     const crashed = registry.markRootTargetCrashed(1)
-    expect(router.preferredRoot(client)).toBe(crashed)
-
-    registry.addRootTarget(root({ tabId: 2, sessionId: "root-2", targetId: "target-2" }))
     expect(router.preferredRoot(client)).toBeUndefined()
+    expect(router.targetForAttach(client, "target-1")).toBe(crashed)
+
+    const healthy = root({ tabId: 2, sessionId: "root-2", targetId: "target-2" })
+    registry.addRootTarget(healthy)
+    expect(router.preferredRoot(client)).toBe(healthy)
   })
 
   it("resolves only targets visible to the client", () => {

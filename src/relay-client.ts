@@ -12,6 +12,11 @@ import {
   type ExecuteRequest,
   ExecuteResponse,
   ExtensionStatus,
+  FlightRecorderCancelResponse,
+  type FlightRecorderSaveRequest,
+  FlightRecorderSaveResponse,
+  type FlightRecorderStartRequest,
+  FlightRecorderStatusResponse,
   NetworkCancelResponse,
   type NetworkSessionRequest,
   type NetworkStartRequest,
@@ -131,6 +136,10 @@ export interface Interface {
   readonly recordingStop: (target: RecordingTargetRequest) => Effect.Effect<RecordingStopResponse, RelayClientError>
   readonly recordingStatus: (target: RecordingTargetRequest) => Effect.Effect<RecordingStatusResponse, RelayClientError>
   readonly recordingCancel: (target: RecordingTargetRequest) => Effect.Effect<RecordingCancelResponse, RelayClientError>
+  readonly flightRecorderStart: (request: FlightRecorderStartRequest) => Effect.Effect<FlightRecorderStatusResponse, RelayClientError>
+  readonly flightRecorderStatus: (target: RecordingTargetRequest) => Effect.Effect<FlightRecorderStatusResponse, RelayClientError>
+  readonly flightRecorderSaveLast: (request: FlightRecorderSaveRequest) => Effect.Effect<FlightRecorderSaveResponse, RelayClientError>
+  readonly flightRecorderCancel: (target: RecordingTargetRequest) => Effect.Effect<FlightRecorderCancelResponse, RelayClientError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("browser-control/RelayClient") {}
@@ -296,6 +305,18 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
     recordingStop: (target) => postJson("/recording/stop", recordingTargetBody(target), RecordingStopResponse),
     recordingStatus: (target) => getJson(`/recording/status${recordingTargetQuery(target)}`, RecordingStatusResponse),
     recordingCancel: (target) => postJson("/recording/cancel", recordingTargetBody(target), RecordingCancelResponse),
+    flightRecorderStart: (request) => postJson("/flight-recorder/start", {
+      ...recordingTargetBody(request),
+      ...(request.retentionMs === undefined ? {} : { retentionMs: request.retentionMs }),
+      ...(request.frameRate === undefined ? {} : { frameRate: request.frameRate }),
+    }, FlightRecorderStatusResponse),
+    flightRecorderStatus: (target) => getJson(`/flight-recorder/status${recordingTargetQuery(target)}`, FlightRecorderStatusResponse),
+    flightRecorderSaveLast: (request) => postJson("/flight-recorder/save-last", {
+      ...recordingTargetBody(request),
+      outputPath: request.outputPath,
+      ...(request.durationMs === undefined ? {} : { durationMs: request.durationMs }),
+    }, FlightRecorderSaveResponse),
+    flightRecorderCancel: (target) => postJson("/flight-recorder/cancel", recordingTargetBody(target), FlightRecorderCancelResponse),
   })
 })
 

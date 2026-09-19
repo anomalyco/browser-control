@@ -242,6 +242,63 @@ describe("MCP tool results", () => {
     }).pipe(Effect.scoped))
   })
 
+  it("exposes ordinary and rolling recording lifecycle tools", async () => {
+    const recordingStart = vi.fn<RelayClient.Interface["recordingStart"]>(() => Effect.succeed({ success: true, tabId: 7, startedAt: 1, path: "/tmp/demo.mp4", mimeType: "video/mp4", mode: "cdp", artifactType: "mp4" }))
+    const recordingStatus = vi.fn<RelayClient.Interface["recordingStatus"]>(() => Effect.succeed({ isRecording: true, tabId: 7 }))
+    const recordingStop = vi.fn<RelayClient.Interface["recordingStop"]>(() => Effect.succeed({ success: true, tabId: 7, duration: 100, path: "/tmp/demo.mp4", size: 10, mode: "cdp", artifactType: "mp4" }))
+    const recordingCancel = vi.fn<RelayClient.Interface["recordingCancel"]>(() => Effect.succeed({ success: true }))
+    const flightRecorderStart = vi.fn<RelayClient.Interface["flightRecorderStart"]>(() => Effect.succeed({ active: true, tabId: 7, retentionMs: 60_000 }))
+    const flightRecorderStatus = vi.fn<RelayClient.Interface["flightRecorderStatus"]>(() => Effect.succeed({ active: true, tabId: 7, bufferedFrames: 3 }))
+    const flightRecorderSaveLast = vi.fn<RelayClient.Interface["flightRecorderSaveLast"]>(() => Effect.succeed({ path: "/tmp/last.mp4", durationMs: 1_000, frameCount: 3, sourceFrameCount: 3, droppedFrameCount: 0 }))
+    const flightRecorderCancel = vi.fn<RelayClient.Interface["flightRecorderCancel"]>(() => Effect.succeed({ cancelled: true }))
+    await Effect.runPromise(Effect.gen(function* () {
+      const server = yield* McpServer.McpServer.make
+      yield* Layer.build(mcpToolsLayer.pipe(
+        Layer.provide(Layer.succeed(McpServer.McpServer, server)),
+        Layer.provide(Layer.mock(RelayClient.Service, {
+          endpoint: "http://127.0.0.1:19989",
+          version: Effect.succeed({ version: "1.0.0", buildId: "2026-08-31T12:00:00.000Z" }),
+          extensionStatus: Effect.succeed({ connected: true, version: "9.4.2", activeTargets: 1 }),
+          recordingStart,
+          recordingStatus,
+          recordingStop,
+          recordingCancel,
+          flightRecorderStart,
+          flightRecorderStatus,
+          flightRecorderSaveLast,
+          flightRecorderCancel,
+        })),
+      ))
+      const initializePayload = { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test-client", version: "1.0.0" } }
+      const client = McpSchema.McpServerClient.of({
+        clientId: 1,
+        protocolVersion: "2025-06-18",
+        clientCapabilities: {},
+        clientInfo: initializePayload.clientInfo,
+        initializePayload,
+        getClient: Effect.die("unexpected client callback"),
+      })
+      yield* Effect.gen(function* () {
+        for (const [name, args] of [
+          ["recording_start", { outputPath: "/tmp/demo.mp4", mode: "cdp", frameRate: 30 }],
+          ["recording_status", {}],
+          ["recording_stop", {}],
+          ["recording_cancel", {}],
+          ["flight_recorder_start", { retentionMs: 60_000, frameRate: 30 }],
+          ["flight_recorder_status", {}],
+          ["flight_recorder_save_last", { outputPath: "/tmp/last.mp4", durationMs: 1_000 }],
+          ["flight_recorder_cancel", {}],
+        ] as const) {
+          expect((yield* server.callTool({ name, arguments: args })).isError).toBe(false)
+        }
+      }).pipe(Effect.provideService(McpSchema.McpServerClient, client))
+    }).pipe(Effect.scoped))
+
+    expect(recordingStart).toHaveBeenCalledWith(expect.objectContaining({ sessionId: expect.stringMatching(/^mcp-/), outputPath: "/tmp/demo.mp4", mode: "cdp", frameRate: 30 }))
+    expect(flightRecorderStart).toHaveBeenCalledWith(expect.objectContaining({ retentionMs: 60_000, frameRate: 30 }))
+    expect(flightRecorderSaveLast).toHaveBeenCalledWith(expect.objectContaining({ outputPath: "/tmp/last.mp4", durationMs: 1_000 }))
+  })
+
   it("starts against a mismatched relay without replacing it and retains observational tools", async () => {
     let shutdowns = 0
     const result = await Effect.runPromise(Effect.gen(function* () {
@@ -287,6 +344,8 @@ describe("MCP tool results", () => {
     expect(mcpToolRequiresRelayCompatibility("status")).toBe(false)
     expect(mcpToolRequiresRelayCompatibility("session_list")).toBe(false)
     expect(mcpToolRequiresRelayCompatibility("network_status")).toBe(false)
+    expect(mcpToolRequiresRelayCompatibility("recording_status")).toBe(false)
+    expect(mcpToolRequiresRelayCompatibility("flight_recorder_status")).toBe(false)
     expect(mcpToolRequiresRelayCompatibility("secrets_status")).toBe(false)
     expect(mcpToolRequiresRelayCompatibility("session_current")).toBe(false)
     expect(mcpToolRequiresRelayCompatibility("skill")).toBe(false)

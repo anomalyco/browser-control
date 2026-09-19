@@ -1,6 +1,7 @@
 import fs from "node:fs"
 import path from "node:path"
 import { Schema } from "effect"
+import { isUnsupportedDirectorySyncError } from "./fs-durability.ts"
 import { RelayShutdownRequest } from "./relay-schema.ts"
 
 const requestFields = {
@@ -40,7 +41,11 @@ export function appendRelayLifecycleEvent(filePath: string, event: RelayLifecycl
   }
   const parent = fs.openSync(directory, "r")
   try {
-    fs.fsyncSync(parent)
+    try {
+      fs.fsyncSync(parent)
+    } catch (error) {
+      if (!isUnsupportedDirectorySyncError(error)) throw error
+    }
   } finally {
     fs.closeSync(parent)
   }

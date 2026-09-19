@@ -3,6 +3,7 @@ import os from "node:os"
 import path from "node:path"
 import crypto from "node:crypto"
 import { Schema } from "effect"
+import { isUnsupportedDirectorySyncError } from "./fs-durability.ts"
 import { isValidSessionId } from "./relay-helpers.ts"
 
 export const PersistedSession = Schema.Struct({
@@ -65,7 +66,11 @@ export class SessionCatalog {
       await fs.rename(temporaryPath, this.filePath)
       const directoryHandle = await fs.open(directory, "r")
       try {
-        await directoryHandle.sync()
+        try {
+          await directoryHandle.sync()
+        } catch (error) {
+          if (!isUnsupportedDirectorySyncError(error)) throw error
+        }
       } finally {
         await directoryHandle.close()
       }

@@ -687,6 +687,85 @@ const recording = Command.make("recording").pipe(
   Command.withSubcommands([recordingStart, recordingStop, recordingStatus, recordingCancel]),
 )
 
+const flightRecorderStart = Command.make(
+  "start",
+  {
+    session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Buffer the tab owned by this session")),
+    tabId: Flag.integer("tab-id").pipe(Flag.optional, Flag.withDescription("Buffer this attached Chrome tab id")),
+    retentionMs: Flag.integer("retention-ms").pipe(Flag.optional, Flag.withDescription("Ring-buffer duration in milliseconds (1000..120000; default 60000)")),
+    frameRate: Flag.integer("frame-rate").pipe(Flag.optional, Flag.withDescription("Output frame rate from 1 to 60")),
+    json: Flag.boolean("json"),
+  },
+  Effect.fn("Cli.flightRecorderStart")(function* ({ session, tabId, retentionMs, frameRate, json }) {
+    const relay = yield* RelayClient.Service
+    yield* ensureCliRelayAndExtension()
+    const target = yield* recordingTarget({ session, tabId })
+    const result = yield* relay.flightRecorderStart({
+      ...target,
+      ...(Option.isSome(retentionMs) ? { retentionMs: retentionMs.value } : {}),
+      ...(Option.isSome(frameRate) ? { frameRate: frameRate.value } : {}),
+    })
+    yield* Console.log(json ? JSON.stringify(result) : `Flight recorder buffering tab ${result.tabId}; retention=${result.retentionMs}ms`)
+  }),
+).pipe(Command.withDescription("Start a rolling in-memory video buffer"))
+
+const flightRecorderStatus = Command.make(
+  "status",
+  {
+    session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s")),
+    tabId: Flag.integer("tab-id").pipe(Flag.optional),
+    json: Flag.boolean("json"),
+  },
+  Effect.fn("Cli.flightRecorderStatus")(function* ({ session, tabId, json }) {
+    const relay = yield* RelayClient.Service
+    yield* ensureCliRelay()
+    const result = yield* relay.flightRecorderStatus(yield* recordingTarget({ session, tabId }))
+    if (json) return yield* Console.log(JSON.stringify(result))
+    if (!result.active) return yield* Console.log("Flight recorder inactive")
+    yield* Console.log(`Flight recorder tab=${result.tabId} frames=${result.bufferedFrames} retained=${result.retainedDurationMs}ms bytes=${result.bufferedBytes}`)
+  }),
+).pipe(Command.withDescription("Show rolling flight-recorder status"))
+
+const flightRecorderSaveLast = Command.make(
+  "save-last",
+  {
+    outputPath: Argument.string("output-path").pipe(Argument.withDescription("Fresh .webm or .mp4 artifact path")),
+    session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s")),
+    tabId: Flag.integer("tab-id").pipe(Flag.optional),
+    durationMs: Flag.integer("duration-ms").pipe(Flag.optional, Flag.withDescription("How much recent history to save; defaults to 30 seconds")),
+    json: Flag.boolean("json"),
+  },
+  Effect.fn("Cli.flightRecorderSaveLast")(function* ({ outputPath, session, tabId, durationMs, json }) {
+    const relay = yield* RelayClient.Service
+    yield* ensureCliRelay()
+    const result = yield* relay.flightRecorderSaveLast({
+      ...(yield* recordingTarget({ session, tabId })),
+      outputPath: path.resolve(outputPath),
+      ...(Option.isSome(durationMs) ? { durationMs: durationMs.value } : {}),
+    })
+    yield* Console.log(json ? JSON.stringify(result) : `Saved ${result.durationMs}ms flight recorder clip (${result.frameCount} frames) to ${result.path}`)
+  }),
+).pipe(Command.withDescription("Save the most recent buffered video without stopping the recorder"))
+
+const flightRecorderCancel = Command.make(
+  "cancel",
+  {
+    session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s")),
+    tabId: Flag.integer("tab-id").pipe(Flag.optional),
+  },
+  Effect.fn("Cli.flightRecorderCancel")(function* ({ session, tabId }) {
+    const relay = yield* RelayClient.Service
+    yield* ensureCliRelay()
+    const result = yield* relay.flightRecorderCancel(yield* recordingTarget({ session, tabId }))
+    yield* Console.log(result.cancelled ? "Flight recorder stopped" : "No active flight recorder")
+  }),
+).pipe(Command.withDescription("Stop and discard the rolling video buffer"))
+
+const flightRecorder = Command.make("flight-recorder").pipe(
+  Command.withDescription("Keep and save a rolling buffer of recent browser video"),
+  Command.withSubcommands([flightRecorderStart, flightRecorderStatus, flightRecorderSaveLast, flightRecorderCancel]),
+)
+
 const networkSession = Effect.fnUntraced(function* (session: Option.Option<string>) {
   return yield* resolveExistingSessionId(Option.getOrUndefined(session) ?? Option.getOrUndefined(yield* sessionIdConfig))
 })
@@ -951,7 +1030,7 @@ const mcp = Command.make(
 
 export const browserControl = Command.make("browser-control").pipe(
   Command.withDescription("Control the user's existing browser through the Browser Control extension"),
-  Command.withSubcommands([serve, relay, execute, session, status, network, secrets, recording, journal, doctor, skill, mcp]),
+  Command.withSubcommands([serve, relay, execute, session, status, network, secrets, recording, flightRecorder, journal, doctor, skill, mcp]),
 )
 
 const mainLayer = Layer.mergeAll(RelayClient.layerFetch, SessionStore.layer).pipe(

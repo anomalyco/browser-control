@@ -45,6 +45,13 @@ without a concrete browser-API reason.
 Work these in order unless field evidence changes the priority. Every item
 should land with unit or smoke evidence appropriate to the behavior.
 
+September 6 fieldwork: resubmitted the existing Chrome Web Store item with shim
+0.0.24 and a real handoff demonstration replacing the old Example Domain media.
+The dashboard confirmed Pending Review, with Unlisted visibility. Await approval
+before advertising Store availability. Keep the independently versioned shim;
+snapshot corrections ship in the local driver, not the Store ZIP.
+See `docs/CHROME_WEB_STORE.md` for the prepared artifact.
+
 ### 1. Verify isolated runtime upgrades
 
 Candidate preparation builds, packs, installs, and validates outside the live
@@ -130,17 +137,54 @@ Verification:
 - Preserve complete staged child subtrees through replacement, including nested
   descendants and mixed insertion order, and reject stale-generation completion.
 
-### 3. Extend recording surfaces
+### 3. Validate new agent surfaces in the real browser
 
-- Add MCP recording start, stop, status, and cancel tools after the relay path is
-  robust.
-- Build the flight-recorder ring buffer only after chunk streaming lands.
+- Exercise snapshot search, automatic deltas, stable same-document refs,
+  contenteditable filling, WebMCP discovery/calls, and human demonstration code
+  generation against local fixtures and an adopted user tab.
+- Exercise MCP recording lifecycle parity and repeated flight-recorder
+  `save-last` clips without stopping the rolling buffer.
 
 Verification:
 
-- Confirm CLI and MCP recording behavior match.
+- Confirm CLI and MCP recording behavior match and inspect encoded flight clips.
 
 ## Recently Shipped
+
+### Agent inspection and page-native tools are more reusable
+
+`snapshot({ find, context })` returns bounded semantic snippets, while
+`snapshot({ delta: true })` establishes a baseline automatically and emits later
+changes. Compatible structural/accessibility identities retain ref ids across
+same-document captures; navigation still invalidates every ref. WebMCP-enabled
+pages are available through frame-aware `webmcp.list()` and `webmcp.call()`
+execute helpers that re-discover registrations before invoking them.
+
+### Human demonstrations become editable Playwright
+
+`demonstrate()` layers action recording onto the exact-tab handoff lifecycle.
+It records user clicks, edits, checkbox/select changes, and navigations, compacts
+successive text edits, and returns structured steps plus executable Playwright.
+Password values become explicit secret-source placeholders.
+
+### Recording covers MCP and recent-history capture
+
+MCP exposes ordinary recording start/stop/status/cancel operations. The rolling
+flight recorder keeps a bounded recent CDP compositor-frame window in memory,
+reports retention and drop counters, and can encode repeated WebM/MP4 `save-last`
+clips without stopping. It writes a sidecar receipt and cannot share a tab with
+an ordinary recording.
+
+### Windows tolerates unsupported directory sync
+
+Session catalog replacement and lifecycle logging retain file-level sync and
+attempt directory sync everywhere, but tolerate only platform/filesystem errors
+that explicitly mean directory handles cannot be synced.
+
+### Fill helpers support rich-text editors
+
+`fillInput` and `fillInputs` update contenteditable elements as well as input and
+textarea controls while preserving the existing no-focus DOM fallback behavior.
 
 ### Session cleanup is safely repeatable
 
@@ -210,6 +254,9 @@ rules out of relay transport orchestration. Browser-context permission and
 cookie commands route through a session-owned root for named clients, including
 multi-page sessions and browser CDP aliases, or exactly one visible root for raw
 clients, without falling through from a named client to an unrelated tab.
+Explicit browser-context ids must match a healthy visible root. Raw clients may
+route through several visible roots only when every root proves the same
+Chromium context; crashed roots never satisfy context routing.
 
 ### CDP client state is isolated per connection
 
@@ -430,10 +477,16 @@ reconciles existing client announcements, browser grouping, and page status.
 ### Inspection And Interaction Helpers
 
 - `snapshot(options?)` provides a bounded semantic read-before-act view.
+  Its default root prefers a single visible modal, includes out-of-main portal
+  dialogs, and reserves only a bounded share of the budget for list wrappers.
+  Native input roles match Playwright; native disclosure controls use structural
+  summary refs instead of an incorrect button-role constraint.
 - `snapshot({ diff: true })` compares against the previous compatible snapshot
-  and exposes refs only for current additions or changes.
+  while `snapshot({ delta: true })` returns a full first baseline and automatic
+  later deltas. `snapshot({ find, context })` returns matching semantic snippets.
 - `ref(id)` resolves controls from the latest valid snapshot and fails closed
-  after navigation or incompatible DOM drift.
+  after navigation or incompatible DOM drift. Compatible ids survive repeated
+  same-document captures.
 - `ariaSnapshot()` and raw Playwright provide deeper inspection when compact
   snapshots are insufficient. The helper omits native text-control values,
   custom ARIA range values, and editable content across SVG and open-shadow
@@ -448,8 +501,9 @@ reconciles existing client announcements, browser grouping, and page status.
   red-highlighted image. It rejects dimension mismatches instead of resizing,
   counts antialiasing changes, bounds input size, and never overwrites an existing
   output. It is an execute helper, not a new action-tool family.
-- `fillInput` and `fillInputs` provide a DOM-evaluation fallback when browser
-  extensions make native Playwright filling hang.
+- `fillInput` and `fillInputs` provide a DOM-evaluation fallback for input,
+  textarea, and contenteditable fields when native Playwright filling hangs.
+- `webmcp.list()` and `webmcp.call()` discover and invoke frame-scoped page tools.
 - Allowed Playwright mouse actions can reveal a spring-animated cursor.
   `showGhostCursor()`, `hideGhostCursor()`, and `ghostCursor.show/hide` provide
   explicit cosmetic control.
@@ -469,6 +523,8 @@ reconciles existing client announcements, browser grouping, and page status.
   for the action to settle; timeout or target cancellation disconnects the
   sandbox's Playwright connection before releasing the execute permit, so a
   non-settling action cannot mutate the page later.
+- `demonstrate()` uses that same waiter while recording human interactions and
+  returns structured actions plus editable Playwright code.
 - Destructive browser-state CDP methods such as `Browser.close` and cookie or
   cache clearing are always blocked.
 - Read-only sessions additionally reject `Input.*`. They reduce trusted
@@ -506,6 +562,8 @@ reconciles existing client announcements, browser grouping, and page status.
   `~/.browser-control/sessions/<id>/journal.jsonl`.
 - Recording supports extension `chrome.tabCapture` WebM for user-owned tabs and
   relay-owned CDP screencasting to WebM or MP4.
+- CLI and MCP expose recording lifecycle operations. A separate bounded flight
+  recorder can save recent WebM/MP4 clips repeatedly without stopping.
 
 ## Architecture Decisions
 
@@ -617,7 +675,7 @@ commands never replace a running relay.
   documented guardrails.
 - Native `locator.fill()` can hang on login-style fields when installed browser
   extensions inject focus handlers or overlays. `fillInput` is the explicit
-  fallback for ordinary `input` and `textarea` elements.
+  fallback for input, textarea, and contenteditable elements.
 - `fillInput` cannot reach fields inside closed shadow roots.
 - OOPIF behavior is guaranteed only by the current reconnect smoke scenarios.
 - Clipboard automation on insecure origins is not guaranteed.
@@ -638,6 +696,9 @@ commands never replace a running relay.
   Compositor events are not distinct-motion measurements. Tab capture and older
   relays omit unavailable quality data. All explicit frame rates must be integers
   in 1..60; never silently clamp unsupported requests.
+- The flight recorder has the same tab-activation, viewport, ffmpeg, and no-audio
+  constraints as CDP recording. Its 128 MiB/7,200-frame bounds can shorten the
+  requested retention window on visually busy pages.
 - The trusted sandbox exposes selected Node built-ins, not unrestricted local
   command execution.
 - Exact parity across third-party authentication remains a manual diagnostic.
@@ -649,9 +710,6 @@ commands never replace a running relay.
 
 These items are accepted directions but are not current priorities:
 
-- Keep approximately the last 60 seconds of CDP frames in a flight-recorder ring
-  buffer and support `recording save-last 30s` after recording streaming is
-  bounded.
 - Harden extension reconnect handling with `addEventListener`, one source for
   the `hello` message, and a bounded outbound event queue if lost debugger events
   continue to matter in practice.

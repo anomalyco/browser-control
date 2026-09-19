@@ -5,6 +5,7 @@ import path from "node:path"
 import { Effect, Latch, Schema } from "effect"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createHttpRequestHandler } from "../src/http-api.ts"
+import { FlightRecorderRelay } from "../src/flight-recorder.ts"
 import { RecordingRelay } from "../src/recording-relay.ts"
 import { ExecuteRequest, RelayShutdownRequest, SessionAdoptRequest } from "../src/relay-schema.ts"
 import { RelayShutdown } from "../src/relay-shutdown.ts"
@@ -18,6 +19,11 @@ const shutdownRequest = RelayShutdownRequest.make({
   client: { kind: "cli", instanceId: "client-test", buildId: "build-test" },
 })
 let home: string
+
+const makeFlightRecorder = () => new FlightRecorderRelay({
+  isExtensionConnected: () => true,
+  sendDebuggerCommand: async () => ({}),
+})
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), "browser-control-http-api-"))
@@ -194,6 +200,7 @@ describe("HTTP request schemas", () => {
         sendToExtension: async () => ({}),
         sendDebuggerCommand: async () => ({}),
       }),
+      flightRecorder: makeFlightRecorder(),
       registry,
       sessions,
     })
@@ -376,6 +383,7 @@ describe("HTTP request schemas", () => {
         sendToExtension: async () => ({}),
         sendDebuggerCommand: async () => ({}),
       }),
+      flightRecorder: makeFlightRecorder(),
     })
     let restart: http.ClientRequest | undefined
     const partial = http.request({
@@ -472,7 +480,7 @@ async function startBoundaryServer() {
       settle: Effect.void, quiescent: () => sessions.isDrained(), audit: () => Effect.void, stop: () => {},
     }),
     extensionStatus: () => ({ connected: true, version: "9.4.2" }),
-    registry, sessions, recordingRelay,
+    registry, sessions, recordingRelay, flightRecorder: makeFlightRecorder(),
   })
   return { server, port, sessions, recordingRelay }
 }

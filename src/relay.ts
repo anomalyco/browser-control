@@ -53,6 +53,7 @@ import { appendJournalEntry, defaultJournalBaseDir, makeJournalEntry } from "./s
 import { defaultSessionCatalogPath, SessionCatalog } from "./session-catalog.ts"
 import { BrowserControlSessions } from "./session-manager.ts"
 import { RecordingRelay } from "./recording-relay.ts"
+import { FlightRecorderRelay } from "./flight-recorder.ts"
 import { appendManagedRelayProcessLog } from "./relay-log.ts"
 import { appendRelayLifecycleEvent, RelayLifecycleEvent } from "./relay-lifecycle-log.ts"
 import { RelayShutdown } from "./relay-shutdown.ts"
@@ -202,11 +203,18 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     isExtensionConnected: () => {
       return extensionRpc.connected
     },
+    isTabUnavailable: (tabId) => flightRecorder.isActiveTab(tabId),
+  })
+  const flightRecorder = new FlightRecorderRelay({
+    sendDebuggerCommand: (command) => Effect.runPromise(sendDebuggerCommand(command)),
+    isExtensionConnected: () => extensionRpc.connected,
+    isTabRecording: (tabId) => recordingRelay.isRecordingTab(tabId),
   })
   const handoffs = new HandoffRegistry()
   const activeHandoffTabs = new Map<string, Set<number>>()
   const clearLiveExtensionState = (reason: string) => {
     void recordingRelay.cleanupAll(reason).catch(() => {})
+    void flightRecorder.cleanupAll().catch(() => {})
     pendingTabGrouping.clear()
     for (const target of [...registry.listRootTargets()]) {
       detachTargetState(target.tabId, { preserveSessionTarget: true, updateExtension: false })
@@ -508,7 +516,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     resume: () => sessions.resume(),
     busy: () => {
       if (Array.from(cdpClients).some((client) => !cdpClients.isSandbox(client))) return "raw-clients"
-      if (recordingRelay.hasActiveRecordings() || sessions.hasActiveNetworkCapture()) return "recordings"
+      if (recordingRelay.hasActiveRecordings() || flightRecorder.hasActiveRecorders() || sessions.hasActiveNetworkCapture()) return "recordings"
       return undefined
     },
     settle: settleRootWork(),
@@ -524,6 +532,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     shutdown: shutdownControl,
     registry,
     recordingRelay,
+    flightRecorder,
     sessions,
     extensionStatus: () => {
       return {
@@ -608,6 +617,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     handoffs.cancelAll()
     extensionRpc.rejectPending(new Error("Relay closed"))
     yield* Effect.tryPromise(() => recordingRelay.cleanupAll("Relay closed")).pipe(Effect.ignore)
+    yield* Effect.tryPromise(() => flightRecorder.cleanupAll()).pipe(Effect.ignore)
     for (const socket of cdpClients) {
       socket.close()
     }
@@ -904,7 +914,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     ) {
       return
     }
-    if (recordingRelay.handleDebuggerEvent({ tabId, method, params })) {
+    if (flightRecorder.handleDebuggerEvent({ tabId, method, params }) || recordingRelay.handleDebuggerEvent({ tabId, method, params })) {
       return
     }
     let shouldBroadcast = true
@@ -1259,7 +1269,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const normalizedMessage = removeDefaultLightColorSchemeEmulation(message)
     const browserAlias = message.sessionId !== undefined && cdpRouter.isBrowserAlias(socket, message.sessionId)
     const rootRoutable = isRootRoutableBrowserContextMethod(message.method) && (!message.sessionId || browserAlias)
-    const preferredRoot = rootRoutable ? cdpRouter.preferredRoot(socket) : undefined
+    const requestedBrowserContextId = typeof message.params?.browserContextId === "string" ? message.params.browserContextId : undefined
+    const preferredRoot = rootRoutable ? cdpRouter.preferredRoot(socket, requestedBrowserContextId) : undefined
     const route = rootRoutable && preferredRoot
       ? { tabId: preferredRoot.tabId, rootSessionId: preferredRoot.sessionId }
       : message.sessionId
@@ -1267,9 +1278,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       : undefined
     if (!route) {
       return yield* Effect.fail(new Error(rootRoutable
-        ? clientBrowserControlSessionId === undefined
-          ? `Exactly one visible root target is required for ${message.method}`
-          : `A session-owned root target is required for ${message.method}`
+        ? requestedBrowserContextId !== undefined
+          ? `A healthy visible root target in browser context ${requestedBrowserContextId} is required for ${message.method}`
+          : clientBrowserControlSessionId === undefined
+          ? `Exactly one visible browser context is required for ${message.method}`
+          : `A healthy session-owned root target is required for ${message.method}`
         : message.sessionId
         ? `Unknown CDP session ${message.sessionId} for ${message.method}`
         : `CDP sessionId is required for ${message.method}`))
@@ -1406,6 +1419,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       Effect.runPromise(Effect.ignore(sendToExtension({ method: "action.setAttached", params: { tabId, attached: false } }))).catch(() => {})
       void recordingRelay.abortRecordingForTab({ tabId, reason: "Tab detached" }).catch((error: unknown) => {
         console.error("Failed to abort recording for detached tab", error)
+      })
+      void flightRecorder.cancel({ tabId }).catch((error: unknown) => {
+        console.error("Failed to stop flight recorder for detached tab", error)
       })
     }
     const detached = registry.detachRootTargetState(tabId)

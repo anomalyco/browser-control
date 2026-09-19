@@ -43,7 +43,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       name: "execute",
       description: "Execute trusted Playwright JavaScript against the Browser Control session. The result includes console logs, warnings, a bounded execution-context diagnostic when relevant, and an aftermath summary (URL movement, navigations, error counts, handoffs).",
       inputSchema: objectSchema({
-        code: { type: "string", description: "JavaScript code to execute. It receives browser, context, page, state, modules, fillInput, fillInputs, snapshot(options?) for a compact semantic outline or explicit diff against the previous snapshot, ref(id) for the latest snapshot's locator, screenshotWithLabels, ariaSnapshot(target?, { timeout }), ghostCursor (show/hide), and handoff(message, { timeoutMs, start? })." },
+        code: { type: "string", description: "JavaScript code to execute. It receives browser, context, page, state, modules, fillInput, fillInputs, snapshot(options?) for compact semantic outlines, search, explicit diffs, or automatic deltas, persistent compatible ref(id) locators, webmcp (list/call), screenshot helpers, ariaSnapshot, ghostCursor, handoff, demonstrate, and network capture." },
         session: { type: "string", description: "Optional existing Browser Control session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed." },
         targetUrl: { type: "string", description: "Optional URL substring selecting an existing attached page. This does not navigate or open a URL; use page.goto() for that." },
         targetIndex: { type: "integer", minimum: 0, description: "Optional zero-based attached page index selector." },
@@ -291,6 +291,128 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       handle: (input) => relay.networkCancel({ sessionId: optionalStringField(input, "session") ?? currentSession.id }),
     },
     {
+      name: "recording_start",
+      description: "Start recording the current session tab. CDP mode records video to WebM or MP4; tab-capture mode supports WebM and optional audio.",
+      inputSchema: objectSchema({
+        session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." },
+        outputPath: { type: "string", description: "Recording artifact path, resolved against the MCP process working directory." },
+        mode: { type: "string", enum: ["auto", "tab-capture", "cdp"], description: "Recording backend. Defaults to auto." },
+        audio: { type: "boolean", description: "Capture tab audio in tab-capture mode." },
+        frameRate: { type: "integer", minimum: 1, maximum: 60, description: "Requested frame rate." },
+        maxDurationMs: { type: "integer", minimum: 1, description: "Maximum recording duration in milliseconds." },
+      }, ["outputPath"]),
+      readOnly: false,
+      destructive: false,
+      idempotent: false,
+      handle: (input) => {
+        const object = requireObject(input)
+        const mode = optionalStringField(object, "mode")
+        if (mode !== undefined && mode !== "auto" && mode !== "tab-capture" && mode !== "cdp") {
+          return Effect.fail(new Error("mode must be auto, tab-capture, or cdp"))
+        }
+        const frameRate = optionalPositiveIntegerField(object, "frameRate")
+        if (frameRate !== undefined && frameRate > 60) return Effect.fail(new Error("frameRate must be at most 60"))
+        const maxDurationMs = optionalPositiveIntegerField(object, "maxDurationMs")
+        const audio = optionalBooleanField(object, "audio")
+        return relay.recordingStart({
+          sessionId: optionalStringField(object, "session") ?? currentSession.id,
+          outputPath: path.resolve(requiredStringField(object, "outputPath")),
+          ...(mode ? { mode } : {}),
+          ...(audio === undefined ? {} : { audio }),
+          ...(frameRate === undefined ? {} : { frameRate }),
+          ...(maxDurationMs === undefined ? {} : { maxDurationMs }),
+        })
+      },
+    },
+    {
+      name: "recording_stop",
+      description: "Stop the active recording for a session and finalize its artifact.",
+      inputSchema: objectSchema({ session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." } }),
+      readOnly: false,
+      destructive: false,
+      idempotent: false,
+      handle: (input) => relay.recordingStop({ sessionId: optionalStringField(input, "session") ?? currentSession.id }),
+    },
+    {
+      name: "recording_status",
+      description: "Return bounded status and quality counters for a session recording.",
+      inputSchema: objectSchema({ session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." } }),
+      readOnly: true,
+      destructive: false,
+      idempotent: true,
+      handle: (input) => relay.recordingStatus({ sessionId: optionalStringField(input, "session") ?? currentSession.id }),
+    },
+    {
+      name: "recording_cancel",
+      description: "Cancel a session recording and discard its unfinished artifact.",
+      inputSchema: objectSchema({ session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." } }),
+      readOnly: false,
+      destructive: true,
+      idempotent: true,
+      handle: (input) => relay.recordingCancel({ sessionId: optionalStringField(input, "session") ?? currentSession.id }),
+    },
+    {
+      name: "flight_recorder_start",
+      description: "Start a rolling in-memory video buffer for the current session tab. Saving a clip does not stop buffering.",
+      inputSchema: objectSchema({
+        session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." },
+        retentionMs: { type: "integer", minimum: 1000, maximum: 120000, description: "Rolling retention window. Defaults to 60000." },
+        frameRate: { type: "integer", minimum: 1, maximum: 60, description: "Saved clip frame rate. Defaults to 60." },
+      }),
+      readOnly: false,
+      destructive: false,
+      idempotent: false,
+      handle: (input) => {
+        const object = requireObject(input)
+        const retentionMs = optionalPositiveIntegerField(object, "retentionMs")
+        const frameRate = optionalPositiveIntegerField(object, "frameRate")
+        return relay.flightRecorderStart({
+          sessionId: optionalStringField(object, "session") ?? currentSession.id,
+          ...(retentionMs === undefined ? {} : { retentionMs }),
+          ...(frameRate === undefined ? {} : { frameRate }),
+        })
+      },
+    },
+    {
+      name: "flight_recorder_status",
+      description: "Return bounded rolling-buffer duration, frame, byte, and drop counters.",
+      inputSchema: objectSchema({ session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." } }),
+      readOnly: true,
+      destructive: false,
+      idempotent: true,
+      handle: (input) => relay.flightRecorderStatus({ sessionId: optionalStringField(input, "session") ?? currentSession.id }),
+    },
+    {
+      name: "flight_recorder_save_last",
+      description: "Encode and save the most recent buffered browser video without stopping the flight recorder.",
+      inputSchema: objectSchema({
+        session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." },
+        outputPath: { type: "string", description: "Fresh .webm or .mp4 path, resolved against the MCP process working directory." },
+        durationMs: { type: "integer", minimum: 1, description: "Recent duration to save. Defaults to 30000 and cannot exceed retention." },
+      }, ["outputPath"]),
+      readOnly: false,
+      destructive: false,
+      idempotent: false,
+      handle: (input) => {
+        const object = requireObject(input)
+        const durationMs = optionalPositiveIntegerField(object, "durationMs")
+        return relay.flightRecorderSaveLast({
+          sessionId: optionalStringField(object, "session") ?? currentSession.id,
+          outputPath: path.resolve(requiredStringField(object, "outputPath")),
+          ...(durationMs === undefined ? {} : { durationMs }),
+        })
+      },
+    },
+    {
+      name: "flight_recorder_cancel",
+      description: "Stop and discard a session's rolling video buffer.",
+      inputSchema: objectSchema({ session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." } }),
+      readOnly: false,
+      destructive: true,
+      idempotent: true,
+      handle: (input) => relay.flightRecorderCancel({ sessionId: optionalStringField(input, "session") ?? currentSession.id }),
+    },
+    {
       name: "secrets_status",
       description: "Return secret profile references, sources, and expiration metadata without revealing credential values.",
       inputSchema: objectSchema({ name: { type: "string", description: "Secret profile name." } }, ["name"]),
@@ -407,7 +529,7 @@ const registerTools = Effect.gen(function* () {
 })
 
 export function mcpToolRequiresRelayCompatibility(name: string): boolean {
-  return !["status", "session_list", "session_current", "network_status", "secrets_status", "skill"].includes(name)
+  return !["status", "session_list", "session_current", "network_status", "recording_status", "flight_recorder_status", "secrets_status", "skill"].includes(name)
 }
 
 export const mcpServerLayer = McpServer.layerStdio({

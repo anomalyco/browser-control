@@ -115,6 +115,29 @@ _Avoid_: Security sandbox, permission boundary
 The per-session `state` object that survives across multiple execute calls.
 _Avoid_: Browser storage, tab state
 
+**Snapshot Ref**:
+A compact semantic handle whose id remains stable across compatible
+same-document captures while structural selector, role, and full accessible
+identity agree. Main-frame navigation invalidates it.
+_Avoid_: DOM node id, permanent locator
+
+**Page Tool**:
+A WebMCP tool registered by the current page or one of its frames and discovered
+at call time through the Execute Sandbox. Its metadata and result originate in
+the page.
+_Avoid_: Browser Control command, MCP server tool
+
+**Human Demonstration**:
+An exact-tab handoff that records a person's visible browser interactions and
+returns structured steps plus editable Playwright code.
+_Avoid_: Verified automation, autonomous recording
+
+**Flight Recorder**:
+A bounded in-memory ring of recent CDP compositor frames for one attached tab.
+Saving a recent clip does not stop the recorder; ordinary recording and a Flight
+Recorder cannot own the same tab simultaneously.
+_Avoid_: Session Journal, complete screen recording
+
 **Session Catalog**:
 The endpoint-scoped, private relay file that preserves session identity,
 read-only mode, and the exact default-target pointer across relay processes.
@@ -194,6 +217,8 @@ _Avoid_: Secret Profile, encrypted response
 - An **Agent** controls the browser by running code in an **Execute Sandbox**.
 - An **Execute Sandbox** owns **Persistent State**; the Target Registry owns
   target assignment.
+- An **Execute Sandbox** creates **Snapshot Refs**, invokes **Page Tools**, and
+  can turn a **Human Demonstration** into reusable code.
 - A **Session Catalog** restores session and target identity after relay restart;
   the restored **Execute Sandbox** starts with empty **Persistent State**.
 - An **Execute Sandbox** owns at most one active **Network Capture**.
@@ -205,6 +230,8 @@ _Avoid_: Secret Profile, encrypted response
   reading a **Secret Profile** or exporting cookies.
 - A **Sensitive Response** is never appended to the execute journal or admitted
   while **Network Capture** is active.
+- A **Flight Recorder** retains recent visual evidence independently of the
+  per-execute Session Journal.
 - **Detach** removes an **Attached Tab** from the **Attached-Tab Pool**.
 
 ## Example Dialogue
