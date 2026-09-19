@@ -1,5 +1,15 @@
 # @opencode-ai/browser-control
 
+## 0.8.0
+
+### Minor Changes
+
+- b1410ca: Add snapshot search and automatic deltas with persistent compatible refs, contenteditable filling, WebMCP page tools, human demonstration code generation, MCP recording controls, and a rolling flight recorder. Fix Windows relay startup and session persistence on filesystems that reject directory fsync, and validate browser-context CDP routing by healthy Chromium context identity.
+
+### Patch Changes
+
+- b1410ca: Correct compact snapshot refs for native number/search inputs and disclosure controls, include portal dialogs in the default scope, and bound reserved list wrappers so dense result pages retain actionable links.
+
 ## 0.7.1
 
 ### Patch Changes
