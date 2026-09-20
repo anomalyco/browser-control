@@ -271,6 +271,16 @@ local Node relay.
   workers. Exposing an unroutable paused child can hang its parent navigation.
 - OOPIF reconnect depends on replaying stored child target attaches plus the
   current child frame navigation on the child session for stock Playwright.
+- `ProtectedFrameTracker` (`src/protected-frames.ts`) owns protected frames:
+  child frames whose document is a restricted URL, such as a password manager's
+  `chrome-extension://` inline menu. Retract an already-forwarded attach with a
+  synthetic `Page.frameDetached`, suppress the frame's later events, and never
+  mark the main frame without positive child evidence. While such a frame is
+  open Chrome rejects every debugger command for the tab; the relay records that
+  as `protectedUi` on the root target, lifts it on the next successful command
+  or when the last protected frame goes away, and the sandbox names masked
+  destroyed-context or locator-timeout failures `target/cross-extension-page`
+  instead of running the page health check.
 - Relay shutdown should await HTTP and websocket close callbacks so scoped tests
   and smoke runs do not leak listeners or ports.
 - Use plain TypeScript for the MV3 extension unless a build-system need forces a

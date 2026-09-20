@@ -98,6 +98,7 @@ const makeFakeSandbox = (options?: {
       crashedTargets.push(targetId)
       return persistenceTarget?.id === targetId
     },
+    markTargetProtectedUi: (targetId) => persistenceTarget?.id === targetId,
     markTargetDetached: (targetId) => {
       detachedTargets.push(targetId)
       const affected = persistenceTarget?.id === targetId

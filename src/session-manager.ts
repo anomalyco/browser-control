@@ -247,6 +247,16 @@ export class BrowserControlSessions {
     return affectedSessionIds
   }
 
+  markTargetProtectedUi(targetId: string, protectedUi: boolean): string[] {
+    const affectedSessionIds: string[] = []
+    for (const session of this.sessions.values()) {
+      if (session.sandbox.markTargetProtectedUi(targetId, protectedUi)) {
+        affectedSessionIds.push(session.id)
+      }
+    }
+    return affectedSessionIds
+  }
+
   markTargetDetached(targetId: string): string[] {
     const affectedSessionIds: string[] = []
     for (const session of this.sessions.values()) {

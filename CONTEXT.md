@@ -91,6 +91,14 @@ The serialized reserve, Playwright page resolution, commit-or-rollback, and
 visibility reconciliation that makes an attached tab a session's default page.
 _Avoid_: Target selection, navigation
 
+**Protected Frame**:
+A child frame inside an attached tab whose document is a browser-internal or
+other-extension URL, such as a password manager's inline menu. The relay can
+never expose its target, hides it from CDP clients, and while it exists Chrome
+rejects every debugger command for that tab. The block is a permission boundary
+a human must clear, not a dead or unresponsive page.
+_Avoid_: Phantom frame, OOPIF bug, crashed target
+
 **Detach**:
 The act of releasing debugger access for an attached tab without closing the
 tab.
