@@ -399,7 +399,7 @@ const sessionReset = Command.make(
 const sessionAdopt = Command.make(
   "adopt",
   {
-    session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Adopt into an existing Browser Control session; omit to create a fresh one")),
+    session: Flag.string("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Adopt into this Browser Control session, creating it when it does not exist yet; omit to create a fresh readable id")),
     targetUrl: Flag.string("target-url").pipe(Flag.optional, Flag.withDescription("Adopt the attached page whose URL contains this text")),
     targetIndex: Flag.integer("target-index").pipe(Flag.optional, Flag.withDescription("Adopt the attached page at this zero-based target index")),
   },
@@ -418,9 +418,11 @@ const sessionAdopt = Command.make(
     if (targetUrlValue && targetIndexValue !== undefined) {
       return yield* Effect.fail(new Error("Use only one target selector: --target-url or --target-index"))
     }
+    // An explicit id names the session the agent wants to continue with; creating it here
+    // mirrors `session new <id>` and never infers identity from shared current-session state.
     const result = yield* relay.sessionAdopt({
       ...(explicitSessionId ? { sessionId: explicitSessionId } : {}),
-      createIfMissing: !explicitSessionId,
+      createIfMissing: true,
       targetSelection: {
         ...(targetUrlValue ? { urlIncludes: targetUrlValue } : {}),
         ...(targetIndexValue !== undefined ? { index: targetIndexValue } : {}),

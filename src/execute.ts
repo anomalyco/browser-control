@@ -54,10 +54,24 @@ class SessionPageRecoveryError extends Schema.TaggedError<SessionPageRecoveryErr
   "Execute.SessionPageRecoveryError",
   {
     message: Schema.String,
-    reason: Schema.Literals(["adopted-unresponsive", "close-failed", "target-unavailable"]),
+    reason: Schema.Literals(["adopted-unresponsive", "owned-unresponsive", "close-failed", "target-unavailable"]),
     cause: Schema.Defect(),
   },
 ) {}
+
+/** Internal signal: the relay-owned page is alive but Playwright's view of it is stale; reconnect before retrying. */
+class SessionPageRepairRequired extends Error {
+  constructor() {
+    super("Session page repair required")
+  }
+}
+
+const unresponsivePageDiagnosis = (options: { readonly ownsPage: boolean; readonly repaired: boolean }): string => [
+  `The ${options.ownsPage ? "relay-owned" : "adopted"} session page is unresponsive: the tab is open but its execution context did not answer automation within the health-check budget`,
+  options.repaired ? " even after reconnecting to the relay" : "",
+  ". The tab was kept and was not replaced. This usually means the page is mid-navigation or its main world is stalled for automation (for example, bot protection). ",
+  "Retry after the page settles, navigate the tab with page.goto(), open a fresh tab with context.newPage(), or release it with `browser-control session reset`.",
+].join("")
 
 export class TargetSelectionError extends Schema.TaggedError<TargetSelectionError>()(
   "Execute.TargetSelectionError",
@@ -104,12 +118,23 @@ const runSettledPlaywrightOperation = Effect.fn("Execute.settledPlaywrightOperat
   }),
 }))
 
+/**
+ * Decide what to do with a default page that failed or needs a health check.
+ *
+ * Only a relay-owned page with nothing left to lose (a crashed renderer or a
+ * `chrome-error://` document) is closed and recreated. Any other live page is
+ * kept: an unresponsive execution context is a symptom of Playwright's stale
+ * view of the tab or of the page itself, not proof that the tab is gone, and
+ * the tab may hold login or form state the user produced.
+ */
 export const recoverSessionPage = Effect.fn("Execute.recoverSessionPage")(function* (options: {
   readonly ownsPage: boolean
   readonly url: string
   readonly timeoutMs: number
   readonly healthCheck: () => Promise<void>
   readonly close: () => Promise<void>
+  readonly crashed?: boolean
+  readonly repaired?: boolean
 }) {
   const healthFailure = yield* runPlaywrightOperation({
     label: "Session page health check",
@@ -126,10 +151,20 @@ export const recoverSessionPage = Effect.fn("Execute.recoverSessionPage")(functi
   }
   if (!options.ownsPage) {
     return yield* Effect.fail(new SessionPageRecoveryError({
-      message: "The adopted session page is unresponsive and was not replaced. Release it with `browser-control session reset` or adopt another attached tab.",
+      message: unresponsivePageDiagnosis({ ownsPage: false, repaired: options.repaired === true }),
       reason: "adopted-unresponsive",
       cause: healthFailure,
     }))
+  }
+  if (!isDisposableSessionPage(options)) {
+    if (options.repaired) {
+      return yield* Effect.fail(new SessionPageRecoveryError({
+        message: unresponsivePageDiagnosis({ ownsPage: true, repaired: true }),
+        reason: "owned-unresponsive",
+        cause: healthFailure,
+      }))
+    }
+    return "repair" as const
   }
   const closeFailure = yield* runPlaywrightOperation({
     label: "Close unhealthy session page",
@@ -150,6 +185,11 @@ export const recoverSessionPage = Effect.fn("Execute.recoverSessionPage")(functi
   }
   return "recreate" as const
 })
+
+/** A relay-owned page whose document holds no user-produced state worth preserving. */
+export function isDisposableSessionPage(options: { readonly url: string; readonly crashed?: boolean }): boolean {
+  return options.crashed === true || options.url === "" || options.url === "about:blank" || options.url.startsWith("chrome-error://")
+}
 
 export async function waitForPageContext(options: {
   readonly evaluate: () => Promise<void>
@@ -175,7 +215,7 @@ export async function waitForPageContext(options: {
       if (retryInMs > 0) await (options.delay ?? delay)(retryInMs)
     }
   }
-  throw lastError ?? new Error(`Execution context did not become available within ${options.timeoutMs}ms`)
+  throw lastError ?? new Error(`Execution context not available: it did not become available within ${options.timeoutMs}ms`)
 }
 
 export async function finishHandoff(options: {
@@ -194,12 +234,24 @@ export async function finishHandoff(options: {
     const targetEvent = options.outcome.reason === "target-crashed" ? "crashed" : "detached"
     throw new Error(`Handoff cancelled because its target ${targetEvent}: ${options.message}`)
   }
-  await waitForPageContext({
-    evaluate: options.evaluate,
-    timeoutMs: options.contextTimeoutMs ?? sessionPageHealthCheckTimeoutMs,
-    ...(options.retryDelayMs === undefined ? {} : { retryDelayMs: options.retryDelayMs }),
-    ...(options.delay === undefined ? {} : { delay: options.delay }),
-  })
+  const contextTimeoutMs = options.contextTimeoutMs ?? sessionPageHealthCheckTimeoutMs
+  try {
+    await waitForPageContext({
+      evaluate: options.evaluate,
+      timeoutMs: contextTimeoutMs,
+      ...(options.retryDelayMs === undefined ? {} : { retryDelayMs: options.retryDelayMs }),
+      ...(options.delay === undefined ? {} : { delay: options.delay }),
+    })
+  } catch (error) {
+    const kind = runtimeFailureKind(error)
+    if (kind !== "context-destroyed" && kind !== "context-missing") throw error
+    // The user finished the handoff; only Browser Control's view of the page is stale. Keep that
+    // distinction visible and let the next execute health-check and repair the same tab.
+    throw new Error(
+      `Handoff resolved (${options.message}), but the page execution context did not become available within ${contextTimeoutMs}ms: ${error instanceof Error ? error.message : String(error)}. The tab was kept; run a short follow-up execute so Browser Control can re-check it.`,
+      { cause: error },
+    )
+  }
 }
 
 export function isSessionPageConnected(options: {
@@ -407,6 +459,7 @@ export type AdoptTarget = {
 export const defaultPageClosedWarning = "The session default page was closed; created a new page. References to the old page in state are stale."
 const defaultPageRecoveredWarning = "The session default page was unresponsive; created a new page. References to the old page in state are stale."
 const defaultPageCrashedWarning = "The session default page target crashed; checking it before the next execute."
+export const defaultPageRepairedWarning = "The session default page stopped answering automation; Browser Control reconnected and re-resolved the same tab. References to the old page in state are stale."
 export const defaultPageReplacedWarning = "The session default page target was replaced; rebound to the same browser tab. References to the old page in state are stale."
 
 export const shouldCloseCurrentPageOnAdopt = (options: {
@@ -423,6 +476,8 @@ type ExecuteSandboxOptions = {
   readonly sessionId?: string
   readonly requestHandoff?: RequestHandoff
   readonly onDefaultTargetChange?: (target: SessionTarget | undefined) => void
+  /** Health-check budget per attempt for a page that failed with an execution-context error. */
+  readonly pageHealthCheckTimeoutMs?: number
 }
 
 export type ExecuteResult = {
@@ -463,7 +518,8 @@ export class ExecuteSandbox {
   private defaultPageTargetId: string | undefined
   private ownsPage = false
   private pageHealthCheckRequired = false
-  private pendingPageTarget: { readonly targetId: string; readonly warnReplaced: boolean } | undefined
+  private pageCrashed = false
+  private pendingPageTarget: { readonly targetId: string; readonly warnReplaced: boolean; readonly repaired?: boolean } | undefined
   private readonly state: Record<string, unknown> = {}
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private readonly networkCapture = new NetworkCapture.Recorder()
@@ -513,7 +569,9 @@ export class ExecuteSandbox {
         onFailure: (error): ExecuteResult => {
           const logSummary = error instanceof ExecuteCodeError ? error.logSummary : emptyExecuteLogSummary()
           const aftermath = error instanceof ExecuteCodeError ? error.aftermath : undefined
-          const diagnostic = executionContextFailureDiagnostic(error, aftermath)
+          const diagnostic = error instanceof SessionPageRecoveryError
+            ? `session-page/${error.reason}`
+            : executionContextFailureDiagnostic(error, aftermath)
           if (diagnostic?.startsWith("execution-context/")) {
             this.pageHealthCheckRequired = true
           }
@@ -621,6 +679,7 @@ export class ExecuteSandbox {
       sandbox.defaultPageTargetId = undefined
       sandbox.ownsPage = false
       sandbox.pageHealthCheckRequired = false
+      sandbox.pageCrashed = false
       sandbox.pendingPageTarget = undefined
       sandbox.notifyDefaultTargetChange()
       yield* sandbox.networkCapture.cancel()
@@ -707,7 +766,7 @@ export class ExecuteSandbox {
     })
   }
 
-  private async getGlobals(options: ExecuteOptions): Promise<SandboxGlobals> {
+  private async connectContext(): Promise<{ readonly browser: Browser; readonly context: BrowserContext }> {
     if (!this.browser?.isConnected()) {
       const hadBrowser = this.browser !== undefined
       const staleBrowser = this.browser
@@ -723,7 +782,7 @@ export class ExecuteSandbox {
         ...(this.options.sessionId ? { headers: { "Browser-Control-Session-Id": this.options.sessionId, "Browser-Control-Client-Kind": "sandbox" } } : {}),
       })
       this.page = undefined
-      if (this.defaultPageTargetId) {
+      if (this.defaultPageTargetId && this.pendingPageTarget?.targetId !== this.defaultPageTargetId) {
         this.pendingPageTarget = { targetId: this.defaultPageTargetId, warnReplaced: false }
       }
       this.pageHealthCheckRequired = false
@@ -732,11 +791,48 @@ export class ExecuteSandbox {
         this.pendingWarnings.push("Relay connection was lost and re-established; the session default page was re-resolved.")
       }
     }
-    const context = this.browser.contexts()[0] ?? (await this.browser.newContext())
+    const browser = this.browser
+    const context = browser.contexts()[0] ?? (await browser.newContext())
     await registerAriaSnapshotSelector(context)
     installDownloadCapabilityGuards(context)
+    return { browser, context }
+  }
+
+  /**
+   * Drop the Playwright connection but remember the default page target so the
+   * next connect re-resolves the same tab with fresh frame and context state.
+   * The relay re-enables Runtime for the tab on the new connection, which is the
+   * designed recovery for a page whose context events stopped reaching Playwright.
+   */
+  private async repairSessionPage(): Promise<void> {
+    const browser = this.browser
+    const targetId = this.defaultPageTargetId
+    this.browser = undefined
+    this.page = undefined
+    this.clearPageListeners()
+    this.networkCapture.bindPage(undefined)
+    this.pendingPageTarget = targetId ? { targetId, warnReplaced: false, repaired: true } : undefined
+    if (browser) {
+      await Effect.runPromise(runPlaywrightOperation({
+        label: "Close browser connection to repair the session page",
+        timeoutMs: playwrightCloseTimeoutMs,
+        run: () => browser.close(),
+      }).pipe(Effect.ignore))
+    }
+  }
+
+  private async getGlobals(options: ExecuteOptions): Promise<SandboxGlobals> {
+    let { browser, context } = await this.connectContext()
     const targetSelection = options.targetSelection
-    const page = await this.getSessionPage({ context, ...(targetSelection ? { targetSelection } : {}) })
+    let page: Page
+    try {
+      page = await this.getSessionPage({ context, ...(targetSelection ? { targetSelection } : {}) })
+    } catch (error) {
+      if (!(error instanceof SessionPageRepairRequired)) throw error
+      await this.repairSessionPage()
+      ;({ browser, context } = await this.connectContext())
+      page = await this.getSessionPage({ context, ...(targetSelection ? { targetSelection } : {}) })
+    }
     installPageReadTimeout(page)
     this.networkCapture.bindPage(this.page)
     const showGhostCursor = async (options?: ShowGhostCursorOptions) => {
@@ -779,7 +875,7 @@ export class ExecuteSandbox {
             const currentPage = followsDefaultPage ? await this.getSessionPage({ context }) : handoffPage
             await currentPage.evaluate(() => true)
           } catch (error) {
-            if (error instanceof SessionPageRecoveryError && error.reason === "target-unavailable") {
+            if ((error instanceof SessionPageRecoveryError && error.reason === "target-unavailable") || error instanceof SessionPageRepairRequired) {
               throw new Error("Execution context is not available while the handoff destination settles", { cause: error })
             }
             throw error
@@ -803,7 +899,7 @@ export class ExecuteSandbox {
       return await recorder.stop()
     }
     return {
-      browser: this.browser,
+      browser,
       context,
       page,
       state: this.state,
@@ -839,6 +935,7 @@ export class ExecuteSandbox {
       return false
     }
     this.pageHealthCheckRequired = true
+    this.pageCrashed = true
     if (!this.pendingWarnings.includes(defaultPageCrashedWarning)) {
       this.pendingWarnings.push(defaultPageCrashedWarning)
     }
@@ -854,6 +951,7 @@ export class ExecuteSandbox {
     this.defaultPageTargetId = undefined
     this.ownsPage = false
     this.pageHealthCheckRequired = false
+    this.pageCrashed = false
     this.pendingPageTarget = undefined
     this.networkCapture.bindPage(undefined)
     if (!this.pendingWarnings.includes(defaultPageClosedWarning)) {
@@ -891,6 +989,7 @@ export class ExecuteSandbox {
   private bindDefaultPage(page: Page, targetId: string | undefined, ownsPage: boolean, notify: boolean): void {
     this.clearPageListeners()
     this.page = page
+    if (targetId === undefined || targetId !== this.defaultPageTargetId) this.pageCrashed = false
     this.defaultPageTargetId = targetId
     this.ownsPage = ownsPage
     const listener = () => {
@@ -1019,33 +1118,18 @@ export class ExecuteSandbox {
       this.bindDefaultPage(replacement, targetId, this.ownsPage, false)
       this.pendingPageTarget = undefined
       if (pendingTarget.warnReplaced) this.pendingWarnings.push(defaultPageReplacedWarning)
-      return replacement
+      if (!pendingTarget.repaired) return replacement
+      this.pageHealthCheckRequired = true
+      const checked = await this.checkSessionPage(replacement, { repaired: true })
+      if (checked) {
+        this.pendingWarnings.push(defaultPageRepairedWarning)
+        return checked
+      }
     }
     if (this.page && !this.page.isClosed()) {
       if (this.pageHealthCheckRequired || this.page.url().startsWith("chrome-error://")) {
-        const page = this.page
-        const recovery = await Effect.runPromise(recoverSessionPage({
-          ownsPage: this.ownsPage,
-          url: page.url(),
-          timeoutMs: sessionPageHealthCheckTimeoutMs,
-          healthCheck: () => waitForPageContext({
-            timeoutMs: sessionPageHealthCheckTimeoutMs,
-            evaluate: async () => {
-              await page.evaluate(() => true)
-            },
-          }),
-          close: () => page.close(),
-        }))
-        if (recovery === "use") {
-          this.pageHealthCheckRequired = false
-          return page
-        }
-        this.page = undefined
-        this.defaultPageTargetId = undefined
-        this.ownsPage = false
-        this.pageHealthCheckRequired = false
-        this.notifyDefaultTargetChange()
-        this.pendingWarnings.push(defaultPageRecoveredWarning)
+        const page = await this.checkSessionPage(this.page, { repaired: false })
+        if (page) return page
       } else {
         return this.page
       }
@@ -1060,6 +1144,47 @@ export class ExecuteSandbox {
     const targetId = await resolvePageTargetId(page)
     this.bindDefaultPage(page, targetId, true, true)
     return page
+  }
+
+  /**
+   * Health-check the current default page. Returns the page when it is usable,
+   * `undefined` after a disposable relay-owned page was closed so the caller
+   * recreates it, throws `SessionPageRepairRequired` when a live relay-owned
+   * page should be re-resolved over a fresh connection, and otherwise fails
+   * with a `SessionPageRecoveryError` diagnosis while keeping the tab.
+   */
+  private async checkSessionPage(page: Page, options: { readonly repaired: boolean }): Promise<Page | undefined> {
+    const timeoutMs = this.options.pageHealthCheckTimeoutMs ?? sessionPageHealthCheckTimeoutMs
+    const recovery = await Effect.runPromise(recoverSessionPage({
+      ownsPage: this.ownsPage,
+      url: page.url(),
+      timeoutMs,
+      crashed: this.pageCrashed,
+      repaired: options.repaired,
+      healthCheck: () => waitForPageContext({
+        timeoutMs,
+        evaluate: async () => {
+          await page.evaluate(() => true)
+        },
+      }),
+      close: () => page.close(),
+    }))
+    if (recovery === "use") {
+      this.pageHealthCheckRequired = false
+      this.pageCrashed = false
+      return page
+    }
+    if (recovery === "repair") {
+      throw new SessionPageRepairRequired()
+    }
+    this.page = undefined
+    this.defaultPageTargetId = undefined
+    this.ownsPage = false
+    this.pageHealthCheckRequired = false
+    this.pageCrashed = false
+    this.notifyDefaultTargetChange()
+    this.pendingWarnings.push(defaultPageRecoveredWarning)
+    return undefined
   }
 }
 
@@ -1169,9 +1294,10 @@ export function selectTarget<T>({
       })
     }
     if (matches.length > 1) {
+      const candidates = targets.flatMap((candidate, index) => matches.includes(candidate) ? [`[${index}] ${getUrl(candidate)}`] : [])
       throw new TargetSelectionError({
         reason: "ambiguous",
-        message: `Multiple attached pages (${matches.length}) match URL ${selection.urlIncludes}; use a more specific --target-url or --target-index`,
+        message: `Multiple attached pages (${matches.length}) match URL ${selection.urlIncludes}; use a more specific --target-url or --target-index. Matches: ${candidates.join(", ")}`,
       })
     }
     return matches[0]

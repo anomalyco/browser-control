@@ -274,11 +274,26 @@ execution context was destroyed. Later calls each consumed their full timeout,
 and the target remained at `chrome-error://chromewebdata/`.
 
 Browser Control now remembers context failures and browser crash events. Before
-the next normal execute, it gives the default page a one-second health check.
-An unhealthy relay-owned page is closed and recreated with a stale-reference
+the next normal execute, it gives the default page a bounded health check.
+Only a disposable relay-owned page (crashed renderer, `about:blank`, or a
+`chrome-error://` document) is closed and recreated with a stale-reference
 warning; if it cannot be closed, execute fails with reset guidance instead of
-leaking ownership. An unhealthy adopted user tab is never closed or replaced;
-the execute fails quickly and tells the agent to reset or adopt another tab.
+leaking ownership. Any other live page is kept. An unhealthy adopted user tab
+is never closed or replaced; the execute fails quickly and tells the agent to
+reset or adopt another tab.
+
+A 2026-09-19 field failure showed why a relay-owned page must not be treated as
+disposable: a page whose execution context went stale after a sign-in redirect
+(and one stalled by a bot-protected form) was closed and replaced with
+`about:blank`, discarding the login and form state the user had just produced.
+Playwright's stale context is a symptom of its view of the tab, not proof the
+tab is gone. Browser Control now drops its Playwright connection, reconnects,
+and re-resolves the same target once; the relay's `Runtime.enable` replay
+recovery then runs on the fresh connection. If the page still does not answer,
+execute fails with a `session-page/owned-unresponsive` diagnosis that names the
+kept tab and the likely causes (mid-navigation, bot protection stalling the main
+world for automation). A resolved handoff whose destination context never
+appears reports the same distinction instead of a bare Playwright error.
 
 `Inspector.targetCrashed` and `Target.targetCrashed` events mark the target,
 reject its pending debugger commands without disconnecting the extension, and
