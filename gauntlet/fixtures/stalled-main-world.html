@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Seat selection · Gauntlet Air</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; color: #1b1b1f; }
+  .seat-map { display: grid; grid-template-columns: repeat(6, 2.5rem); gap: .4rem; margin-top: 1rem; }
+  .seat { height: 2.5rem; border: 1px solid #7a7f8a; border-radius: .4rem; display: grid; place-items: center; font-size: .8rem; background: #eef1f6; }
+  .seat.taken { background: #c9ccd3; color: #6b6f78; }
+  #stall-state { margin-top: 1rem; font-size: .9rem; color: #555; }
+</style>
+</head>
+<body>
+<!--
+  GAUNTLET FIXTURE: stalled-main-world
+
+  Reproduces the Akamai-style "main world stalled for automation" symptom seen on
+  gestiona.avianca.com (todo 5c0b3fb3): the human sees a fully painted seat map
+  while Playwright's page.evaluate / page.title() / snapshot() hang, and
+  document.readyState stays "loading".
+
+  Two independent mechanisms, both switched on by ?hostile=1 (the runner sets it):
+
+  1. Never-resolving readiness (server side, gauntlet/server.ts). The server
+     writes this whole document immediately so the DOM paints, then keeps the
+     HTTP response open and streams an HTML comment every few seconds. The
+     parser never reaches end-of-document, so document.readyState is "loading"
+     forever, DOMContentLoaded/load never fire, and page.goto() with the
+     default waitUntil:"load" cannot settle. Only waitUntil:"commit" returns,
+     exactly as observed on the real site.
+
+  2. Main-world long tasks (below). After two animation frames, which guarantees
+     the seat map has been composited at least once, the page runs synchronous
+     busy loops of `block` ms (default 20 s) separated by a single macrotask
+     yield, until `stall` ms (default 60 s) have elapsed. Every Runtime.evaluate
+     / Runtime.callFunctionOn that automation queues must wait for the next
+     yield, so Playwright's 5-10 s read timeouts and the relay's 3 s page
+     health check all trip while the tab stays open and painted. The stall is
+     bounded so cleanup (closing the tab) is deterministic.
+
+  What this cannot reproduce: a renderer that is busy for CDP but idle for the
+  human. The main thread is genuinely blocked, so a human clicking a seat during
+  a block would also be ignored until the next yield. The observable contract
+  Browser Control is judged on is the same, though: the tab exists, the URL is
+  unchanged, the DOM is painted, and automation reads do not return promptly.
+
+  The `console.debug(probe)` line is an informational heuristic only: when a
+  CDP client has Runtime enabled, Chromium formats console arguments for
+  Runtime.consoleAPICalled and reads DOM element ids, which fires the getter.
+  It is recorded in window.__gauntlet.detection but never gates the stall, so
+  runs are deterministic.
+-->
+<h1>Choose your seat</h1>
+<p>Flight GA 412 · Bogotá → Lima · Row 14 available</p>
+<div class="seat-map" aria-label="Seat map">
+  <div class="seat taken">14A</div><div class="seat taken">14B</div><div class="seat">14C</div>
+  <div class="seat">14D</div><div class="seat taken">14E</div><div class="seat">14F</div>
+  <div class="seat">15A</div><div class="seat">15B</div><div class="seat taken">15C</div>
+  <div class="seat">15D</div><div class="seat">15E</div><div class="seat">15F</div>
+</div>
+<p id="stall-state" data-stall="idle">Interactive</p>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search)
+  const hostile = params.get("hostile") === "1"
+  const blockMs = Math.max(0, Number(params.get("block") ?? 20000))
+  const stallMs = Math.max(0, Number(params.get("stall") ?? 60000))
+  const report = { hostile, blockMs, stallMs, detection: hostile ? "query" : "none", readyStateAtScript: document.readyState }
+  window.__gauntlet = report
+
+  const probe = document.createElement("img")
+  Object.defineProperty(probe, "id", { get() { report.detection = "console-getter"; return "probe" } })
+  console.debug(probe)
+
+  const state = document.getElementById("stall-state")
+  if (!hostile) return
+
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const stallEnd = performance.now() + stallMs
+    state.textContent = "Bot protection engaged: main world blocked for automation"
+    state.dataset.stall = "blocking"
+    const step = () => {
+      const blockEnd = Math.min(performance.now() + blockMs, stallEnd)
+      while (performance.now() < blockEnd) { /* synchronous long task */ }
+      if (performance.now() < stallEnd) {
+        setTimeout(step, 0)
+        return
+      }
+      state.textContent = "Stall released"
+      state.dataset.stall = "released"
+    }
+    setTimeout(step, 0)
+  }))
+})()
+</script>
+</body>
+</html>

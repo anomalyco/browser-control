@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Payment · Gauntlet Air</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; color: #1b1b1f; }
+  .summary { border: 1px solid #d0d3da; border-radius: .5rem; padding: 1rem; max-width: 28rem; }
+  iframe { width: 100%; max-width: 28rem; height: 7rem; border: 1px solid #7a7f8a; border-radius: .4rem; margin-top: 1rem; }
+  #validation { color: #b3261e; font-weight: 600; }
+  #validation.ok { color: #1b6b2a; }
+  button { font: inherit; padding: .6rem 1.2rem; margin-top: 1rem; }
+</style>
+</head>
+<body>
+<!--
+  GAUNTLET FIXTURE: cross-origin-payment-iframe (parent document)
+
+  Reproduces the sdk.avianca.com/pay checkout (todo 5c0b3fb3): the purchase
+  summary and the validation text live in the parent document, but the card
+  input is hosted by a third-party payment iframe on a different origin. The
+  iframe ignores programmatic value assignment and browser/1Password autofill,
+  and only registers real keyboard input, so the parent keeps saying
+  "Card number is required" after fill() or autofill.
+
+  The iframe src is rewritten by gauntlet/server.ts to the secondary fixture
+  origin (a second loopback port), so it is a true cross-origin OOPIF and not a
+  same-process frame. The two documents talk only via postMessage:
+
+    parent  -> frame : { type: "gauntlet:validate" }
+    frame   -> parent: { type: "gauntlet:validity", valid, last4, visible }
+
+  `visible` is what the human sees in the input; `valid` is the frame's own
+  model built only from trusted keydown events. The two diverge exactly when a
+  driver sets the value without keystrokes, which is the failure being tested.
+
+  The Pay button lives in the parent and does nothing beyond re-validating while
+  the frame reports invalid, mirroring the real form.
+-->
+<h1>Payment</h1>
+<div class="summary">
+  <p>Flight GA 412 · 1 passenger · seat 14C</p>
+  <p><strong>Total: $184.20</strong></p>
+  <p id="validation" role="alert">Card number is required</p>
+</div>
+<iframe id="payment" title="Card details" src="__SECONDARY_ORIGIN__/payment-frame.html"></iframe>
+<div>
+  <button id="pay" type="button">Pay $184.20</button>
+</div>
+<script>
+(() => {
+  const frame = document.getElementById("payment")
+  const validation = document.getElementById("validation")
+  const frameOrigin = new URL(frame.src).origin
+  window.__gauntlet = { frameOrigin, lastValidity: null, payAttempts: 0, payResponses: 0 }
+
+  const requestValidity = () => {
+    frame.contentWindow?.postMessage({ type: "gauntlet:validate" }, frameOrigin)
+  }
+
+  window.addEventListener("message", (event) => {
+    if (event.origin !== frameOrigin || event.data?.type !== "gauntlet:validity") return
+    window.__gauntlet.lastValidity = event.data
+    if (event.data.paying) {
+      window.__gauntlet.payResponses += 1
+      if (event.data.valid) {
+        validation.textContent = `Payment submitted for card ending ${event.data.last4}`
+        validation.classList.add("ok")
+      } else {
+        validation.textContent = "Card number is required"
+        validation.classList.remove("ok")
+      }
+    }
+  })
+
+  frame.addEventListener("load", requestValidity)
+  document.getElementById("pay").addEventListener("click", () => {
+    window.__gauntlet.payAttempts += 1
+    frame.contentWindow?.postMessage({ type: "gauntlet:validate", paying: true }, frameOrigin)
+  })
+})()
+</script>
+</body>
+</html>

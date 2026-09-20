@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Trip policy · Gauntlet Travel</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; color: #1b1b1f; }
+  .card { position: relative; border: 1px solid #d0d3da; border-radius: .6rem; padding: 1rem 1.25rem; max-width: 30rem; display: grid; grid-template-columns: auto 1fr; gap: .75rem 1rem; align-items: start; }
+  .card-body { position: relative; }
+  /* RyuLinkStretchedAnchor: the card title is a link whose ::after is stretched
+     over the card body, so the body text is a giant transparent link. */
+  .stretched-anchor { color: inherit; text-decoration: none; font-weight: 600; }
+  .stretched-anchor::after { content: ""; position: absolute; inset: 0; z-index: 1; }
+  #details { margin-top: .5rem; color: #555; }
+  /* RyuModalFixedSentinel: a transparent fixed layer covering the viewport
+     that intercepts pointer events and re-dispatches them underneath. */
+  .modal-sentinel { position: fixed; inset: 0; z-index: 10; background: transparent; }
+  button { font: inherit; padding: .6rem 1.2rem; margin-top: 1rem; }
+</style>
+</head>
+<body>
+<!--
+  GAUNTLET FIXTURE: sentinel-overlay-click
+
+  Reproduces the Ramp layout from todo 5c0b3fb3 in which a clickable control is
+  covered by two transparent layers:
+
+  1. `.stretched-anchor::after` (RyuLinkStretchedAnchor pattern): the card
+     title is an <a> whose ::after pseudo-element is stretched over the card
+     body, so the label text "Accept the travel policy" is actually under a
+     transparent link. A pointer click on the label follows the link (here:
+     toggles #details) instead of toggling the checkbox.
+
+  2. `.modal-sentinel` (RyuModalFixedSentinel pattern): a fixed, transparent,
+     viewport-sized layer with pointer-events enabled that sits above
+     everything. Its click handler re-dispatches the click to whatever is
+     underneath, so the page works for a human, but Playwright's actionability
+     check sees `<div class="modal-sentinel"> intercepts pointer events` and
+     locator.click()/check() retry until they time out.
+
+  A correct agent strategy is to recognise the intercepting element from the
+  error, then either click through with { force: true } (the sentinel forwards
+  the real click) or click the checkbox itself, which is outside the stretched
+  anchor's box.
+-->
+<h1>Trip policy</h1>
+<div class="card">
+  <input type="checkbox" id="opt-in">
+  <div class="card-body">
+    <a class="stretched-anchor" href="#details" id="policy-link">Travel policy</a>
+    <label for="opt-in" id="opt-in-label">Accept the travel policy</label>
+    <p id="details" hidden>Economy fares only. Hotels up to $250/night. Changes must be approved.</p>
+  </div>
+</div>
+<button id="continue" type="button" disabled>Continue</button>
+<div class="modal-sentinel" id="modal-sentinel" aria-hidden="true"></div>
+<script>
+(() => {
+  const checkbox = document.getElementById("opt-in")
+  const details = document.getElementById("details")
+  const link = document.getElementById("policy-link")
+  const sentinel = document.getElementById("modal-sentinel")
+  const continueButton = document.getElementById("continue")
+  window.__gauntlet = { sentinelClicks: 0, forwardedTo: [] }
+
+  link.addEventListener("click", (event) => {
+    event.preventDefault()
+    details.hidden = !details.hidden
+  })
+  checkbox.addEventListener("change", () => {
+    continueButton.disabled = !checkbox.checked
+  })
+  sentinel.addEventListener("click", (event) => {
+    if (!event.isTrusted) return
+    window.__gauntlet.sentinelClicks += 1
+    sentinel.style.pointerEvents = "none"
+    const underneath = document.elementFromPoint(event.clientX, event.clientY)
+    sentinel.style.pointerEvents = ""
+    if (!underneath || underneath === sentinel) return
+    window.__gauntlet.forwardedTo.push(underneath.id || underneath.tagName.toLowerCase())
+    underneath.click()
+  })
+})()
+</script>
+</body>
+</html>

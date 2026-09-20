@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sign in · Gauntlet Travel</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; color: #1b1b1f; }
+  form { display: grid; gap: 1rem; max-width: 22rem; }
+  button { font: inherit; padding: .6rem 1.2rem; }
+  #phase { font-size: .9rem; color: #555; }
+</style>
+</head>
+<body>
+<!--
+  GAUNTLET FIXTURE: auth-redirect-handoff (the /auth/sign-in document)
+
+  Reproduces the Ramp /travel → /sign-in → /travel flow (todo 5c0b3fb3, repro
+  1): an agent navigates to a protected route, is redirected to sign-in, calls
+  handoff() so the human can log in, and the handoff dies with "Execution
+  context was destroyed" (urlChanged=false) because the sign-in page replaces
+  its own document while the handoff is being registered.
+
+  Routes (gauntlet/server.ts):
+    GET /auth/app      302 → /auth/sign-in?next=/auth/app unless cookie bc_auth=1
+    GET /auth/sign-in  this document
+    GET /auth/app      auth-app.html once bc_auth=1 is set
+
+  Document lifecycle, deterministic by construction:
+
+  1. First visit (no bc_csrf cookie): shows "Preparing secure sign-in…", then
+     waits for Browser Control's page-status host element
+     (#__browser_control_page_status__, injected by the extension when the
+     handoff WAIT UI is presented) or 1500 ms, whichever comes first. It then
+     sets bc_csrf=1 and calls location.replace(location.href): a same-URL
+     document replacement, which destroys the execution context the handoff
+     was just registered against while leaving the URL unchanged
+     (urlChanged=false, exactly as observed).
+
+  2. Second visit (bc_csrf present): renders the sign-in form. Clicking
+     "Sign in" sets bc_auth=1 and navigates to `next`, destroying the context
+     a second time and landing on /auth/app.
+
+  A correct handoff survives both replacements and resolves only when the
+  human presses the completion control on /auth/app.
+-->
+<h1>Sign in</h1>
+<p id="phase" data-phase="bootstrapping">Preparing secure sign-in…</p>
+<form id="sign-in-form" hidden>
+  <label>Email <input id="email" type="email" value="gauntlet@example.com" readonly></label>
+  <button type="submit" id="sign-in">Sign in</button>
+</form>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search)
+  const next = params.get("next") ?? "/auth/app"
+  const phase = document.getElementById("phase")
+  const hasCookie = (name) => document.cookie.split(";").some((part) => part.trim().startsWith(`${name}=`))
+  window.__gauntlet = { phase: "bootstrapping", statusUiSeen: false }
+
+  if (!hasCookie("bc_csrf")) {
+    let done = false
+    const replaceSelf = (reason) => {
+      if (done) return
+      done = true
+      window.__gauntlet.phase = `replacing:${reason}`
+      document.cookie = "bc_csrf=1; path=/"
+      location.replace(location.href)
+    }
+    const statusHost = () => document.getElementById("__browser_control_page_status__")
+    if (statusHost()) {
+      window.__gauntlet.statusUiSeen = true
+      setTimeout(() => replaceSelf("status-ui"), 50)
+    } else {
+      const observer = new MutationObserver(() => {
+        if (!statusHost()) return
+        window.__gauntlet.statusUiSeen = true
+        observer.disconnect()
+        setTimeout(() => replaceSelf("status-ui"), 50)
+      })
+      observer.observe(document.documentElement, { childList: true, subtree: true })
+      setTimeout(() => replaceSelf("timeout"), 1500)
+    }
+    return
+  }
+
+  window.__gauntlet.phase = "form"
+  phase.textContent = "Enter your credentials"
+  phase.dataset.phase = "form"
+  const form = document.getElementById("sign-in-form")
+  form.hidden = false
+  form.addEventListener("submit", (event) => {
+    event.preventDefault()
+    window.__gauntlet.phase = "signing-in"
+    phase.textContent = "Signing in…"
+    document.cookie = "bc_auth=1; path=/"
+    location.href = next
+  })
+})()
+</script>
+</body>
+</html>

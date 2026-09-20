@@ -521,6 +521,49 @@ usage. Review its findings rather than requiring a clean result: an export used
 only by tests can still have production callers inside its own module. Normal
 `pnpm check:unused` remains the CI gate.
 
+### Gauntlet
+
+`pnpm gauntlet` runs an adversarial suite of locally served hostile pages against
+the live relay and browser. Each case reproduces one real-world behaviour that
+has broken agents before (bot protection stalling the main world, typing that
+freezes a form, a cross-origin payment iframe that ignores autofill, a sign-in
+redirect during a handoff, click-through overlays, a heavy SPA bootstrapping
+after a navigation) and asserts two things: the outcome an agent should see (a
+successful read or a named diagnosis) and the tab-preservation invariants (the
+session still owns exactly one tab, on the fixture URL, never replaced with
+`about:blank`, no silent new page). Every case has a wall-time budget.
+
+```bash
+pnpm gauntlet                                   # all cases
+GAUNTLET_CASE=stalled-main-world pnpm gauntlet  # comma-separated filter
+GAUNTLET_REPEAT=3 pnpm gauntlet                 # repeat for flake detection
+GAUNTLET_VERBOSE=1 pnpm gauntlet                # print each case's return value
+GAUNTLET_CLI=/abs/path/dist/cli.js pnpm gauntlet
+```
+
+The runner needs a running relay with the extension connected, like `pnpm smoke`.
+It drives Browser Control through the CLI the way a shell agent would, so it
+must use a CLI whose build matches the running relay: by default it tries the
+checkout's `src/cli.ts` and then the installed `browser-control` binary, and
+fails fast if neither matches. `GAUNTLET_CLI=source|installed|<path>` pins one.
+Fixtures are served on `127.0.0.1:19801` and `19802` (the second origin makes the
+payment iframe a real OOPIF); override with `GAUNTLET_PRIMARY_PORT` /
+`GAUNTLET_SECONDARY_PORT`. Sessions are created through bare `execute`, so the
+run never changes your current session.
+
+Exit status is non-zero for `fail`, `unexpected-pass`, or `budget-exceeded`.
+Cases marked `expectedFailure` document behaviour Browser Control does not
+deliver yet; they report as `xfail`, and an unexpected pass is a prompt to flip
+the flag.
+
+To add a fixture: drop a self-contained `gauntlet/fixtures/<name>.html` (no
+external network; explain the hostile mechanism in a leading HTML comment; take
+tunables from the query string), add any dynamic route to `gauntlet/server.ts`,
+and add a `GauntletCase` to `gauntlet/cases.ts` whose `run` drives the CLI via
+`ctx.execute` and ends with `assertTabPreserved`. Cases that need a user-owned
+tab receive one as `page`; set `userTabCleanupGraceMs` if the fixture can leave
+that tab's renderer busy at cleanup time.
+
 `pnpm smoke:snapshot` runs native-role/ref, portal-dialog, and dense-list
 regressions against an isolated Chromium browser using the real snapshot code.
 Install its browser with `pnpm exec playwright-core install chromium` if needed.

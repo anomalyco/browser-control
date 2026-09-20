@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Secure card entry</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 1rem; color: #1b1b1f; }
+  label { display: grid; gap: .25rem; font-size: .9rem; }
+  input { font: inherit; padding: .5rem; border: 1px solid #7a7f8a; border-radius: .4rem; letter-spacing: .1em; }
+  #frame-status { font-size: .8rem; color: #555; }
+</style>
+</head>
+<body>
+<!--
+  GAUNTLET FIXTURE: payment-frame (served from the secondary origin)
+
+  The card field keeps its own model that is updated ONLY by trusted keydown
+  events (real keyboard input or CDP Input.dispatchKeyEvent). Anything else is
+  rejected the way hardened payment SDKs reject autofill:
+
+  - locator.fill() / Input.insertText fires a trusted `input` event without
+    keydowns. The handler snaps the visible value back to the model, so the
+    field visibly stays empty and validity stays false.
+  - element.value = "4242..." from page.evaluate() or an autofill extension
+    fires no events. The digits are VISIBLE in the field but the model is still
+    empty, so the parent keeps showing "Card number is required". This is the
+    1Password / browser-autofill failure mode from the incident.
+  - Paste is blocked.
+  - pressSequentially() / real typing produces trusted keydown events per
+    character and is accepted.
+
+  Validity is reported to the parent over postMessage on request; the frame
+  never trusts the parent's origin blindly and replies only to its opener
+  origin.
+-->
+<label>Card number <input id="card" inputmode="numeric" autocomplete="cc-number" placeholder="•••• •••• •••• ••••"></label>
+<p id="frame-status" data-valid="false">Waiting for card number</p>
+<script>
+(() => {
+  const card = document.getElementById("card")
+  const status = document.getElementById("frame-status")
+  let model = ""
+  window.__gauntletFrame = { get model() { return model }, rejected: 0 }
+
+  const render = () => {
+    const valid = /^\d{16}$/.test(model)
+    status.dataset.valid = String(valid)
+    status.textContent = valid ? `Card ending ${model.slice(-4)} ready` : `Waiting for card number (${model.length}/16 digits typed)`
+    return valid
+  }
+
+  card.addEventListener("keydown", (event) => {
+    if (!event.isTrusted) return
+    if (event.key.length === 1) {
+      if (/\d/.test(event.key) && model.length < 16) model += event.key
+      event.preventDefault()
+      card.value = model
+    } else if (event.key === "Backspace") {
+      model = model.slice(0, -1)
+      event.preventDefault()
+      card.value = model
+    }
+    render()
+  })
+  card.addEventListener("input", () => {
+    if (card.value !== model) {
+      window.__gauntletFrame.rejected += 1
+      card.value = model
+    }
+    render()
+  })
+  card.addEventListener("paste", (event) => {
+    event.preventDefault()
+    window.__gauntletFrame.rejected += 1
+  })
+
+  window.addEventListener("message", (event) => {
+    if (event.data?.type !== "gauntlet:validate" || event.source !== window.parent) return
+    const valid = render()
+    window.parent.postMessage({
+      type: "gauntlet:validity",
+      valid,
+      last4: valid ? model.slice(-4) : null,
+      visible: card.value,
+      paying: event.data.paying === true,
+    }, event.origin)
+  })
+  render()
+})()
+</script>
+</body>
+</html>
