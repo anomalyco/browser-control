@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Trips · Gauntlet Travel</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; color: #1b1b1f; }
+  #root { min-height: 6rem; }
+  .skeleton { color: #888; }
+  button { font: inherit; padding: .6rem 1.2rem; margin-top: 1rem; }
+</style>
+</head>
+<body>
+<!--
+  GAUNTLET FIXTURE: heavy-spa-slow-context
+
+  Models a heavy single-page app whose bootstrap bundle blocks the main thread
+  for `block` ms (default 5 s) synchronously before the first render. During
+  that window the new document's execution context exists but cannot answer
+  Runtime.evaluate / Runtime.callFunctionOn, which is indistinguishable from a
+  missing context to Browser Control's 3 s page health check
+  (sessionPageHealthCheckTimeoutMs) and to a handoff's post-completion context
+  wait.
+
+  The dangerous sequence (todo 5c0b3fb3, "handoff on a page mid-redirect"):
+  an execute fails with execution-context/context-destroyed because the page
+  navigated (client-side route change, auth redirect, reload), the relay marks
+  the page for a health check, and the very next execute runs that check while
+  the destination is still bootstrapping. A relay-owned page was then closed
+  and replaced with about:blank even though the tab was healthy and about to
+  render.
+
+  #rehydrate triggers a same-document-family navigation to ?v=2 so cases can
+  provoke the context destruction without leaving the fixture.
+-->
+<div id="root"><p class="skeleton">Loading application…</p></div>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search)
+  const blockMs = Math.max(0, Number(params.get("block") ?? 5000))
+  const version = params.get("v") ?? "1"
+  const startedAt = performance.now()
+  window.__gauntlet = { blockMs, version, bootstrappedAt: null }
+
+  const end = startedAt + blockMs
+  while (performance.now() < end) { /* synchronous bundle evaluation */ }
+
+  const root = document.getElementById("root")
+  root.innerHTML = `
+    <h1 id="ready">SPA ready</h1>
+    <p id="version">version ${version}</p>
+    <button id="rehydrate" type="button">Rehydrate</button>
+  `
+  window.__gauntlet.bootstrappedAt = Date.now()
+  document.getElementById("rehydrate").addEventListener("click", () => {
+    const nextParams = new URLSearchParams(location.search)
+    nextParams.set("v", String(Number(version) + 1))
+    location.assign(`${location.pathname}?${nextParams.toString()}`)
+  })
+})()
+</script>
+</body>
+</html>

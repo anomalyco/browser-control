@@ -52,6 +52,7 @@
     "runtime:select": "tsx scripts/runtime-install.ts select",
     "runtime:check-lifecycle": "tsx scripts/check-runtime-lifecycle.ts",
     "smoke": "tsx scripts/smoke.ts",
+    "gauntlet": "tsx scripts/gauntlet.ts",
     "smoke:snapshot": "tsx scripts/check-snapshot.ts",
     "repro:snapshot-image-name": "tsx scripts/check-snapshot-image-name.ts",
     "repro:screenshot-zoom": "tsx scripts/check-screenshot-zoom.ts",

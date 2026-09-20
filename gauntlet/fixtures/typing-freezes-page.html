@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Manage my booking · Gauntlet Air</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; color: #1b1b1f; }
+  form { display: grid; gap: 1rem; max-width: 24rem; }
+  label { display: grid; gap: .25rem; font-size: .9rem; }
+  input { font: inherit; padding: .5rem; border: 1px solid #7a7f8a; border-radius: .4rem; }
+  #freeze-state { font-size: .9rem; color: #555; }
+</style>
+</head>
+<body>
+<!--
+  GAUNTLET FIXTURE: typing-freezes-page
+
+  Reproduces the Avianca manage-booking form (todo 5c0b3fb3, repro 2): typing
+  into the first field with pressSequentially made the tab stop answering, the
+  next locator timed out after 30 s, and Browser Control then replaced the tab
+  with about:blank.
+
+  Mechanism: the first *trusted* keydown in #pnr (a real Input.dispatchKeyEvent
+  from CDP or a human keystroke; synthetic events are ignored, like a bot sensor
+  would) starts a main-thread freeze of `freeze` ms total (default 40 s), run as
+  synchronous busy loops of `chunk` ms (default 6 s) separated by one macrotask
+  yield. Consequences:
+
+  - The keydown's default action (inserting the character) happens after the
+    handler returns, so the first character lands after the first chunk.
+  - Each subsequent CDP key event is acknowledged only at a yield, so
+    pressSequentially("ABC123") needs far more than Playwright's 30 s default
+    action timeout and fails with a TimeoutError while the tab is still busy.
+  - The relay's 3 s page health check and the 5 s page.title() read timeout trip
+    during the freeze.
+  - Acks still arrive every `chunk` ms, so Chromium's hung-renderer detector is
+    not tripped and no "Page unresponsive" dialog is shown to the human.
+
+  The freeze is bounded: after `freeze` ms the form is interactive again with
+  whatever the user (or agent) managed to type still in the field. Browser
+  Control must leave the tab in place so that in-progress form state survives.
+-->
+<h1>Manage my booking</h1>
+<form id="mmb" autocomplete="off">
+  <label>Booking code <input id="pnr" name="pnr" maxlength="6" placeholder="ABC123"></label>
+  <label>Last name <input id="last-name" name="lastName" placeholder="Smith"></label>
+  <button type="submit" id="find">Find booking</button>
+</form>
+<p id="freeze-state" data-freeze="idle">Interactive</p>
+<script>
+(() => {
+  const params = new URLSearchParams(location.search)
+  const freezeMs = Math.max(0, Number(params.get("freeze") ?? 40000))
+  const chunkMs = Math.max(1, Number(params.get("chunk") ?? 6000))
+  const state = document.getElementById("freeze-state")
+  window.__gauntlet = { freezeMs, chunkMs, frozenAt: null, releasedAt: null }
+  let started = false
+
+  const blockUntil = (end) => { while (performance.now() < end) { /* synchronous long task */ } }
+
+  document.getElementById("pnr").addEventListener("keydown", (event) => {
+    if (!event.isTrusted || started) return
+    started = true
+    window.__gauntlet.frozenAt = Date.now()
+    state.textContent = "Bot sensor engaged: main thread frozen"
+    state.dataset.freeze = "frozen"
+    const freezeEnd = performance.now() + freezeMs
+    const step = () => {
+      blockUntil(Math.min(performance.now() + chunkMs, freezeEnd))
+      if (performance.now() < freezeEnd) {
+        setTimeout(step, 0)
+        return
+      }
+      window.__gauntlet.releasedAt = Date.now()
+      state.textContent = "Freeze released"
+      state.dataset.freeze = "released"
+    }
+    step()
+  })
+
+  document.getElementById("mmb").addEventListener("submit", (event) => {
+    event.preventDefault()
+    state.textContent = `Looking up ${document.getElementById("pnr").value} / ${document.getElementById("last-name").value}`
+  })
+})()
+</script>
+</body>
+</html>

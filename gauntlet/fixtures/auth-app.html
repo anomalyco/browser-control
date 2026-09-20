@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Travel · Gauntlet Travel</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; color: #1b1b1f; }
+  button { font: inherit; padding: .6rem 1.2rem; }
+</style>
+</head>
+<body>
+<!--
+  GAUNTLET FIXTURE: auth-app (the protected /auth/app document)
+
+  Served only when the bc_auth=1 cookie is present; see
+  auth-redirect-handoff.html for the flow. The decoy button exists so a case
+  can prove that page activity on the destination does not resolve a handoff
+  by itself; only the Browser Control completion control may.
+-->
+<h1 id="welcome">Signed in as gauntlet@example.com</h1>
+<p>Your upcoming trips will appear here.</p>
+<button id="decoy" type="button">Unrelated page button</button>
+<script>
+  window.__gauntlet = { phase: "app" }
+  document.getElementById("decoy").addEventListener("click", () => {
+    document.getElementById("decoy").textContent = "Decoy clicked"
+  })
+</script>
+</body>
+</html>

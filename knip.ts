@@ -16,7 +16,7 @@ export default {
     "scripts/opencode-jr-signup-handoff.js",
     "scripts/wikipedia-cursor-demo.js",
   ],
-  project: ["src/**/*.ts!", "extension/src/**/*.ts!", "scripts/*.{ts,js}", "test/**/*.ts"],
+  project: ["src/**/*.ts!", "extension/src/**/*.ts!", "scripts/*.{ts,js}", "gauntlet/**/*.ts", "test/**/*.ts"],
   // Package scripts discover the TS command entrypoints; Vitest discovers tests.
   vitest: { entry: ["test/**/*.test.ts"] },
   // Align the transitive Node runtime with Effect's prerelease scope layout.
