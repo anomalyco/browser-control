@@ -1,5 +1,0 @@
----
-"@opencode-ai/browser-control": patch
----
-
-Name the password-manager permission boundary instead of treating it as a broken page. Focusing or filling a card or credential field lets an extension such as 1Password inject a `chrome-extension://` inline-menu iframe into the webpage; Chrome then rejects every debugger command for that tab, which Playwright surfaced as an empty-URL phantom frame under the main frame, "Execution context was destroyed", and 30 s locator timeouts, and which the 0.8.1 health check went on to treat as an unresponsive page. The relay now tracks such protected frames: it retracts the forwarded attach with a synthetic `Page.frameDetached`, suppresses the frame's later events, and records the debugger block as `protectedUi` on the root target (shown as `protected-ui=true` in `status` and `doctor`) until a command succeeds again or the frame is removed. While the tab is blocked, execute reports masked destroyed-context and locator-timeout failures as `target/cross-extension-page` with the existing human-action warning and skips the page health check, so the tab is never repaired or replaced for a prompt the user has to dismiss.
