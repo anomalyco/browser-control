@@ -11,6 +11,8 @@ describe("target selection", () => {
   it("selects by URL substring and rejects ambiguous matches", () => {
     expect(selectTarget({ targets, selection: { urlIncludes: "kit.example" }, getUrl: (target) => target.url })?.url).toBe("https://kit.example/b")
     expect(() => selectTarget({ targets, selection: { urlIncludes: "example" }, getUrl: (target) => target.url })).toThrow("Multiple attached pages")
+    expect(() => selectTarget({ targets, selection: { urlIncludes: "example" }, getUrl: (target) => target.url }))
+      .toThrow("Matches: [0] https://example.com/a, [1] https://kit.example/b")
   })
 
   it("selects by zero-based index", () => {

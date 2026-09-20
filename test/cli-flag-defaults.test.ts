@@ -24,6 +24,7 @@ const routes = new Map<string, unknown>([
   ["GET /extension/status", { connected: true, version: null, activeTargets: 0 } satisfies RelaySchema.ExtensionStatus],
   ["POST /cli/session/new", { session } satisfies RelaySchema.SessionContainer],
   ["POST /cli/execute", { text: "1", value: 1, isError: false, logs: [], session } satisfies RelaySchema.ExecuteResponse],
+  ["POST /cli/session/adopt", { session: { ...session, created: true }, adoptedUrl: "https://example.test/", adoptedTargetId: "target-1" } satisfies RelaySchema.SessionAdoptResponse],
   ["POST /recording/start", { success: true } satisfies RelaySchema.RecordingStartResponse],
 ])
 const requests: Array<{ route: string; body: unknown }> = []
@@ -83,6 +84,17 @@ describe("CLI opt-in boolean flags", () => {
     }
     expect(stderr).toBe(`Session: ${session.id}. Continue with --session ${session.id}.\n`)
     expect(requests).toEqual([{ route: "POST /cli/execute", body: { code: "return 1", createIfMissing: true } }])
+  })
+
+  it.each([false, true])("session adopt creates the target session when needed explicit=%s", async (explicit) => {
+    const { stdout, stderr } = await runCli(["session", "adopt", "--target-url", "example.test", ...(explicit ? ["--session", session.id] : [])])
+
+    expect(stdout).toBe(`Created and adopted session '${session.id}' default page: https://example.test/\n`)
+    expect(stderr).toBe(`Session: ${session.id}. Continue with --session ${session.id}.\n`)
+    expect(requests).toEqual([{
+      route: "POST /cli/session/adopt",
+      body: { ...(explicit ? { sessionId: session.id } : {}), createIfMissing: true, targetSelection: { urlIncludes: "example.test" } },
+    }])
   })
 
   it.each([false, true])("session new accepts --read-only supplied=%s", async (readOnly) => {
