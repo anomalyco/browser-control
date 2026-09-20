@@ -392,6 +392,24 @@ human-action warning rather than scheduling automatic page replacement.
 Protected extension iframes/popups and native unlock/Touch ID prompts are not
 supported control surfaces; no browser security flags or vault access are added.
 
+Focusing a card or credential field is enough to trigger that boundary: the
+password manager injects a `chrome-extension://` inline-menu iframe into the
+webpage. Chrome reports it to the root session as an ordinary child frame, so
+stock Playwright kept an empty-URL phantom frame under the main frame, and from
+then on `chrome.debugger` rejected every command for the tab with "Cannot access
+a chrome-extension:// URL of different extension". Playwright rewrites that into
+"Execution context was destroyed" and retries locators to their 30 s timeout,
+which used to look like an unresponsive page and trigger the health check and
+repair path. The relay now tracks such protected frames per tab: it retracts the
+forwarded attach with a synthetic `Page.frameDetached`, suppresses the frame's
+later events, records the debugger block as `protectedUi` on the root target
+(visible in `status` and `doctor`), and lifts it when a command succeeds again
+or the last protected frame is removed. The sandbox turns masked
+destroyed-context and locator-timeout failures on a blocked tab into the
+`target/cross-extension-page` diagnostic with the human-action warning and skips
+the page health check, so the tab is never repaired or replaced for a prompt the
+user simply has to dismiss.
+
 An attached tab is a browser target exposed by the extension. An unowned
 attached tab remains visible to connected clients for explicit recovery and raw
 CDP workflows. A Browser Control session owns one default page and persistent

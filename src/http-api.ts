@@ -496,6 +496,7 @@ function targetSummaries(registry: TargetRegistry): TargetSummary[] {
         ...(target.browserControlSessionId ? { browserControlSessionId: target.browserControlSessionId } : {}),
         owner: target.owner,
         ...(target.crashed ? { crashed: true } : {}),
+        ...(target.protectedUi ? { protectedUi: true } : {}),
       }
   })
 }

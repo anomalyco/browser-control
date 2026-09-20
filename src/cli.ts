@@ -568,7 +568,7 @@ const status = Command.make(
         const tab = target.tabId === undefined ? "" : ` tab=${target.tabId}`
         const browserControlSession = target.browserControlSessionId ? ` session=${target.browserControlSessionId}` : ""
         const owner = target.owner ? ` owner=${target.owner}` : ""
-        const health = target.crashed ? " crashed=true" : ""
+        const health = `${target.crashed ? " crashed=true" : ""}${target.protectedUi ? " protected-ui=true" : ""}`
         return Console.log(`- [${index}] ${target.type} ${target.id}${tab}${browserControlSession}${owner}${health} ${target.url || "about:blank"}`)
       })
     }

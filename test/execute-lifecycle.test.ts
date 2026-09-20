@@ -79,6 +79,76 @@ describe("execute lifecycle", () => {
     }
   })
 
+  it.each([
+    { kind: "rewritten evaluate", error: "Execution context was destroyed, most likely because of a navigation." },
+    { kind: "locator retry", error: "locator.inputValue: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator('#payment').contentFrame().locator('#card')" },
+  ])("names protected extension UI behind a $kind failure while the relay reports the tab blocked", async ({ error }) => {
+    // Playwright hides Chrome's "Cannot access a chrome-extension:// URL of
+    // different extension" rejection behind a rewritten evaluate error or a
+    // locator timeout; only the relay saw the real message.
+    const page = {
+      isClosed: () => false,
+      url: () => "https://example.test/pay",
+      title: async () => "Fixture",
+      context: (): BrowserContext => context as unknown as BrowserContext,
+      on: vi.fn(),
+      off: vi.fn(),
+      once: vi.fn(),
+      evaluate: vi.fn<() => Promise<boolean>>().mockRejectedValue(new Error(error)),
+      close: vi.fn().mockResolvedValue(undefined),
+    }
+    const context = {
+      pages: () => [],
+      on: vi.fn(),
+      newPage: vi.fn().mockResolvedValueOnce(page).mockRejectedValue(new Error("Unexpected page replacement")),
+      newCDPSession: async () => ({
+        send: async () => ({ targetInfo: { targetId: "fixture-target" } }),
+        detach: async () => {},
+      }),
+    }
+    const browser = {
+      isConnected: () => true,
+      contexts: () => [context],
+      close: vi.fn().mockResolvedValue(undefined),
+    }
+    const connect = vi.spyOn(chromium, "connectOverCDP").mockResolvedValue(browser as unknown as Browser)
+    const register = vi.spyOn(selectors, "register").mockResolvedValue(undefined)
+    const sandbox = new ExecuteSandbox({ endpointUrl: "http://127.0.0.1:1", pageHealthCheckTimeoutMs: 50 })
+    try {
+      const ready = await Effect.runPromise(sandbox.execute("state.originalPage = page; return page.url()"))
+      expect(ready).toMatchObject({ isError: false, value: "https://example.test/pay" })
+      expect(sandbox.markTargetProtectedUi("other-target", true)).toBe(false)
+      expect(sandbox.markTargetProtectedUi("fixture-target", true)).toBe(true)
+
+      const failure = await Effect.runPromise(sandbox.execute("return page.evaluate(() => true)"))
+      expect(failure.isError).toBe(true)
+      expect(failure.text).toContain(error.split("\n")[0])
+      expect(failure.diagnostic).toBe("target/cross-extension-page")
+      expect(failure.warnings).toEqual([
+        "Chromium blocked protected extension UI, possibly a password manager. Ask the user to finish or dismiss it in the browser, then retry.",
+      ])
+      // The tab is healthy; no health check, repair, or replacement follows.
+      expect(sandbox.getStatus()).toMatchObject({ connected: true, pageUrl: "https://example.test/pay" })
+      const continued = await Effect.runPromise(sandbox.execute("return { samePage: page === state.originalPage }"))
+      expect(continued).toMatchObject({ isError: false, value: { samePage: true }, warnings: [] })
+      expect(page.evaluate).toHaveBeenCalledTimes(1)
+      expect(context.newPage).toHaveBeenCalledTimes(1)
+      expect(page.close).not.toHaveBeenCalled()
+      expect(connect).toHaveBeenCalledTimes(1)
+
+      // Once the menu is dismissed the same failure is classified as before.
+      expect(sandbox.markTargetProtectedUi("fixture-target", false)).toBe(true)
+      const later = await Effect.runPromise(sandbox.execute("return page.evaluate(() => true)"))
+      expect(later.isError).toBe(true)
+      expect(later.diagnostic).not.toBe("target/cross-extension-page")
+      expect(later.warnings).toEqual([])
+    } finally {
+      await Effect.runPromise(sandbox.disconnectSettled())
+      connect.mockRestore()
+      register.mockRestore()
+    }
+  })
+
   it("repairs a stale relay-owned page over a fresh connection instead of replacing it", async () => {
     const makePage = (evaluate: () => Promise<boolean>) => ({
       isClosed: () => false,

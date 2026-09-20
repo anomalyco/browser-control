@@ -653,6 +653,6 @@ function formatNullableNumber(value: number | null): string {
 export function formatTargetSummary(target: TargetSummary): string {
   const tab = target.tabId === undefined ? "" : ` tab=${target.tabId}`
   const owner = target.owner ? ` owner=${target.owner}` : ""
-  const health = target.crashed ? " crashed=true" : ""
+  const health = `${target.crashed ? " crashed=true" : ""}${target.protectedUi ? " protected-ui=true" : ""}`
   return `${target.type} ${target.id}${tab}${owner}${health} ${target.url || "about:blank"}`
 }

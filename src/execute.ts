@@ -460,6 +460,19 @@ export const defaultPageClosedWarning = "The session default page was closed; cr
 const defaultPageRecoveredWarning = "The session default page was unresponsive; created a new page. References to the old page in state are stale."
 const defaultPageCrashedWarning = "The session default page target crashed; checking it before the next execute."
 export const defaultPageRepairedWarning = "The session default page stopped answering automation; Browser Control reconnected and re-resolved the same tab. References to the old page in state are stale."
+const protectedExtensionUiWarning = "Chromium blocked protected extension UI, possibly a password manager. Ask the user to finish or dismiss it in the browser, then retry."
+const protectedExtensionUiDiagnostic = "target/cross-extension-page"
+
+/**
+ * Playwright rewrites Chrome's "Cannot access a chrome-extension:// URL of
+ * different extension" rejection into a generic destroyed-context error and
+ * retries locators until they time out. When the relay reports that the tab is
+ * blocked by protected extension UI, those masked failures are the block.
+ */
+function isMaskedProtectedUiFailure(cause: unknown): boolean {
+  const kind = runtimeFailureKind(cause)
+  return kind === "context-destroyed" || kind === "context-missing" || kind === "timeout"
+}
 export const defaultPageReplacedWarning = "The session default page target was replaced; rebound to the same browser tab. References to the old page in state are stale."
 
 export const shouldCloseCurrentPageOnAdopt = (options: {
@@ -519,6 +532,7 @@ export class ExecuteSandbox {
   private ownsPage = false
   private pageHealthCheckRequired = false
   private pageCrashed = false
+  private pageProtectedUi = false
   private pendingPageTarget: { readonly targetId: string; readonly warnReplaced: boolean; readonly repaired?: boolean } | undefined
   private readonly state: Record<string, unknown> = {}
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
@@ -571,13 +585,15 @@ export class ExecuteSandbox {
           const aftermath = error instanceof ExecuteCodeError ? error.aftermath : undefined
           const diagnostic = error instanceof SessionPageRecoveryError
             ? `session-page/${error.reason}`
+            : this.pageProtectedUi && isMaskedProtectedUiFailure(error)
+            ? protectedExtensionUiDiagnostic
             : executionContextFailureDiagnostic(error, aftermath)
           if (diagnostic?.startsWith("execution-context/")) {
             this.pageHealthCheckRequired = true
           }
           const warnings = this.drainWarnings()
-          if (diagnostic === "target/cross-extension-page") {
-            warnings.push("Chromium blocked protected extension UI, possibly a password manager. Ask the user to finish or dismiss it in the browser, then retry.")
+          if (diagnostic === protectedExtensionUiDiagnostic) {
+            warnings.push(protectedExtensionUiWarning)
           }
           const logCompactionWarning = formatLogCompactionWarning(logSummary)
           if (logCompactionWarning) {
@@ -942,6 +958,15 @@ export class ExecuteSandbox {
     return true
   }
 
+  /** Relay report that protected extension UI started or stopped blocking the default page's tab. */
+  markTargetProtectedUi(targetId: string, protectedUi: boolean): boolean {
+    if (this.defaultPageTargetId !== targetId) {
+      return false
+    }
+    this.pageProtectedUi = protectedUi
+    return true
+  }
+
   markTargetDetached(targetId: string): boolean {
     if (this.defaultPageTargetId !== targetId) {
       return false
@@ -952,6 +977,7 @@ export class ExecuteSandbox {
     this.ownsPage = false
     this.pageHealthCheckRequired = false
     this.pageCrashed = false
+    this.pageProtectedUi = false
     this.pendingPageTarget = undefined
     this.networkCapture.bindPage(undefined)
     if (!this.pendingWarnings.includes(defaultPageClosedWarning)) {
@@ -966,6 +992,7 @@ export class ExecuteSandbox {
     this.page = undefined
     this.defaultPageTargetId = targetId
     this.pageHealthCheckRequired = false
+    this.pageProtectedUi = false
     this.pendingPageTarget = { targetId, warnReplaced: true }
     this.networkCapture.bindPage(undefined)
     return true
@@ -989,7 +1016,10 @@ export class ExecuteSandbox {
   private bindDefaultPage(page: Page, targetId: string | undefined, ownsPage: boolean, notify: boolean): void {
     this.clearPageListeners()
     this.page = page
-    if (targetId === undefined || targetId !== this.defaultPageTargetId) this.pageCrashed = false
+    if (targetId === undefined || targetId !== this.defaultPageTargetId) {
+      this.pageCrashed = false
+      this.pageProtectedUi = false
+    }
     this.defaultPageTargetId = targetId
     this.ownsPage = ownsPage
     const listener = () => {
@@ -1127,7 +1157,9 @@ export class ExecuteSandbox {
       }
     }
     if (this.page && !this.page.isClosed()) {
-      if (this.pageHealthCheckRequired || this.page.url().startsWith("chrome-error://")) {
+      // A tab blocked by protected extension UI cannot answer a probe; the
+      // block is named on the next failure instead of treated as a dead page.
+      if ((this.pageHealthCheckRequired && !this.pageProtectedUi) || this.page.url().startsWith("chrome-error://")) {
         const page = await this.checkSessionPage(this.page, { repaired: false })
         if (page) return page
       } else {
@@ -1182,6 +1214,7 @@ export class ExecuteSandbox {
     this.ownsPage = false
     this.pageHealthCheckRequired = false
     this.pageCrashed = false
+    this.pageProtectedUi = false
     this.notifyDefaultTargetChange()
     this.pendingWarnings.push(defaultPageRecoveredWarning)
     return undefined

@@ -227,9 +227,17 @@ Chromium blocks one extension from debugging another extension's pages; toolbar
 popups and native unlock, Touch ID, and Windows Hello prompts are not supported
 Playwright control surfaces.
 
+Focusing or filling a card-number or credential field can open the inline menu
+by itself, even inside a third-party payment iframe. While it is open, Chrome
+rejects every automation command for that tab; Playwright shows this as
+"Execution context was destroyed" or a locator timeout, so the execute result
+carries the `target/cross-extension-page` diagnostic and warning, and
+`browser-control status` marks the tab `protected-ui=true`.
+
 `target/cross-extension-page` means a permission boundary. Ask the user to finish
 or dismiss the prompt and retry; do not reset the page, read vault contents, or
-weaken browser security to get around it. Register `handoff` on the originating
+weaken browser security to get around it. The page itself is healthy: do not
+treat the failure as an unresponsive tab or create a new page. Register `handoff` on the originating
 webpage before triggering a human-only prompt when possible. If the prompt
 already prevents attachment, give the user the required action directly rather
 than assuming an in-page handoff can be displayed. Verify the intended webpage

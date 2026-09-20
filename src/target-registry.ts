@@ -369,6 +369,17 @@ export class TargetRegistry {
     this.addRootTarget({ ...target, targetInfo: { ...target.targetInfo, title: url, url }, crashed: false })
   }
 
+  /** Record or lift a protected-frame debugger block. Returns the target only when its state changed. */
+  markRootTargetProtectedUi(tabId: number, protectedUi: boolean): ConnectedTarget | undefined {
+    const target = this.tabTargets.get(tabId)
+    if (!target || (target.protectedUi === true) === protectedUi) {
+      return undefined
+    }
+    const updated: ConnectedTarget = { ...target, protectedUi }
+    this.addRootTarget(updated)
+    return updated
+  }
+
   markRootTargetCrashed(tabId: number): ConnectedTarget | undefined {
     const staged = this.stagedRootTargets.get(tabId)
     if (staged) {

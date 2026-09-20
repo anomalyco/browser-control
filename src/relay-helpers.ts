@@ -444,11 +444,15 @@ export function isRestrictedTarget(targetInfo: TargetInfo): boolean {
   if (targetInfo.type !== "page" && targetInfo.type !== "iframe" && targetInfo.type !== "worker") {
     return true
   }
-  if (!targetInfo.url) {
+  return isRestrictedUrl(targetInfo.url)
+}
+
+const restrictedUrlPrefixes = ["chrome://", "chrome-extension://", "chrome-untrusted://", "devtools://", "edge://", "brave://"]
+
+/** Browser-internal or other-extension documents that `chrome.debugger` refuses to expose. */
+export function isRestrictedUrl(url: string | undefined): boolean {
+  if (!url) {
     return false
   }
-  const blockedPrefixes = ["chrome://", "chrome-extension://", "chrome-untrusted://", "devtools://", "edge://", "brave://"]
-  return blockedPrefixes.some((prefix) => {
-    return targetInfo.url.startsWith(prefix)
-  })
+  return restrictedUrlPrefixes.some((prefix) => url.startsWith(prefix))
 }

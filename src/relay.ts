@@ -57,6 +57,7 @@ import { FlightRecorderRelay } from "./flight-recorder.ts"
 import { appendManagedRelayProcessLog } from "./relay-log.ts"
 import { appendRelayLifecycleEvent, RelayLifecycleEvent } from "./relay-lifecycle-log.ts"
 import { RelayShutdown } from "./relay-shutdown.ts"
+import { ProtectedFrameTracker } from "./protected-frames.ts"
 import { RootTargetLifecycle } from "./root-target-lifecycle.ts"
 import { boundedToken, runtimeFailureKind, summarizeDiagnosticUrl, summarizeRuntimeEvaluate } from "./runtime-diagnostics.ts"
 import { shouldExposeChildTarget, TargetRegistry, type RootTargetChange, type TargetOwnershipChange } from "./target-registry.ts"
@@ -571,6 +572,25 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const mainFrameIdsByTab = new Map<number, string>()
   const ghostCursorPositionsByTab = new Map<number, { readonly x: number; readonly y: number }>()
   const suppressedChildSessions = new Map<string, number>()
+  const protectedFrames = new ProtectedFrameTracker()
+
+  function setProtectedUi(tabId: number, protectedUi: boolean): void {
+    const changed = registry.markRootTargetProtectedUi(tabId, protectedUi)
+    if (!changed) return
+    contextDebugLog?.(`protected-ui blocked=${protectedUi} ${targetDiagnosticIdentity(changed)}`)
+    sessions.markTargetProtectedUi(changed.targetInfo.targetId, protectedUi)
+  }
+
+  /** Hide a protected frame from clients that already saw it attach. */
+  function retractProtectedFrame(target: ConnectedTarget, frameId: string, url: string | undefined): void {
+    contextDebugLog?.(`protected-frame frame=${boundedToken(frameId)} ${targetDiagnosticIdentity(target)} ${summarizeDiagnosticUrl(url)}`)
+    sendEventToTargetViewers(target.sessionId, { method: "Page.frameDetached", params: { frameId, reason: "remove" }, sessionId: target.sessionId })
+  }
+
+  function forgetProtectedFrames(tabId: number): void {
+    protectedFrames.forgetTab(tabId)
+    setProtectedUi(tabId, false)
+  }
 
   function targetDiagnosticIdentity(target: ConnectedTarget | ChildTarget | undefined): string {
     if (!target) {
@@ -950,6 +970,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       if (childSessionId && targetInfo) {
         if (isRestrictedTarget(targetInfo)) {
           suppressedChildSessions.set(childSessionId, tabId)
+          if (targetInfo.type === "iframe" && protectedFrames.mark(tabId, targetInfo.targetId)) {
+            retractProtectedFrame(target, targetInfo.targetId, targetInfo.url)
+          }
           if (params?.waitingForDebugger === true) {
             Effect.runPromise(
               sendDebuggerCommand({
@@ -1003,6 +1026,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         if (childTarget) {
           suppressedChildSessions.set(childTarget.sessionId, tabId)
           detachChildTargetState(childTarget.sessionId)
+          if (targetInfo.type === "iframe" && protectedFrames.mark(tabId, targetInfo.targetId)) {
+            retractProtectedFrame(target, targetInfo.targetId, targetInfo.url)
+          }
         }
         return
       }
@@ -1024,12 +1050,36 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         return
       }
     }
+    if (sourceSessionId === undefined || sourceSessionId === target.sessionId) {
+      const decision = protectedFrames.observe({
+        tabId,
+        method,
+        params,
+        mainFrameId: mainFrameIdsByTab.get(tabId),
+        isChildFrame: (frameId) => typeof registry.tabFrameEvents.get(tabId)?.get(frameId)?.attached?.parentFrameId === "string",
+      })
+      if (decision.kind === "retract") {
+        const frame = getObject(params?.frame)
+        retractProtectedFrame(target, decision.frameId, typeof params?.url === "string" ? params.url : typeof frame?.url === "string" ? frame.url : undefined)
+        return
+      }
+      if (decision.kind === "suppress") {
+        // Dismissed protected UI lifts Chrome's debugger block for the tab.
+        if (method === "Page.frameDetached" && !protectedFrames.hasAny(tabId)) setProtectedUi(tabId, false)
+        return
+      }
+      if (decision.kind === "restore") {
+        sendEventToTargetViewers(target.sessionId, { method: "Page.frameAttached", params: { frameId: decision.frameId, parentFrameId: decision.parentFrameId }, sessionId: target.sessionId })
+      }
+    }
     if (method === "Page.frameNavigated") {
       const frame = getObject(params?.frame)
       if (typeof frame?.url === "string" && typeof frame.parentId !== "string" && (sourceSessionId === undefined || sourceSessionId === target.sessionId)) {
         if (typeof frame.id === "string") {
           mainFrameIdsByTab.set(tabId, frame.id)
         }
+        // The previous document's frames, protected ones included, are gone.
+        forgetProtectedFrames(tabId)
         contextDebugLog?.(`main-frame-navigated frame=${boundedToken(typeof frame.id === "string" ? frame.id : undefined)} loader=${boundedToken(typeof frame.loaderId === "string" ? frame.loaderId : undefined)} ${targetDiagnosticIdentity(target)} ${summarizeDiagnosticUrl(frame.url)}`)
         registry.updateTargetUrl(tabId, frame.url)
       }
@@ -1297,7 +1347,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const sessionId = message.sessionId
     const result = yield* (message.method === "Runtime.enable" && sessionId
       ? cdpRuntime.enable(route, command.params, () => cdpRouter.session(socket, sessionId) !== undefined)
-      : sendDebuggerCommand(command))
+      : sendDebuggerCommand(command)).pipe(
+        // Chrome rejects every command for a tab while another extension's frame
+        // is open in it; clients only see the rejection, so record it per tab.
+        Effect.tapError((error) => Effect.sync(() => {
+          if (runtimeFailureKind(error) === "cross-extension-page") setProtectedUi(tabId, true)
+        })),
+        Effect.tap(() => Effect.sync(() => setProtectedUi(tabId, false))),
+      )
     yield* applyGhostCursorMouseEvent({ tabId, message }).pipe(Effect.ignore)
     return result
   })
@@ -1432,6 +1489,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (!options.preserveSessionTarget) sessions.markTargetDetached(detached.target.targetInfo.targetId)
     cdpClients.detachTab(tabId, { destroyed: true })
     mainFrameIdsByTab.delete(tabId)
+    protectedFrames.forgetTab(tabId)
     ghostCursorPositionsByTab.delete(tabId)
     for (const [sessionId, childTabId] of suppressedChildSessions) {
       if (childTabId === tabId) {
@@ -1443,6 +1501,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
 
   function recordRootReplacement(change: Extract<RootTargetChange, { readonly kind: "replaced" }>): void {
     mainFrameIdsByTab.delete(change.target.tabId)
+    protectedFrames.forgetTab(change.target.tabId)
     ghostCursorPositionsByTab.delete(change.target.tabId)
     for (const [sessionId, childTabId] of suppressedChildSessions) {
       if (childTabId === change.target.tabId) suppressedChildSessions.delete(sessionId)

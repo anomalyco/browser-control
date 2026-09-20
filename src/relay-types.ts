@@ -20,6 +20,13 @@ export type ConnectedTarget = {
   readonly targetInfo: TargetInfo
   readonly owner: "relay" | "user"
   readonly crashed?: boolean
+  /**
+   * `chrome.debugger` currently rejects every command for this tab because a
+   * protected frame (another extension's UI, such as a password manager's
+   * inline menu) is open inside it. Cleared when a command succeeds again or
+   * the last protected frame goes away.
+   */
+  readonly protectedUi?: boolean
 }
 
 export type ChildTarget = {
@@ -61,6 +68,7 @@ export interface ExecuteSandboxLike {
   authRefresh(options: { readonly name: string; readonly urlFilter?: string; readonly timeoutMs?: number }): Effect.Effect<NetworkCaptureResult, Error>
   redactNetworkCaptureText(text: string): string
   markTargetCrashed(targetId: string): boolean
+  markTargetProtectedUi(targetId: string, protectedUi: boolean): boolean
   markTargetDetached(targetId: string): boolean
   markTargetReplaced(previousTargetId: string, targetId: string): boolean
   restore(target: SessionTarget | undefined): void
