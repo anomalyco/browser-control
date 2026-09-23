@@ -1,4 +1,4 @@
-import { Effect, Schedule, Schema } from "effect"
+import { Config, Effect, Schedule, Schema } from "effect"
 import { spawn } from "node:child_process"
 import crypto from "node:crypto"
 import path from "node:path"
@@ -84,7 +84,16 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
     return yield* Effect.fail(initial.failure)
   }
 
-  if (relayWasAbsent) yield* options.start ?? startManagedRelay()
+  if (relayWasAbsent) {
+    const autoStart = yield* Config.boolean("BROWSER_CONTROL_AUTOSTART").pipe(
+      Config.withDefault(true),
+      Effect.mapError((cause) => new Error("Invalid BROWSER_CONTROL_AUTOSTART configuration", { cause })),
+    )
+    if (!autoStart) {
+      return yield* Effect.fail(new Error(`Automatic relay startup is disabled; no relay is available at ${options.relay.endpoint}`))
+    }
+    yield* options.start ?? startManagedRelay()
+  }
   const version = yield* waitForRelayReady(options)
   const buildProblem = relayBuildProblem(version, buildId)
   return { version, started: relayWasAbsent, ...(buildProblem ? { buildProblem } : {}) } satisfies RelayReadiness

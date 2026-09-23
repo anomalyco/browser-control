@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
-import { Effect } from "effect"
+import { ConfigProvider, Effect } from "effect"
 import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
 import * as RelayClient from "../src/relay-client.ts"
@@ -53,6 +53,25 @@ function unreachable(): RelayClient.RelayUnreachable {
 }
 
 describe("relay lifecycle", () => {
+  it("does not spawn a replacement when automatic startup is disabled", async () => {
+    let running = false
+    const start = vi.fn(() => { running = true })
+    const operation = ensureRelay({
+      relay: relay({ version: Effect.suspend(() => running ? Effect.succeed(version) : Effect.fail(unreachable())) }),
+      buildId: "build-current",
+      start: Effect.sync(start),
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ BROWSER_CONTROL_AUTOSTART: "false" }))))
+    await expect(Effect.runPromise(operation)).rejects.toThrow("Automatic relay startup is disabled")
+    expect(start).not.toHaveBeenCalled()
+  })
+
+  it("can use an existing relay when automatic startup is disabled", async () => {
+    const result = await Effect.runPromise(ensureRelay({ relay: relay({ version: Effect.succeed(version) }), buildId: "build-current" }).pipe(
+      Effect.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ BROWSER_CONTROL_AUTOSTART: "false" }))),
+    ))
+    expect(result).toEqual({ version, started: false })
+  })
+
   it("reuses a matching relay without starting another process", async () => {
     let starts = 0
     const result = await Effect.runPromise(ensureRelay({
