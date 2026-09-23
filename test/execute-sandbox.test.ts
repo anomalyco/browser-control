@@ -92,7 +92,7 @@ describe("ExecuteSandbox", () => {
           connect(context)
           const page = context.addPage("original")
           const unrelated = context.addPage("unrelated")
-          const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test", pageHealthCheckTimeoutMs: 1 })
+          const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test", pageHealthCheckTimeoutMs: 1_000 })
           sandbox.restore({ id: page.targetId, owner })
           try {
             await Effect.runPromise(sandbox.execute("page.url()"))
@@ -117,7 +117,10 @@ describe("ExecuteSandbox", () => {
                   break
               }
             }
+            // Model the probe outcome directly. Retryable context errors plus a
+            // 1ms deadline made healthy cases depend on CI scheduling latency.
             if (healthy) page.evaluate.mockResolvedValue(true)
+            else page.evaluate.mockRejectedValue(new Error("Synthetic health probe failure"))
             const result = await Effect.runPromise(sandbox.execute("page.url()"))
             const replace = owner === "relay" && crashed && !healthy
             expect(page.close.mock.calls.length, label).toBe(replace ? 1 : 0)
