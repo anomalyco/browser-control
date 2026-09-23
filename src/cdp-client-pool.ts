@@ -90,10 +90,11 @@ export class CdpClientPool<Client extends object> implements Iterable<Client> {
     })
   }
 
-  detach(client: Client, sessionId: string): void {
+  /** Return the exact canonical subtree retired by this silent client transition. */
+  detach(client: Client, sessionId: string): readonly string[] {
     const state = this.requireState(client)
-    if (state.aliases.delete(sessionId)) return
-    this.detachSession(client, state, sessionId, { notify: false })
+    if (state.aliases.delete(sessionId)) return []
+    return this.detachSession(client, state, sessionId, { notify: false })
   }
 
   detachTab(tabId: number, options: { readonly destroyed?: boolean } = {}): void {
@@ -169,16 +170,18 @@ export class CdpClientPool<Client extends object> implements Iterable<Client> {
   private detachSession(client: Client, state: CdpClientState, sessionId: string, options: {
     readonly notify?: boolean
     readonly destroyed?: boolean
-  } = {}): void {
+  } = {}): string[] {
     const announced = state.announcements.get(sessionId)
-    if (!announced) return
+    if (!announced) return []
     state.announcements.delete(sessionId)
     this.removeTargetAliases(state, (alias) => alias.targetId === announced.targetId)
+    const retired: string[] = []
     // Descendants must disappear before their parent, including on replacement.
     for (const child of state.announcements.values()) {
-      if (child.parentSessionId === sessionId) this.detachSession(client, state, child.sessionId, options)
+      if (child.parentSessionId === sessionId) retired.push(...this.detachSession(client, state, child.sessionId, options))
     }
-    if (options.notify === false) return
+    retired.push(sessionId)
+    if (options.notify === false) return retired
     if (options.destroyed && announced.parentSessionId === undefined) {
       this.send(client, { method: "Target.targetDestroyed", params: { targetId: announced.targetId } })
     }
@@ -187,6 +190,7 @@ export class CdpClientPool<Client extends object> implements Iterable<Client> {
       method: "Target.detachedFromTarget",
       params: { sessionId, targetId: announced.targetId },
     })
+    return retired
   }
 
   private removeTargetAliases(state: CdpClientState, matches: (alias: Data.TaggedEnum.Value<ClientCdpSessionAlias, "Target">) => boolean): void {

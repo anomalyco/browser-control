@@ -184,6 +184,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     readonly method: string
     readonly params: JsonObject
   }) {
+    const finishDisable = options.method === "Runtime.disable" ? cdpRuntime.beginDisable(options.tabId, options.sessionId) : undefined
     return yield* sendToExtension({
       method: "debugger.sendCommand",
       params: {
@@ -192,7 +193,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         params: options.params,
         ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
       },
-    })
+    }).pipe(Effect.ensuring(Effect.sync(() => { finishDisable?.() })))
   })
   const recordingRelay = new RecordingRelay({
     sendToExtension: (command) => {
@@ -214,6 +215,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const handoffs = new HandoffRegistry()
   const activeHandoffTabs = new Map<string, Set<number>>()
   const clearLiveExtensionState = (reason: string) => {
+    cdpRuntime.clear()
     void recordingRelay.cleanupAll(reason).catch(() => {})
     void flightRecorder.cleanupAll().catch(() => {})
     pendingTabGrouping.clear()
@@ -562,7 +564,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   const debugLog = debugEnabled ? (line: string) => console.error(`[bc ${new Date().toISOString().slice(11, 23)}] ${line}`) : undefined
   const contextDebugLog = debugLog ? (line: string) => debugLog(`[bc:ctx] ${line}`) : undefined
   const websocketServer = new WebSocketServer({ noServer: true })
-  const cdpClients = new CdpClientPool<WebSocket>(sendCdpEvent)
+  const cdpClients = new CdpClientPool<WebSocket>((client, event) => cdpRuntime.deliver(client, event, () => sendCdpEvent(client, event)))
   const cdpRouter = new CdpRouter(cdpClients, registry)
   const cdpRuntime = new CdpRuntime({
     registry,
@@ -750,6 +752,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     })
     socket.on("close", () => {
       debugLog?.(`client- ${cdpClients.sessionId(socket) ?? "raw"} total=${cdpClients.size - 1}`)
+      cdpRuntime.disconnect(socket)
       const idleGeneration = cdpClients.unregister(socket)
       if (idleGeneration !== undefined && !shutdownControl.stopping) {
         Effect.runPromise(shutdownControl.trackTransport(cdpRuntime.disableIdle(() => cdpClients.isCurrentIdleGeneration(idleGeneration))).pipe(Effect.ignore)).catch((error: unknown) => {
@@ -1171,6 +1174,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return yield* Effect.fail(new Error("Invalid CDP request"))
     }
 
+    const requestedSessionId = message.sessionId
+    const frameTreeRoute = requestedSessionId && message.method === "Page.getFrameTree" && cdpClients.hasSession(socket, requestedSessionId) && !cdpClients.alias(socket, requestedSessionId)
+      ? cdpRouter.session(socket, requestedSessionId) : undefined
+    const frameTreeSent = frameTreeRoute && requestedSessionId ? cdpRuntime.frameTreeResponse(socket, frameTreeRoute, () =>
+      socket.readyState === WebSocket.OPEN && cdpClients.hasSession(socket, requestedSessionId) && cdpRouter.session(socket, requestedSessionId) !== undefined) : undefined
     debugLog?.(`cdp<- ${cdpClients.sessionId(socket) ?? "raw"} #${message.id} ${message.method} ${message.sessionId ?? ""}`)
     yield* Effect.matchEffect(routeCdpCommand(socket, message), {
       onFailure: (error) => {
@@ -1201,6 +1209,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
             result,
             ...(message.sessionId === undefined ? {} : { sessionId: message.sessionId }),
           })
+          const frameId = getObject(getObject(resultObject?.frameTree)?.frame)?.id
+          if (typeof frameId === "string") frameTreeSent?.(frameId)
         })
       },
     })
@@ -1313,7 +1323,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (message.method === "Target.detachFromTarget") {
       const childSessionId = typeof message.params?.sessionId === "string" ? message.params.sessionId : undefined
       if (childSessionId) {
-        cdpClients.detach(socket, childSessionId)
+        for (const retiredSessionId of cdpClients.detach(socket, childSessionId)) {
+          cdpRuntime.detach(socket, retiredSessionId)
+        }
       }
       return {}
     }
@@ -1346,8 +1358,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       ...(route.chromeSessionId === undefined ? {} : { sessionId: route.chromeSessionId }),
     }
     const sessionId = message.sessionId
+    const canonical = sessionId !== undefined && cdpClients.hasSession(socket, sessionId) && !cdpClients.alias(socket, sessionId)
     const result = yield* (message.method === "Runtime.enable" && sessionId
-      ? cdpRuntime.enable(route, command.params, () => cdpRouter.session(socket, sessionId) !== undefined)
+      ? cdpRuntime.enable(route, command.params, () => socket.readyState === WebSocket.OPEN && cdpRouter.session(socket, sessionId) !== undefined && (!canonical || cdpClients.hasSession(socket, sessionId)), canonical
+        ? { client: socket, send: (event) => sendCdpEvent(socket, event) }
+        : undefined)
       : sendDebuggerCommand(command)).pipe(
         // Chrome rejects every command for a tab while another extension's frame
         // is open in it; clients only see the rejection, so record it per tab.
@@ -1470,6 +1485,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     readonly preserveSessionTarget?: boolean
     readonly updateExtension?: boolean
   } = {}): void {
+    cdpRuntime.invalidate(tabId)
     rootLifecycle.invalidate(tabId)
     if (options.updateExtension !== false) {
       Effect.runPromise(Effect.ignore(sendToExtension({ method: "pageStatus.clear", params: { tabId } }))).catch(() => {})
@@ -1501,6 +1517,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   }
 
   function recordRootReplacement(change: Extract<RootTargetChange, { readonly kind: "replaced" }>): void {
+    cdpRuntime.invalidate(change.previous.tabId)
     mainFrameIdsByTab.delete(change.target.tabId)
     protectedFrames.forgetTab(change.target.tabId)
     ghostCursorPositionsByTab.delete(change.target.tabId)
@@ -1511,6 +1528,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   }
 
   function detachChildTargetState(sessionId: string): void {
+    const target = registry.childTargets.get(sessionId)
+    if (target) cdpRuntime.invalidate(target.tabId, sessionId)
     const detached = registry.detachChildTargetState(sessionId)
     if (detached) {
       cdpClients.detachTarget(detached)
@@ -1533,6 +1552,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   }
 
   function reconcileTargetOwnership(change: TargetOwnershipChange): void {
+    for (const tabId of change.tabIds) cdpRuntime.invalidate(tabId)
     for (const client of cdpClients) {
       cdpRouter.reconcileClient(client)
     }

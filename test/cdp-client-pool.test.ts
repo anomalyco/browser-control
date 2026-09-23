@@ -383,8 +383,8 @@ describe("CdpClientPool", () => {
     events.length = 0
 
     for (const alias of [rootAlias, childAlias, browserAlias]) {
-      pool.detach(client, alias)
-      pool.detach(client, alias)
+      expect(pool.detach(client, alias)).toEqual([])
+      expect(pool.detach(client, alias)).toEqual([])
       expect(pool.alias(client, alias)).toBeUndefined()
     }
 
@@ -393,7 +393,7 @@ describe("CdpClientPool", () => {
     expect(events).toEqual([])
   })
 
-  it("silently detaches a client-requested real session subtree only for that client", () => {
+  it.each(["root", "child"])("silently detaches a client-requested %s subtree only for that client and returns retired canonical sessions", (kind) => {
     const { pool, client, events } = setup()
     const other: { events: CdpEvent[] } = { events: [] }
     pool.register(other)
@@ -406,14 +406,20 @@ describe("CdpClientPool", () => {
     events.length = 0
     other.events.length = 0
 
-    pool.detach(client, rootTarget.sessionId)
-    pool.detach(client, rootTarget.sessionId)
+    const detached = kind === "root" ? rootTarget : childTarget
+    expect(pool.detach(client, detached.sessionId)).toEqual([
+      grandchildTarget.sessionId, childTarget.sessionId, ...(kind === "root" ? [rootTarget.sessionId] : []),
+    ])
+    expect(pool.detach(client, detached.sessionId)).toEqual([])
+    expect(pool.detach(client, "unannounced-session")).toEqual([])
 
     for (const target of [rootTarget, childTarget, grandchildTarget]) {
-      expect(pool.hasSession(client, target.sessionId)).toBe(false)
+      expect(pool.hasSession(client, target.sessionId)).toBe(kind === "child" && target === rootTarget)
       expect(pool.hasSession(other, target.sessionId)).toBe(true)
     }
-    for (const alias of aliases) expect(pool.alias(client, alias)).toBeUndefined()
+    for (const [index, alias] of aliases.entries()) {
+      expect(pool.alias(client, alias) !== undefined).toBe(kind === "child" && index === 0)
+    }
     expect(pool.alias(client, browserAlias)).toEqual(ClientCdpSessionAlias.Browser())
     expect(events).toEqual([])
     expect(other.events).toEqual([])
