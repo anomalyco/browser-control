@@ -275,12 +275,20 @@ and the target remained at `chrome-error://chromewebdata/`.
 
 Browser Control now remembers context failures and browser crash events. Before
 the next normal execute, it gives the default page a bounded health check.
-Only a disposable relay-owned page (crashed renderer, `about:blank`, or a
+Only a disposable relay-owned page (crashed renderer or a
 `chrome-error://` document) is closed and recreated with a stale-reference
 warning; if it cannot be closed, execute fails with reset guidance instead of
 leaking ownership. Any other live page is kept. An unhealthy adopted user tab
 is never closed or replaced; the execute fails quickly and tells the agent to
 reset or adopt another tab.
+
+Blank and unknown URLs are not disposable: `setContent` and opener-written
+documents can contain unsaved user state without changing `about:blank`.
+Recovery reads the current URL and crash state after the health probe, so a
+navigation during that probe does not authorize closing the new document.
+Replacing a target clears its predecessor's crash flag; recovery evidence is
+generation-local. `scripts/check-page-preservation.ts` exercises the blank-page
+case with a real isolated Chromium process and a synthetic draft.
 
 A 2026-09-19 field failure showed why a relay-owned page must not be treated as
 disposable: a page whose execution context went stale after a sign-in redirect

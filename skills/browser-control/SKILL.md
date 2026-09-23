@@ -552,7 +552,8 @@ Common diagnoses:
 - Repeated execution-context errors: run one short follow-up so Browser Control
   can health-check the page. A live page is kept: Browser Control reconnects and
   re-resolves the same tab once, then fails with a `session-page/*-unresponsive`
-  diagnosis if the page still does not answer. Only a crashed, `about:blank`, or
+  diagnosis if the page still does not answer. Blank or unknown URLs are preserved:
+  they can contain unsaved content. Only a crashed or
   `chrome-error://` relay-owned page is closed and recreated. It never replaces
   an adopted user tab. When a page stays unresponsive (bot-protected sites can
   stall the main world for automation while rendering normally for the human),

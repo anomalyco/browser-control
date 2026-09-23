@@ -248,6 +248,33 @@ describe("ExecuteSandbox", () => {
     await Effect.runPromise(sandbox.closeSettled())
   })
 
+  it("does not carry a retired target's crash into its unresponsive replacement", async () => {
+    const context = new FakeContext()
+    connect(context)
+    const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test", pageHealthCheckTimeoutMs: 10 })
+    try {
+      expect(await Effect.runPromise(sandbox.execute("page.url()"))).toMatchObject({ isError: false })
+      const previous = context.targets[0]
+      if (!previous) throw new Error("Expected a default page")
+      const replacement = context.addPage("replacement", "https://example.test/restored-form")
+      const unrelated = context.addPage("unrelated")
+      replacement.evaluate.mockRejectedValue(new Error("Execution context was destroyed"))
+      expect(sandbox.markTargetCrashed(previous.targetId)).toBe(true)
+      expect(sandbox.markTargetReplaced(previous.targetId, replacement.targetId)).toBe(true)
+      previous.closed = true
+      previous.emit("close")
+
+      await Effect.runPromise(sandbox.execute("page.evaluate(() => true)"))
+      const result = await Effect.runPromise(sandbox.execute("page.url()"))
+      expect(replacement.close).not.toHaveBeenCalled()
+      expect(unrelated.close).not.toHaveBeenCalled()
+      expect(context.newPage).toHaveBeenCalledOnce()
+      expect(result).toMatchObject({ isError: true, diagnostic: "session-page/owned-unresponsive" })
+    } finally {
+      await Effect.runPromise(sandbox.disconnectSettled())
+    }
+  })
+
   it("reacquires the exact replacement target when the handoff began on the default page", async () => {
     const context = new FakeContext()
     connect(context)

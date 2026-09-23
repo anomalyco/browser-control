@@ -188,7 +188,9 @@ export const recoverSessionPage = Effect.fn("Execute.recoverSessionPage")(functi
 
 /** A relay-owned page whose document holds no user-produced state worth preserving. */
 export function isDisposableSessionPage(options: { readonly url: string; readonly crashed?: boolean }): boolean {
-  return options.crashed === true || options.url === "" || options.url === "about:blank" || options.url.startsWith("chrome-error://")
+  // Blank documents can hold setContent output, forms, and opener-written state.
+  // An unknown URL is not evidence that the document is safe to discard either.
+  return options.crashed === true || options.url.startsWith("chrome-error://")
 }
 
 export async function waitForPageContext(options: {
@@ -992,6 +994,7 @@ export class ExecuteSandbox {
     this.page = undefined
     this.defaultPageTargetId = targetId
     this.pageHealthCheckRequired = false
+    this.pageCrashed = false
     this.pageProtectedUi = false
     this.pendingPageTarget = { targetId, warnReplaced: true }
     this.networkCapture.bindPage(undefined)
@@ -1187,11 +1190,14 @@ export class ExecuteSandbox {
    */
   private async checkSessionPage(page: Page, options: { readonly repaired: boolean }): Promise<Page | undefined> {
     const timeoutMs = this.options.pageHealthCheckTimeoutMs ?? sessionPageHealthCheckTimeoutMs
+    const sandbox = this
     const recovery = await Effect.runPromise(recoverSessionPage({
       ownsPage: this.ownsPage,
-      url: page.url(),
+      // Read these after the asynchronous probe: navigation may have recovered
+      // an error document or cleared the crash while its old context failed.
+      get url() { return page.url() },
       timeoutMs,
-      crashed: this.pageCrashed,
+      get crashed() { return sandbox.pageCrashed },
       repaired: options.repaired,
       healthCheck: () => waitForPageContext({
         timeoutMs,

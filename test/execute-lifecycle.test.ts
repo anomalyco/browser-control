@@ -213,16 +213,28 @@ describe("execute lifecycle", () => {
     }
   })
 
-  it("reports an unresponsive relay-owned page and keeps the tab when repair does not help", async () => {
+  it.each([
+    { initialUrl: "https://example.test/customize-your-trip", currentUrl: "https://example.test/customize-your-trip" },
+    { initialUrl: "about:blank", currentUrl: "about:blank" },
+    { initialUrl: "", currentUrl: "" },
+    { initialUrl: "chrome-error://chromewebdata/", currentUrl: "https://example.test/restored-form" },
+  ])("preserves an unresponsive tab across recovery: $initialUrl -> $currentUrl", async ({ initialUrl, currentUrl }) => {
+    let url = initialUrl
+    let evaluations = 0
     const page = {
       isClosed: () => false,
-      url: () => "https://example.test/customize-your-trip",
+      url: () => url,
       title: async () => "Fixture",
       context: (): BrowserContext => context as unknown as BrowserContext,
       on: vi.fn(),
       off: vi.fn(),
       once: vi.fn(),
-      evaluate: vi.fn<() => Promise<boolean>>().mockRejectedValue(new Error("Execution context was destroyed")),
+      evaluate: vi.fn(async () => {
+        // Navigation can commit while a health probe is in flight. A failed
+        // context read must not authorize closing the newly arrived document.
+        if (++evaluations > 1) url = currentUrl
+        throw new Error("Execution context was destroyed")
+      }),
       close: vi.fn().mockResolvedValue(undefined),
     }
     const pages: Array<typeof page> = []
@@ -264,7 +276,7 @@ describe("execute lifecycle", () => {
       expect(kept.warnings).toEqual([])
       expect(page.close).not.toHaveBeenCalled()
       expect(context.newPage).toHaveBeenCalledTimes(1)
-      expect(sandbox.getStatus()).toMatchObject({ connected: false, pageUrl: "https://example.test/customize-your-trip" })
+      expect(sandbox.getStatus()).toMatchObject({ connected: false, pageUrl: currentUrl })
     } finally {
       await Effect.runPromise(sandbox.disconnectSettled())
       connect.mockRestore()
@@ -463,8 +475,8 @@ describe("execute lifecycle", () => {
   })
 
   it("classifies which relay-owned documents are disposable", () => {
-    expect(isDisposableSessionPage({ url: "about:blank" })).toBe(true)
-    expect(isDisposableSessionPage({ url: "" })).toBe(true)
+    expect(isDisposableSessionPage({ url: "about:blank" })).toBe(false)
+    expect(isDisposableSessionPage({ url: "" })).toBe(false)
     expect(isDisposableSessionPage({ url: "chrome-error://chromewebdata/" })).toBe(true)
     expect(isDisposableSessionPage({ url: "https://example.test/form", crashed: true })).toBe(true)
     expect(isDisposableSessionPage({ url: "https://example.test/form" })).toBe(false)
