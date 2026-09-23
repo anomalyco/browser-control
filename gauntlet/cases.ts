@@ -1,5 +1,8 @@
 import { Effect, Fiber, Option } from "effect"
 import type { Page } from "playwright-core"
+import { snapshotCases } from "./snapshot-cases.ts"
+import { runtimeReplayCases } from "./runtime-replay-cases.ts"
+import type { ExpectedFailure } from "./report.ts"
 import {
   assert,
   assertTabPreserved,
@@ -22,7 +25,7 @@ export type GauntletCase = {
   readonly summary: string
   readonly fixtureUrl: (origins: { readonly primaryOrigin: string; readonly secondaryOrigin: string }) => string
   readonly budgetMs: number
-  readonly expectedFailure?: boolean
+  readonly expectedFailure?: ExpectedFailure
   /** Extra time the runner may spend closing the case's user tab when a hostile fixture keeps its renderer busy. */
   readonly userTabCleanupGraceMs?: number
   readonly run: (page: Page, ctx: GauntletContext) => Effect.Effect<unknown, Error>
@@ -39,16 +42,6 @@ const marker = (name: string) => `gauntlet-${name}-${Date.now().toString(36)}`
 const stallQuery = "hostile=1&block=20000&stall=25000"
 const stallReleasedExpression = "new Promise((resolve) => { const check = () => document.getElementById('stall-state')?.dataset.stall === 'released' ? resolve('released') : setTimeout(check, 100); check() })"
 
-/**
- * Ask (1) in todo 5c0b3fb3: an unreadable main world should produce a named
- * diagnosis, not a bare Playwright timeout. Accepts the `session-page/*`
- * diagnostic family or wording that names the condition.
- */
-function hasNamedUnresponsiveDiagnosis(envelope: ExecuteEnvelope): boolean {
-  const text = `${envelope.diagnostic ?? ""}\n${envelope.text}`
-  return envelope.diagnostic?.startsWith("session-page/") === true || /unresponsive|stalled|main world|bot[- ]protect/i.test(text)
-}
-
 function valueObject(envelope: ExecuteEnvelope): Record<string, unknown> {
   return envelope.value && typeof envelope.value === "object" && !Array.isArray(envelope.value) ? envelope.value as Record<string, unknown> : {}
 }
@@ -56,21 +49,38 @@ function valueObject(envelope: ExecuteEnvelope): Record<string, unknown> {
 const withSession = <A>(ctx: GauntletContext, body: (sessionId: string) => Effect.Effect<A, Error>): Effect.Effect<A, Error> =>
   Effect.gen(function* () {
     const sessionId = yield* ctx.createSession()
-    return yield* body(sessionId).pipe(Effect.ensuring(ctx.deleteSession(sessionId)))
+    return yield* Effect.gen(function* () {
+      const before = yield* ctx.sessionTargets(sessionId)
+      const original = before[0]
+      assert(before.length === 1 && original, "fixture session must start with exactly one owned target", before)
+      return yield* body(sessionId).pipe(Effect.ensuring(Effect.gen(function* () {
+        const after = yield* ctx.sessionTargets(sessionId)
+        assert(after.length === 1 && after[0]?.id === original.id && after[0]?.tabId === original.tabId,
+          "fixture replaced its original physical tab or target", { before, after })
+      }).pipe(Effect.orDie)))
+    }).pipe(Effect.ensuring(ctx.deleteSession(sessionId)))
   })
 
 export const cases: readonly GauntletCase[] = [
+  ...snapshotCases,
+  ...runtimeReplayCases,
   {
     name: "stalled-main-world",
     summary: "Relay-owned page whose main world stalls for automation while the DOM stays painted",
     fixtureUrl: ({ primaryOrigin }) => `${primaryOrigin}/stalled-main-world.html?${stallQuery}`,
     budgetMs: 50_000,
-    // Reads fail with generic Playwright timeouts today; todo 5c0b3fb3 ask (1)
-    // wants a named "main world unresponsive to automation" diagnosis.
-    expectedFailure: true,
     run: (_page, ctx) => withSession(ctx, Effect.fnUntraced(function* (sessionId) {
       const tag = marker("stall")
       const url = `${ctx.fixtures.primaryOrigin}/stalled-main-world.html?${stallQuery}&marker=${tag}`
+      // Run the healthy negative control before navigation starts the stall clock.
+      const missing = yield* ctx.execute({
+        sessionId,
+        code: "await page.locator('#missing-diagnostic-control').click({ timeout: 100 })",
+      })
+      assert(missing.isError && /Timeout 100ms exceeded/.test(missing.text), "healthy missing locator did not time out as expected", missing)
+      assert(missing.diagnostic === undefined, "healthy missing locator was misdiagnosed as a context failure", missing)
+      const healthy = yield* ctx.execute({ sessionId, code: "return { title: await page.title(), ready: await page.evaluate(() => true) }" })
+      assert(healthy.ok && valueObject(healthy).ready === true, "healthy page did not answer after the missing locator", healthy)
       const commit = yield* ctx.execute({
         sessionId,
         code: `await page.goto(${JSON.stringify(url)}, { waitUntil: 'commit', timeout: 15000 }); return page.url()`,
@@ -100,7 +110,7 @@ export const cases: readonly GauntletCase[] = [
       const released = yield* ctx.execute({ sessionId, code: `return await page.evaluate(() => ${stallReleasedExpression})`, timeoutMs: 45_000 })
       assert(released.ok && released.value === "released", "stalled fixture did not release its main thread before cleanup", released)
       yield* assertTabPreserved(ctx, { sessionId, urlIncludes: tag, envelopes: [released], label: "tab preserved after release" })
-      assert(hasNamedUnresponsiveDiagnosis(read), "stalled read did not name the condition (generic timeout instead of an unresponsive-main-world diagnosis)", {
+      assert(read.diagnostic === "session-page/context-read-timeout; operation=page.title; timeoutMs=5000", "stalled read did not report the exact bounded context-read diagnostic", {
         diagnostic: read.diagnostic,
         text: read.text.split("\n")[0],
       })
@@ -177,6 +187,14 @@ const pay = async (attempt) => {
 const frame = page.frames().find((candidate) => candidate !== page.mainFrame())
 const frameOrigin = frame ? new URL(frame.url()).origin : null
 const pageOrigin = new URL(page.url()).origin
+const inspector = await context.newCDPSession(page)
+let oopif
+try {
+  const { targetInfos } = await inspector.send('Target.getTargets')
+  oopif = targetInfos.some((target) => target.type === 'iframe' && target.url === frame?.url())
+} finally {
+  await inspector.detach()
+}
 const initial = (await validation.textContent()).trim()
 
 await card.fill('4242424242424242')
@@ -191,12 +209,13 @@ await card.click()
 await card.pressSequentially('4242424242424242')
 const visibleAfterTyping = await card.inputValue()
 const afterTyping = await pay(3)
-return { frameOrigin, pageOrigin, crossOrigin: frameOrigin !== pageOrigin, initial, visibleAfterFill, afterFill, visibleAfterAutofill, afterAutofill, visibleAfterTyping, afterTyping }
+return { frameOrigin, pageOrigin, oopif, crossOrigin: frameOrigin !== pageOrigin, initial, visibleAfterFill, afterFill, visibleAfterAutofill, afterAutofill, visibleAfterTyping, afterTyping }
 `,
       })
       assert(result.ok, "payment iframe flow failed", result)
       const value = valueObject(result)
       assert(value.crossOrigin === true && value.frameOrigin === ctx.fixtures.secondaryOrigin, "payment frame was not served cross-origin", value)
+      assert(value.oopif === true, "payment frame did not produce a real iframe target; origin inequality alone is not OOPIF coverage", value)
       assert(typeof value.initial === "string" && /required/i.test(value.initial), "parent validation text was not readable before input", value)
       assert(/required/i.test(String(value.afterFill)), "fill() was accepted by the hostile frame; expected validation to remain 'required'", value)
       assert(value.visibleAfterAutofill === "4242424242424242" && /required/i.test(String(value.afterAutofill)), "autofill-style value assignment should be visible yet rejected", value)
@@ -247,7 +266,7 @@ return { frameOrigin, pageOrigin, crossOrigin: frameOrigin !== pageOrigin, initi
             break
           }
           const observed = yield* Effect.result(owner.evaluate<{ href: string; phase: string | null; form: boolean; welcome: boolean; statusUi: boolean; completion: boolean }>(
-            "({ href: location.href, phase: window.__gauntlet ? window.__gauntlet.phase : null, form: !!document.querySelector('#sign-in'), welcome: !!document.querySelector('#welcome'), statusUi: !!document.getElementById('__browser_control_page_status__'), completion: !!(document.getElementById('__browser_control_page_status__')?.shadowRoot?.querySelector('button')) })",
+            "({ href: location.href, phase: window.__gauntlet ? window.__gauntlet.phase : null, form: window.__gauntlet?.phase === 'form' && document.querySelector('#sign-in-form')?.hidden === false && document.querySelector('#sign-in')?.disabled === false, welcome: !!document.querySelector('#welcome'), statusUi: !!document.getElementById('__browser_control_page_status__'), completion: !!(document.getElementById('__browser_control_page_status__')?.shadowRoot?.querySelector('button')) })",
           ))
           if (observed._tag === "Failure") {
             yield* sleep(200)
@@ -257,12 +276,16 @@ return { frameOrigin, pageOrigin, crossOrigin: frameOrigin !== pageOrigin, initi
           if (state.phase && human.phases.at(-1) !== state.phase) human.phases.push(state.phase)
           if (state.phase === "bootstrapping") human.sawBootstrap = true
           if (state.statusUi) human.sawStatusUi = true
+          // Navigation can destroy the click's evaluation before its response.
+          if (state.phase === "signing-in" || state.welcome) human.signedIn = true
           if (state.form && !human.signedIn) {
-            human.signedIn = true
-            yield* owner.evaluate("document.getElementById('sign-in').click()").pipe(Effect.ignore)
+            // The hidden bootstrap form already contains #sign-in. Recheck the
+            // ready barrier in the click's own task, not only the preceding read.
+            const clicked = yield* Effect.result(owner.evaluate<boolean>("(() => { const button = document.getElementById('sign-in'); const form = document.getElementById('sign-in-form'); if (window.__gauntlet?.phase !== 'form' || !form || form.hidden || !button || button.disabled) return false; button.click(); return window.__gauntlet.phase === 'signing-in' })()"))
+            human.signedIn = clicked._tag === "Success" && clicked.success
           } else if (state.welcome && state.completion && !human.completed) {
-            human.completed = true
-            yield* owner.evaluate("document.getElementById('__browser_control_page_status__').shadowRoot.querySelector('button').click()").pipe(Effect.ignore)
+            const clicked = yield* Effect.result(owner.evaluate<boolean>("(() => { const button = document.getElementById('__browser_control_page_status__')?.shadowRoot?.querySelector('button'); if (!document.getElementById('welcome') || !button || button.disabled) return false; button.click(); return true })()"))
+            human.completed = clicked._tag === "Success" && clicked.success
           }
           yield* sleep(200)
         }
@@ -372,50 +395,49 @@ return { naiveError, naiveMs, checkedAfterNaive, checkedAfterForce, continueEnab
     fixtureUrl: ({ primaryOrigin }) => `${primaryOrigin}/stalled-main-world.html?${stallQuery}`,
     budgetMs: 50_000,
     userTabCleanupGraceMs: 40_000,
-    // Relay 0.7.0 rejected `session adopt --session <new-name>` with "Session
-    // not found"; relay 0.8.1 creates the session but adopting a tab whose main
-    // world is stalled still times out after 10s, and stalled reads are generic
-    // timeouts (todo 5c0b3fb3 asks 1, 2, 4).
-    expectedFailure: true,
     run: (page, ctx) => Effect.gen(function* () {
       const tag = marker("adopt")
       const url = `${ctx.fixtures.primaryOrigin}/stalled-main-world.html?${stallQuery}&marker=${tag}`
       yield* playwright("open stalled fixture in user tab", () => page.goto(url, { waitUntil: "commit", timeout: 15_000 }))
+      const original = (yield* ctx.status()).targets.find((target) => target.url === url)
+      assert(original, "user fixture target must exist before adoption")
       yield* sleep(600)
 
-      const requestedSession = `gauntlet-adopt-${Date.now().toString(36)}`
-      const adopt = yield* ctx.run(["session", "adopt", "--session", requestedSession, "--target-url", tag], { timeoutMs: 30_000 })
-      let sessionId = requestedSession
-      const oneCommandAdopt = adopt.exitCode === 0
-      if (oneCommandAdopt) ctx.trackSession(sessionId)
-      if (!oneCommandAdopt) {
-        ctx.note(`adopt --session <new-name>: ${firstLine(adopt.stderr || adopt.stdout)}`)
-        const fallback = yield* ctx.run(["session", "adopt", "--target-url", tag], { timeoutMs: 30_000 })
-        if (fallback.exitCode !== 0) ctx.note(`adopt without --session: ${firstLine(fallback.stderr || fallback.stdout)}`)
-        assert(fallback.exitCode === 0, "adopting the stalled user tab failed even without --session", { first: adopt.stderr || adopt.stdout, fallback: fallback.stderr || fallback.stdout })
-        const created = /session '([^']+)'/.exec(fallback.stdout)
-        assert(created?.[1], "adopt output did not name the created session", fallback.stdout)
-        sessionId = created[1]
-        ctx.trackSession(sessionId)
-      }
+      const sessionId = `gauntlet-adopt-${Date.now().toString(36)}`
+      const adopt = yield* ctx.run(["session", "adopt", "--session", sessionId, "--target-url", tag], { timeoutMs: 30_000 })
+      assert(adopt.exitCode === 0, "one-command adoption of the stalled user tab failed", adopt.stderr || adopt.stdout)
+      ctx.trackSession(sessionId)
       return yield* Effect.gen(function* () {
-        const read = yield* ctx.execute({ sessionId, code: "return { title: await page.title() }", timeoutMs: 30_000 })
+        const adopted = yield* assertTabPreserved(ctx, { sessionId, urlIncludes: tag })
+        // withUserTab creates an unowned raw-CDP tab: registry `owner` records
+        // its relay creation provenance. Adoption's user ownership is instead
+        // proved by exclusive binding here and release-without-close below.
+        assert(adopted.id === original.id && adopted.tabId === original.tabId && adopted.owner === original.owner && adopted.browserControlSessionId === sessionId, "adoption did not preserve exact target and exclusive binding", { original, adopted })
+        const read = yield* ctx.execute({ sessionId, code: "state.setupRan = true; return { title: await page.title() }", timeoutMs: 30_000 })
         assert(read.isError, "reading the stalled adopted tab should not succeed", read)
         assert(read.durationMs < 12_000, `stalled adopted read took ${read.durationMs}ms; expected a bounded failure within 12s`, read)
-        const after = yield* ctx.execute({ sessionId, code: "return { url: page.url() }", timeoutMs: 30_000 })
-        assert(after.isError || valueObject(after).url === url, "adopted tab URL changed", after)
+        assert(read.diagnostic === "session-page/adopted-initialization-timeout" && read.text.includes("user code did not run"), "stalled adoption setup must name its initialization timeout truthfully", read)
         ctx.note(`read failed in ${read.durationMs}ms`)
-        const target = yield* assertTabPreserved(ctx, { sessionId, urlIncludes: tag, envelopes: [read, after] })
-        assert(target.owner === "user", "adopted tab is no longer reported as user-owned", target)
-        ctx.note(`one-command adopt: ${oneCommandAdopt ? "yes" : "no"}; tab kept`)
-        assert(oneCommandAdopt, "`session adopt --session <new-name> --target-url` did not create the session in one command", (adopt.stderr || adopt.stdout).trim())
-        assert(hasNamedUnresponsiveDiagnosis(read), "stalled adopted read did not name the condition", { diagnostic: read.diagnostic, text: read.text.split("\n")[0] })
-        return { sessionId, oneCommandAdopt, readMs: read.durationMs }
+        const target = yield* assertTabPreserved(ctx, { sessionId, urlIncludes: tag, envelopes: [read] })
+        assert(target.id === original.id && target.tabId === original.tabId, "adoption replaced the original user tab", { original, target })
+        assert(target.browserControlSessionId === sessionId, "adopted tab lost its exclusive session binding", target)
+        // Observe fixture release independently; this does not retry or hide a
+        // failed Browser Control execute, and evaluates only a read-only marker.
+        yield* Effect.scoped(Effect.gen(function* () {
+          const owner = yield* ctx.ownerCdpPage({ sessionId, urlIncludes: tag })
+          assert(owner.targetId === original.id, "release observer selected a different target")
+          yield* owner.waitFor("document.getElementById('stall-state')?.dataset.stall === 'released'").pipe(Effect.timeout("30 seconds"))
+        }))
+        const recovered = yield* ctx.execute({ sessionId, code: "return { url: page.url(), title: await page.title(), setupRan: Boolean(state.setupRan) }", timeoutMs: 30_000 })
+        assert(recovered.ok && valueObject(recovered).url === url && valueObject(recovered).title === "Seat selection · Gauntlet Air" && valueObject(recovered).setupRan === false, "same-tab recovery failed or timed-out setup ran user code later", recovered)
+        const finalTarget = yield* assertTabPreserved(ctx, { sessionId, urlIncludes: tag, envelopes: [recovered] })
+        assert(finalTarget.id === original.id && finalTarget.tabId === original.tabId && finalTarget.browserControlSessionId === sessionId, "recovery changed adopted target identity", finalTarget)
+        yield* ctx.deleteSession(sessionId)
+        const released = (yield* ctx.status()).targets.find((candidate) => candidate.id === original.id)
+        assert(released && released.tabId === original.tabId && released.url === url && released.browserControlSessionId === undefined, "deleting the session must release, never close, the adopted user tab", released)
+        ctx.note("one-command adopt: yes; exact user tab recovered; failed setup never ran code")
+        return { sessionId, oneCommandAdopt: true, readMs: read.durationMs, recoveryMs: recovered.durationMs }
       }).pipe(Effect.ensuring(ctx.deleteSession(sessionId)))
     }),
   },
 ]
-
-function firstLine(text: string): string {
-  return text.trim().split("\n")[0]?.replace(/^\[[^\]]*\] ERROR \(#\d+\): /, "") ?? ""
-}

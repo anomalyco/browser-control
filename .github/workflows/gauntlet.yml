@@ -1,0 +1,54 @@
+name: Browser gauntlet
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  extension-boundary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 11.20.0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install lockfile-matched Chromium
+        run: pnpm exec playwright-core install --with-deps chromium
+      - name: Fast real-extension regression lane
+        if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+        env:
+          GAUNTLET_CASE: snapshot-native-controls,snapshot-document-baseline,runtime-context-replay,cross-origin-payment-iframe,auth-redirect-handoff,sentinel-overlay-click
+          GAUNTLET_ARTIFACT_DIR: ${{ runner.temp }}/browser-control-gauntlet
+        run: pnpm gauntlet:isolated
+      - name: Repeated hostile-page lane
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          GAUNTLET_REPEAT: 3
+          GAUNTLET_TIMEOUT_MS: 1500000
+          GAUNTLET_ARTIFACT_DIR: ${{ runner.temp }}/browser-control-gauntlet
+        run: pnpm gauntlet:isolated
+      - name: Retain first-attempt evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-gauntlet-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/browser-control-gauntlet/**/report.json
+            ${{ runner.temp }}/browser-control-gauntlet/**/run.json
+            ${{ runner.temp }}/browser-control-gauntlet/**/environment.json
+            ${{ runner.temp }}/browser-control-gauntlet/**/*.log

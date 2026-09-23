@@ -523,6 +523,25 @@ only by tests can still have production callers inside its own module. Normal
 
 ### Gauntlet
 
+`pnpm gauntlet:isolated` builds this checkout and runs the gauntlet through a
+disposable Chromium profile, the real MV3 extension, and a private relay. It
+needs no installed Browser Control runtime and does not touch your browser.
+Install Chromium once with `pnpm exec playwright-core install chromium`.
+
+```bash
+GAUNTLET_CASE=cross-origin-payment-iframe pnpm gauntlet:isolated
+GAUNTLET_WARMUP=1 GAUNTLET_REPEAT=9 pnpm gauntlet:isolated
+```
+
+Each run retains JSON results, measured median/p95 timings, and build/relay logs.
+`GAUNTLET_ARTIFACT_DIR` chooses the evidence parent directory;
+`GAUNTLET_TIMEOUT_MS` bounds the owned case process (default ten minutes).
+Warmups are excluded from measured timings but their failures still fail the run.
+The temporary profile/HOME are removed after verified browser and relay cleanup;
+they are retained if process cleanup fails.
+See [the reliability loop](docs/RELIABILITY.md) for CI lanes, evidence boundaries,
+research, and the next fault-injection work.
+
 `pnpm gauntlet` runs an adversarial suite of locally served hostile pages against
 the live relay and browser. Each case reproduces one real-world behaviour that
 has broken agents before (bot protection stalling the main world, typing that
@@ -546,15 +565,17 @@ It drives Browser Control through the CLI the way a shell agent would, so it
 must use a CLI whose build matches the running relay: by default it tries the
 checkout's `src/cli.ts` and then the installed `browser-control` binary, and
 fails fast if neither matches. `GAUNTLET_CLI=source|installed|<path>` pins one.
-Fixtures are served on `127.0.0.1:19801` and `19802` (the second origin makes the
-payment iframe a real OOPIF); override with `GAUNTLET_PRIMARY_PORT` /
+Fixtures are served on `127.0.0.1:19801` and `localhost:19802` (different sites
+allow OOPIF testing with Chromium site isolation); override with `GAUNTLET_PRIMARY_PORT` /
 `GAUNTLET_SECONDARY_PORT`. Sessions are created through bare `execute`, so the
 run never changes your current session.
 
 Exit status is non-zero for `fail`, `unexpected-pass`, or `budget-exceeded`.
 Cases marked `expectedFailure` document behaviour Browser Control does not
-deliver yet; they report as `xfail`, and an unexpected pass is a prompt to flip
-the flag.
+deliver yet; only their exact named assertion can report `xfail`. Unrelated
+failures and cleanup leaks always fail. An unexpected pass prompts removal of
+the obsolete expectation. `GAUNTLET_REPORT=/absolute/report.json` saves results
+for this already-running-browser mode as well.
 
 To add a fixture: drop a self-contained `gauntlet/fixtures/<name>.html` (no
 external network; explain the hostile mechanism in a leading HTML comment; take

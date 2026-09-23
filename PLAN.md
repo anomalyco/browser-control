@@ -739,6 +739,39 @@ commands never replace a running relay.
   and an authenticated adopted tab without automating credentials, tokens, or
   production account state.
 
+## Reliability feedback loop
+
+Canonical CDP clients can replay validated execution-context descriptions after
+their frame-tree response and successful Runtime enable acknowledgment. Replay
+is requester-scoped and deduplicated; target, frame, extension generation and
+ownership changes invalidate it. Aliases and cache misses retain bounded reset
+recovery. A cached observation alone is never proof of client readiness.
+
+Adoption binds exact target identity independently of Playwright initialization.
+The first execute resolves the adopted page lazily with a bounded native connect
+timeout; failed setup retains ownership and never runs user code. Title-read
+watchdogs report an operation-specific context-read timeout without triggering
+page replacement or blocking cached URL reads. A timeout alone does not prove
+renderer unresponsiveness.
+
+The gauntlet's automated path owns a disposable Chromium profile, a built real
+MV3 shim, an isolated relay/HOME and fixture ports. `pnpm gauntlet:isolated`
+tests the current checkout without selecting or restarting the active runtime.
+The launcher disables automatic relay startup for case clients and monitors its
+owned relay/browser processes so a crash cannot silently replace the candidate.
+Keep unit regressions browser-free and synchronize lifecycle races explicitly.
+Run a short real-extension PR lane and repeat the hostile suite nightly; preserve
+per-attempt evidence, exact expected-failure signatures and cleanup failures.
+Warmups do not enter latency summaries and correctness failures are never retried
+into green. See `docs/RELIABILITY.md` for commands, coverage limits, research and
+the next fault-injection/performance work.
+
+Durable same-ID session lifecycle operations serialize publication and rollback;
+an existing in-flight identity is not a durable acknowledgment. Credential
+rotation preserves historical values for transient output redaction while secret
+profiles retain only the current reference values. Handoff completion retains its
+deadline and target-cancellation path until the start action settles.
+
 ## Backlog
 
 These items are accepted directions but are not current priorities:

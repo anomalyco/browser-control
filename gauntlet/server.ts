@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url"
 
 /**
  * Two loopback origins serving gauntlet/fixtures. The secondary origin exists so
- * the payment iframe is a real cross-origin OOPIF; everything else lives on the
+ * the payment iframe can be cross-site; everything else lives on the
  * primary origin. Ports are fixed by default so fixture URLs are stable across
  * runs and readable in relay status output.
  */
@@ -32,7 +32,10 @@ export async function startGauntletServers(options: GauntletServerOptions = {}):
   const host = options.host ?? "127.0.0.1"
   const primaryPort = options.primaryPort ?? defaultPrimaryPort
   const secondaryPort = options.secondaryPort ?? defaultSecondaryPort
-  const secondaryOrigin = `http://${host}:${secondaryPort}`
+  // Different loopback ports alone are cross-origin, but still same-site.
+  // localhost versus 127.0.0.1 lets an isolated --site-per-process browser prove
+  // the OOPIF transport. Cases must still assert an actual iframe target.
+  const secondaryOrigin = `http://${host === "127.0.0.1" ? "localhost" : host}:${secondaryPort}`
   const stallKeepaliveMs = options.stallKeepaliveMs ?? 5_000
   const openStalls = new Set<http.ServerResponse>()
 

@@ -158,7 +158,7 @@ export const resolveCli = Effect.fnUntraced(function* (override: string | undefi
   const failures: string[] = []
   for (const candidate of candidates) {
     const probe = yield* Effect.result(probeCli(candidate))
-    if (probe._tag === "Success") return candidate
+    if (probe._tag === "Success") return { cli: candidate, status: probe.success }
     failures.push(`${candidate.describe}: ${probe.failure.message}`)
   }
   return yield* Effect.fail(new Error([
@@ -294,14 +294,21 @@ export function parseExecuteEnvelope(result: CliResult, durationMs: number): Exe
 
 export const fetchStatus = Effect.fnUntraced(function* () {
   const response = yield* Effect.tryPromise({
-    try: () => fetch(new URL("/extension/status", endpointUrl)),
+    try: async () => {
+      const response = await fetch(new URL("/extension/status", endpointUrl), { signal: AbortSignal.timeout(5000) })
+      if (!response.ok) throw new Error(`Extension status HTTP ${response.status}`)
+      return response
+    },
     catch: (cause) => new Error(`fetch extension status from ${endpointUrl}`, { cause }),
   })
   const body = yield* Effect.tryPromise({
     try: () => response.json() as Promise<unknown>,
     catch: (cause) => new Error("parse extension status", { cause }),
   })
-  return parseExtensionStatus(body)
+  return yield* Effect.try({
+    try: () => parseExtensionStatus(body),
+    catch: (cause) => cause instanceof Error ? cause : new Error("Invalid extension status", { cause }),
+  })
 })
 
 function parseExtensionStatus(value: unknown): ExtensionStatus {
@@ -343,7 +350,10 @@ export function resourceLeaks(options: {
   const leaks: string[] = []
   const leakedSessions = options.after.sessionIds.filter((id) => options.createdSessionIds.has(id))
   if (leakedSessions.length > 0) leaks.push(`sessions still present: ${leakedSessions.join(", ")}`)
-  const leakedTargets = options.after.targets.filter((target) => options.fixtureOrigins.some((origin) => target.url.startsWith(origin)))
+  const leakedTargets = options.after.targets.filter((target) => {
+    if (target.browserControlSessionId && options.createdSessionIds.has(target.browserControlSessionId)) return true
+    try { return options.fixtureOrigins.includes(new URL(target.url).origin) } catch { return false }
+  })
   if (leakedTargets.length > 0) leaks.push(`fixture tabs still open: ${leakedTargets.map((target) => target.url).join(", ")}`)
   return leaks.length > 0 ? leaks.join("; ") : undefined
 }
@@ -372,9 +382,10 @@ export const scopedOwnerCdpPage = Effect.fnUntraced(function* (options: { readon
 
 async function makeOwnerCdpPage(options: { readonly sessionId: string; readonly urlIncludes: string }): Promise<OwnerCdpPage> {
   const [versionResponse, targetsResponse] = await Promise.all([
-    fetch(new URL("/json/version", endpointUrl)),
-    fetch(new URL("/json/list", endpointUrl)),
+    fetch(new URL("/json/version", endpointUrl), { signal: AbortSignal.timeout(5000) }),
+    fetch(new URL("/json/list", endpointUrl), { signal: AbortSignal.timeout(5000) }),
   ])
+  if (!versionResponse.ok || !targetsResponse.ok) throw new Error(`Owner CDP discovery HTTP ${versionResponse.status}/${targetsResponse.status}`)
   const version = await versionResponse.json() as { readonly webSocketDebuggerUrl?: unknown }
   const targets = await targetsResponse.json() as Array<{ readonly id?: unknown; readonly url?: unknown; readonly browserControlSessionId?: unknown }>
   if (typeof version.webSocketDebuggerUrl !== "string") throw new Error("Relay did not provide a browser websocket URL")
@@ -386,9 +397,22 @@ async function makeOwnerCdpPage(options: { readonly sessionId: string; readonly 
 
   const websocketUrl = new URL(version.webSocketDebuggerUrl)
   websocketUrl.searchParams.set("browserControlSessionId", options.sessionId)
-  const socket = new WebSocket(websocketUrl)
+  const socket = new WebSocket(websocketUrl, { handshakeTimeout: 10_000 })
   let nextId = 1
   const pending = new Map<number, { readonly resolve: (value: Record<string, unknown>) => void; readonly reject: (error: Error) => void; readonly timeout: NodeJS.Timeout }>()
+  const rejectPending = (error: Error) => {
+    for (const waiter of pending.values()) {
+      clearTimeout(waiter.timeout)
+      waiter.reject(error)
+    }
+    pending.clear()
+  }
+  const close = async () => {
+    rejectPending(new Error("Owner CDP socket closed"))
+    socket.terminate()
+  }
+  socket.on("error", rejectPending)
+  socket.on("close", () => rejectPending(new Error("Owner CDP socket closed")))
   socket.on("message", (data) => {
     const message = JSON.parse(data.toString()) as { readonly id?: unknown; readonly result?: unknown; readonly error?: { readonly message?: unknown } }
     if (typeof message.id !== "number") return
@@ -402,10 +426,6 @@ async function makeOwnerCdpPage(options: { readonly sessionId: string; readonly 
     }
     waiter.resolve(getObject(message.result) ?? {})
   })
-  await new Promise<void>((resolve, reject) => {
-    socket.once("open", resolve)
-    socket.once("error", reject)
-  })
   const command = (method: string, params: Record<string, unknown>, sessionId?: string, timeoutMs = 10_000): Promise<Record<string, unknown>> => {
     const id = nextId++
     return new Promise((resolve, reject) => {
@@ -417,19 +437,23 @@ async function makeOwnerCdpPage(options: { readonly sessionId: string; readonly 
       socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }))
     })
   }
-  const announced = await command("Target.attachToTarget", { targetId, flatten: true })
-  if (typeof announced.sessionId !== "string") {
-    socket.close()
-    throw new Error("Owner CDP target attach did not return a session id")
+  let targetSessionId: string
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.once("open", resolve)
+      socket.once("error", reject)
+    })
+    const announced = await command("Target.attachToTarget", { targetId, flatten: true })
+    if (typeof announced.sessionId !== "string") throw new Error("Owner CDP target attach did not return a session id")
+    // The first attach announces the root; the second returns a client-local
+    // alias that remains routable if Chrome re-announces the root generation.
+    const attached = await command("Target.attachToTarget", { targetId, flatten: true })
+    if (typeof attached.sessionId !== "string") throw new Error("Owner CDP target alias did not return a session id")
+    targetSessionId = attached.sessionId
+  } catch (error) {
+    await close()
+    throw error
   }
-  // The first attach announces the root; the second returns a client-local
-  // alias that remains routable if Chrome re-announces the root generation.
-  const attached = await command("Target.attachToTarget", { targetId, flatten: true })
-  if (typeof attached.sessionId !== "string") {
-    socket.close()
-    throw new Error("Owner CDP target alias did not return a session id")
-  }
-  const targetSessionId = attached.sessionId
   const evaluate = <A>(expression: string): Effect.Effect<A, Error> => Effect.tryPromise({
     try: async () => {
       const response = await command("Runtime.evaluate", { expression, returnByValue: true }, targetSessionId)
@@ -451,13 +475,6 @@ async function makeOwnerCdpPage(options: { readonly sessionId: string; readonly 
       }
       return yield* Effect.fail(new Error(`Owner CDP condition timed out: ${expression}`))
     }),
-    close: async () => {
-      for (const waiter of pending.values()) {
-        clearTimeout(waiter.timeout)
-        waiter.reject(new Error("Owner CDP socket closed"))
-      }
-      pending.clear()
-      socket.terminate()
-    },
+    close,
   }
 }

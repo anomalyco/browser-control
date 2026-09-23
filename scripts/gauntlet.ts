@@ -1,6 +1,11 @@
 #!/usr/bin/env tsx
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
-import { Clock, Console, Effect } from "effect"
+import { Cause, Clock, Config, Console, Effect, Option, type Scope } from "effect"
+import fs from "node:fs"
+import path from "node:path"
+import cp from "node:child_process"
+import { browserControlBuildId, browserControlVersion } from "../src/version.ts"
+import { classifyCase, parseConfig, runPassed, summarize, type CaseRunResult } from "../gauntlet/report.ts"
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright-core"
 import { registerAriaSnapshotSelector } from "../src/aria-snapshot.ts"
 import { cases, type GauntletCase } from "../gauntlet/cases.ts"
@@ -21,49 +26,74 @@ import {
 } from "../gauntlet/harness.ts"
 import { defaultPrimaryPort, defaultSecondaryPort, startGauntletServers, type GauntletServers } from "../gauntlet/server.ts"
 
-const selectedCaseNames = parseCaseFilter(process.env.GAUNTLET_CASE)
-const repeatCount = parsePositiveInteger(process.env.GAUNTLET_REPEAT) ?? 1
-const cliOverride = process.env.GAUNTLET_CLI
-const primaryPort = parsePositiveInteger(process.env.GAUNTLET_PRIMARY_PORT) ?? defaultPrimaryPort
-const secondaryPort = parsePositiveInteger(process.env.GAUNTLET_SECONDARY_PORT) ?? defaultSecondaryPort
+const results: CaseRunResult[] = []
+const startedAt = new Date().toISOString()
+let reportPath: string | undefined
+let verbose = false
+let config: ReturnType<typeof parseConfig> | undefined
+const metadata: Record<string, unknown> = { runtime: process.version, platform: process.platform, sourceBuildId: browserControlBuildId, sourceVersion: browserControlVersion }
 
-type CaseStatus = "pass" | "fail" | "xfail" | "unexpected-pass" | "budget-exceeded"
-
-type CaseRunResult = {
-  readonly name: string
-  readonly iteration: number
-  readonly status: CaseStatus
-  readonly durationMs: number
-  readonly budgetMs: number
-  readonly notes: readonly string[]
-  readonly value?: unknown
-  readonly error?: string
+function writeReport(error?: unknown) {
+  if (!reportPath) return
+  const report = { schemaVersion: 1, startedAt, finishedAt: new Date().toISOString(), ok: error === undefined && runPassed(results), config, metadata, results, summary: summarize(results), ...(error === undefined ? {} : { error: formatError(error) }) }
+  fs.mkdirSync(path.dirname(path.resolve(reportPath)), { recursive: true })
+  const temporary = `${reportPath}.${process.pid}.tmp`
+  fs.writeFileSync(temporary, JSON.stringify(report, null, 2) + "\n")
+  fs.renameSync(temporary, reportPath)
 }
 
 const main = Effect.fn("Gauntlet.main")(function* () {
-  const selectedCases = cases.filter((testCase) => selectedCaseNames.size === 0 || selectedCaseNames.has(testCase.name))
-  const unknown = Array.from(selectedCaseNames).filter((name) => !cases.some((testCase) => testCase.name === name))
-  if (unknown.length > 0 || selectedCases.length === 0) {
-    return yield* Effect.fail(new Error(`Unknown gauntlet case(s): ${unknown.join(", ") || "(none selected)"}. Available: ${cases.map((testCase) => testCase.name).join(", ")}`))
+  const args = process.argv.slice(2)
+  if (args.length === 1 && args[0] === "--list") {
+    yield* Console.log(cases.map((item) => `${item.name}${item.expectedFailure ? " (expected failure)" : ""}`).join("\n"))
+    return
   }
+  if (args.length === 1 && args[0] === "--help") {
+    yield* Console.log("Gauntlet: [--help|--list]\nGAUNTLET_CASE=comma,separated,names GAUNTLET_REPEAT=1 GAUNTLET_WARMUP=0\nGAUNTLET_REPORT=report.json GAUNTLET_CLI=auto|source|installed|/path/to/cli.js\nGAUNTLET_PRIMARY_PORT / GAUNTLET_SECONDARY_PORT (distinct 1..65535)\nGAUNTLET_VERBOSE=0|1 BROWSER_CONTROL_ENDPOINT=http://127.0.0.1:19989\nWarmups are reported and must pass, but are excluded from summary statistics. p95 uses nearest rank.")
+    return
+  }
+  const env: Record<string, string | undefined> = {}
+  for (const key of ["GAUNTLET_REPORT", "GAUNTLET_CASE", "GAUNTLET_REPEAT", "GAUNTLET_WARMUP", "GAUNTLET_CLI", "GAUNTLET_PRIMARY_PORT", "GAUNTLET_SECONDARY_PORT", "GAUNTLET_VERBOSE", "BROWSER_CONTROL_ENDPOINT"]) {
+    env[key] = Option.getOrUndefined(yield* Config.option(Config.string(key)))
+  }
+  reportPath = env.GAUNTLET_REPORT
+  if (args.length) return yield* Effect.fail(new Error(`Unknown arguments: ${args.join(" ")}`))
+  config = yield* Effect.try(() => parseConfig(env, cases.map((item) => item.name), { primaryPort: defaultPrimaryPort, secondaryPort: defaultSecondaryPort }))
+  const { repeatCount, warmupCount, primaryPort, secondaryPort, cliOverride, selected } = config
+  verbose = config.verbose
+  const selectedCases = cases.filter((testCase) => selected.includes(testCase.name))
+  metadata.endpoint = endpointUrl
+  try {
+    metadata.sourceRevision = cp.execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8", timeout: 5000 }).trim()
+    metadata.sourceDirty = cp.execFileSync("git", ["status", "--porcelain"], { encoding: "utf8", timeout: 5000 }).trim().length > 0
+  } catch { /* Git metadata is optional in packaged runners. */ }
 
   yield* Console.log(`browser-control gauntlet: ${selectedCases.map((testCase) => testCase.name).join(", ")} x${repeatCount}`)
-  const cli = yield* resolveCli(cliOverride)
+  const { cli, status: cliStatus } = yield* resolveCli(cliOverride)
+  metadata.cli = cli
+  metadata.relay = cliStatus?.relay
+  metadata.browser = yield* Effect.tryPromise(async () => {
+    const response = await fetch(new URL("/json/version", endpointUrl), { signal: AbortSignal.timeout(5000) })
+    if (!response.ok) throw new Error(`Browser version HTTP ${response.status}`)
+    const version = await response.json() as Record<string, unknown>
+    return { browser: version.Browser, protocolVersion: version["Protocol-Version"], userAgent: version["User-Agent"], v8Version: version["V8-Version"] }
+  }).pipe(Effect.orElseSucceed(() => null))
   yield* Console.log(`cli: ${cli.describe}`)
   const initial = yield* fetchStatus()
+  metadata.extension = { protocolVersion: initial.protocolVersion, protocolCompatible: initial.protocolCompatible }
   if (!initial.connected) return yield* Effect.fail(new Error(`Browser Control extension is not connected to ${endpointUrl}; open the browser with the extension loaded before running the gauntlet.`))
   yield* Console.log(`relay: ${endpointUrl} targets=${initial.activeTargets} cdpClients=${initial.cdpClients}`)
 
-  const results = yield* Effect.scoped(Effect.gen(function* () {
+  yield* Effect.scoped(Effect.gen(function* () {
     const servers = yield* Effect.acquireRelease(
       Effect.tryPromise({ try: () => startGauntletServers({ primaryPort, secondaryPort }), catch: (cause) => cause instanceof Error ? cause : new Error("start gauntlet fixture servers", { cause }) }),
       (running) => boundedCleanup("close fixture servers", () => running.close()),
     )
     yield* Console.log(`fixtures: ${servers.primaryOrigin} (primary), ${servers.secondaryOrigin} (secondary)`)
     return yield* Effect.forEach(
-      range(repeatCount).flatMap((iteration) => selectedCases.map((testCase) => ({ iteration: iteration + 1, testCase }))),
-      ({ testCase, iteration }) => runCase({ testCase, iteration, cli, servers }).pipe(Effect.tap(printCaseResult)),
-      { concurrency: 1 },
+      range(warmupCount + repeatCount).flatMap((index) => selectedCases.map((testCase) => ({ iteration: index < warmupCount ? index + 1 : index - warmupCount + 1, warmup: index < warmupCount, testCase }))),
+      ({ testCase, iteration, warmup }) => runCase({ testCase, iteration, warmup, cli, servers }).pipe(Effect.scoped, Effect.tap((result) => Effect.sync(() => { results.push(result); delete metadata.activeCase })), Effect.tap(printCaseResult)),
+      { concurrency: 1, discard: true },
     )
   }))
 
@@ -80,10 +110,21 @@ const main = Effect.fn("Gauntlet.main")(function* () {
 const runCase = Effect.fn("Gauntlet.runCase")(function* (options: {
   readonly testCase: GauntletCase
   readonly iteration: number
+  readonly warmup: boolean
   readonly cli: CliSelection
   readonly servers: GauntletServers
-}): Effect.fn.Return<CaseRunResult, Error> {
+}): Effect.fn.Return<CaseRunResult, Error, Scope.Scope> {
   const { testCase, cli, servers } = options
+  metadata.activeCase = { name: testCase.name, iteration: options.iteration, warmup: options.warmup }
+  // This watchdog lives outside the case fiber: an uninterruptible teardown
+  // cannot defeat it. The isolated parent then retires the owned relay/browser.
+  const deadlineMs = testCase.budgetMs + (testCase.userTabCleanupGraceMs ?? 15_000) + 10_000
+  yield* Effect.acquireRelease(
+    Effect.sync(() => setTimeout(() => {
+      throw new Error(`Gauntlet case ${testCase.name} exceeded its ${deadlineMs}ms hard deadline (including cleanup)`)
+    }, deadlineMs)),
+    (timer) => Effect.sync(() => clearTimeout(timer)),
+  )
   const notes: string[] = []
   const createdSessionIds = new Set<string>()
   const ctx = makeContext({ cli, servers, notes, createdSessionIds })
@@ -95,31 +136,28 @@ const runCase = Effect.fn("Gauntlet.runCase")(function* (options: {
   const attempt = withUserTab((page) => testCase.run(page, ctx), testCase.userTabCleanupGraceMs ?? 15_000).pipe(
     Effect.catchDefect((defect) => Effect.fail(defect instanceof Error ? defect : new Error(`gauntlet case defect: ${formatValue(defect)}`))),
   )
-  const outcome = yield* Effect.matchEffect(attempt, {
-    onFailure: (error) => Effect.succeed({ _tag: "Failure" as const, error }),
-    onSuccess: (value) => Effect.succeed({ _tag: "Success" as const, value }),
-  })
+  const outcome = yield* Effect.result(attempt)
   const end = yield* Clock.currentTimeMillis
   const durationMs = end - start
   const leakCheck = { createdSessionIds, fixtureOrigins: [servers.primaryOrigin, servers.secondaryOrigin] }
-  const after = yield* waitForRelayCleanup(leakCheck)
-  const leaks = resourceLeaks({ after, ...leakCheck })
+  const cleanup = yield* Effect.result(waitForRelayCleanup(leakCheck))
+  const cleanupError = cleanup._tag === "Failure" ? formatError(cleanup.failure) : undefined
+  const leaks = cleanup._tag === "Success" ? resourceLeaks({ after: cleanup.success, ...leakCheck }) : undefined
   if (leaks) notes.push(`leaked relay resources: ${leaks}`)
 
-  const passed = outcome._tag === "Success" && !leaks
-  const withinBudget = durationMs <= testCase.budgetMs
-  const status: CaseStatus = passed
-    ? (withinBudget ? (testCase.expectedFailure ? "unexpected-pass" : "pass") : "budget-exceeded")
-    : (testCase.expectedFailure ? "xfail" : "fail")
+  if (cleanupError) notes.push(`cleanup verification failed: ${cleanupError}`)
+  const status = classifyCase({ error: outcome._tag === "Failure" ? outcome.failure : undefined, leaks, cleanupError, expectedFailure: testCase.expectedFailure, durationMs, budgetMs: testCase.budgetMs })
   return {
     name: testCase.name,
     iteration: options.iteration,
+    warmup: options.warmup,
     status,
     durationMs,
     budgetMs: testCase.budgetMs,
+    ...(testCase.expectedFailure ? { expectedFailure: testCase.expectedFailure } : {}),
     notes,
-    ...(outcome._tag === "Success" ? { value: outcome.value } : {}),
-    ...(outcome._tag === "Failure" ? { error: formatError(outcome.error) } : leaks ? { error: `Gauntlet case leaked relay resources: ${leaks}` } : {}),
+    ...(outcome._tag === "Success" ? { value: outcome.success } : {}),
+    ...((outcome._tag === "Failure" || leaks || cleanupError) ? { error: [outcome._tag === "Failure" ? formatError(outcome.failure) : undefined, leaks ? `Gauntlet case leaked relay resources: ${leaks}` : undefined, cleanupError].filter(Boolean).join("\n") } : {}),
   }
 })
 
@@ -245,14 +283,14 @@ function printCaseResult(result: CaseRunResult): Effect.Effect<void> {
   return Effect.gen(function* () {
     yield* Console.log(`${result.status.toUpperCase()} ${result.name}#${result.iteration} ${result.durationMs}ms / ${result.budgetMs}ms`)
     for (const note of result.notes) yield* Console.log(`    note: ${note}`)
-    if (result.value !== undefined && process.env.GAUNTLET_VERBOSE) yield* Console.log(formatValue(result.value))
+    if (result.value !== undefined && verbose) yield* Console.log(formatValue(result.value))
     if (result.error) yield* Console.error(indent(result.error))
   })
 }
 
 function renderTable(results: readonly CaseRunResult[]): string {
   const rows = results.map((result) => [
-    repeatCount > 1 ? `${result.name}#${result.iteration}` : result.name,
+    `${result.name}#${result.iteration}${result.warmup ? " (warmup)" : ""}`,
     result.status,
     String(result.durationMs),
     String(result.budgetMs),
@@ -264,39 +302,22 @@ function renderTable(results: readonly CaseRunResult[]): string {
   return [line(header), line(widths.map((width) => "-".repeat(width))), ...rows.map(line)].join("\n")
 }
 
-export function summarize(results: readonly CaseRunResult[]) {
-  return {
-    pass: results.filter((result) => result.status === "pass").length,
-    fail: results.filter((result) => result.status === "fail").length,
-    xfail: results.filter((result) => result.status === "xfail").length,
-    unexpectedPass: results.filter((result) => result.status === "unexpected-pass").length,
-    budgetExceeded: results.filter((result) => result.status === "budget-exceeded").length,
-  }
-}
-
 function indent(text: string): string {
   return text.split("\n").map((line) => `    ${line}`).join("\n")
-}
-
-function parseCaseFilter(value: string | undefined): Set<string> {
-  if (!value) return new Set()
-  return new Set(value.split(",").map((item) => item.trim()).filter((item) => item.length > 0))
-}
-
-function parsePositiveInteger(value: string | undefined): number | undefined {
-  if (!value) return undefined
-  const parsed = Number(value)
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
 }
 
 function range(length: number): number[] {
   return Array.from({ length }, (_, index) => index)
 }
 
-// playwright-core asserts (for example a duplicate target announcement) throw
-// from its event dispatcher and would otherwise kill the runner mid-table.
-process.on("uncaughtException", (error) => {
-  console.error(`gauntlet: uncaught exception from a browser connection was contained: ${formatError(error)}`)
-})
-
-if (import.meta.main) main().pipe(Effect.provide(NodeServices.layer), NodeRuntime.runMain)
+if (import.meta.main) {
+  // Monitor records the fatal failure without suppressing Node's default exit.
+  process.on("uncaughtExceptionMonitor", (error) => writeReport(error))
+  main().pipe(
+    Effect.matchCauseEffect({
+      onFailure: (cause) => Effect.sync(() => writeReport(Cause.pretty(cause))).pipe(Effect.andThen(Effect.failCause(cause))),
+      onSuccess: () => Effect.sync(() => writeReport()),
+    }),
+    Effect.provide(NodeServices.layer), NodeRuntime.runMain,
+  )
+}

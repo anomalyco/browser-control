@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest"
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest"
 import { execFile } from "node:child_process"
 import { mkdtemp, rm } from "node:fs/promises"
 import http from "node:http"
@@ -28,6 +28,7 @@ const routes = new Map<string, unknown>([
   ["POST /recording/start", { success: true } satisfies RelaySchema.RecordingStartResponse],
 ])
 const requests: Array<{ route: string; body: unknown }> = []
+const pendingCommands = new Set<ReturnType<typeof execFileAsync>>()
 let home: string
 let port: number
 const server = http.createServer((request, response) => {
@@ -57,6 +58,13 @@ beforeEach(() => {
   requests.length = 0
 })
 
+afterEach(async () => {
+  // A runner timeout must not let the old CLI POST into the next test's fixture.
+  const commands = [...pendingCommands]
+  for (const command of commands) command.child.kill("SIGKILL")
+  await Promise.allSettled(commands)
+})
+
 afterAll(async () => {
   await Promise.all([
     new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
@@ -66,14 +74,19 @@ afterAll(async () => {
 
 function runCli(args: string[]) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("BROWSER_CONTROL_")))
-  return execFileAsync(process.execPath, ["--import", "tsx", "src/cli.ts", ...args], {
+  const command = execFileAsync(process.execPath, ["--import", "tsx", "src/cli.ts", ...args], {
     cwd: packageRoot,
     env: { ...env, HOME: home, BROWSER_CONTROL_PORT: String(port), NO_COLOR: "1" },
     timeout: 10_000,
   })
+  pendingCommands.add(command)
+  void command.finally(() => pendingCommands.delete(command)).catch(() => {})
+  return command
 }
 
 describe("CLI opt-in boolean flags", () => {
+  // These verify CLI/HTTP contracts, not latency. Let the existing 10s child
+  // deadline report first, with time left for teardown before the next test.
   it.each([false, true])("execute accepts --json supplied=%s", async (json) => {
     const { stdout, stderr } = await runCli(["execute", ...(json ? ["--json"] : []), "return 1"])
 
@@ -84,7 +97,7 @@ describe("CLI opt-in boolean flags", () => {
     }
     expect(stderr).toBe(`Session: ${session.id}. Continue with --session ${session.id}.\n`)
     expect(requests).toEqual([{ route: "POST /cli/execute", body: { code: "return 1", createIfMissing: true } }])
-  })
+  }, 15_000)
 
   it.each([false, true])("session adopt creates the target session when needed explicit=%s", async (explicit) => {
     const { stdout, stderr } = await runCli(["session", "adopt", "--target-url", "example.test", ...(explicit ? ["--session", session.id] : [])])
@@ -95,7 +108,7 @@ describe("CLI opt-in boolean flags", () => {
       route: "POST /cli/session/adopt",
       body: { ...(explicit ? { sessionId: session.id } : {}), createIfMissing: true, targetSelection: { urlIncludes: "example.test" } },
     }])
-  })
+  }, 15_000)
 
   it.each([false, true])("session new accepts --read-only supplied=%s", async (readOnly) => {
     const { stdout, stderr } = await runCli(["session", "new", ...(readOnly ? ["--read-only"] : [])])
@@ -103,7 +116,7 @@ describe("CLI opt-in boolean flags", () => {
     expect(stdout).toBe(`${session.id}\n`)
     expect(stderr).toBe("")
     expect(requests).toEqual([{ route: "POST /cli/session/new", body: readOnly ? { readOnly: true } : {} }])
-  })
+  }, 15_000)
 
   it.each([false, true])("recording start accepts --audio supplied=%s", async (audio) => {
     const outputPath = path.join(home, "recording.webm")
@@ -112,5 +125,5 @@ describe("CLI opt-in boolean flags", () => {
     expect(stdout).toContain(`Recording started: ${outputPath}`)
     expect(stderr).toBe("")
     expect(requests).toEqual([{ route: "POST /recording/start", body: { outputPath, audio } }])
-  })
+  }, 15_000)
 })

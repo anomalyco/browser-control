@@ -1,13 +1,23 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
+import { parseArgs } from "node:util"
 import { build } from "esbuild"
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
-const dist = path.join(root, "extension", "dist")
+const { values } = parseArgs({ options: { outdir: { type: "string" } } })
+const requested = path.resolve(values.outdir ?? path.join(root, "extension", "dist"))
+const dist = path.join(await fs.realpath(path.dirname(requested)), path.basename(requested))
 
-await fs.rm(dist, { recursive: true, force: true })
-await fs.mkdir(dist, { recursive: true })
+if (values.outdir) {
+  if (dist === root || root.startsWith(`${dist}${path.sep}`) || dist.startsWith(`${root}${path.sep}`)) {
+    throw new Error("Alternate extension output must be a fresh directory outside the checkout")
+  }
+  await fs.mkdir(dist)
+} else {
+  await fs.rm(dist, { recursive: true, force: true })
+  await fs.mkdir(dist, { recursive: true })
+}
 await Promise.all([
   build({
     entryPoints: [

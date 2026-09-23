@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Snapshot native controls</title>
+<style>body { font: 16px sans-serif; } label { display: block; margin: 16px; }</style>
+<main>
+  <h1>Native controls</h1>
+  <label>Multiple choices <select id="multiple" multiple><option>Alpha</option><option>Beta</option></select></label>
+  <label>Sized choices <select id="sized" size="3"><option>Alpha</option><option>Beta</option></select></label>
+  <label>Single choice <select id="single"><option>Alpha</option><option>Beta</option></select></label>
+  <label>Volume <input id="volume" type="range"></label>
+  <label>Attachment <input id="attachment" type="file"></label>
+  <label>City <input id="city" list="cities" value="PRIVATE_TEXT_SENTINEL"></label>
+  <label>Find city <input id="find-city" type="search" list="cities"></label>
+  <label>Plain search <input id="plain-search" type="search"></label>
+  <label>Missing list <input id="missing-list" list="absent"></label>
+  <datalist id="cities"><option>Paris</option><option>London</option></datalist>
+</main>
+</html>

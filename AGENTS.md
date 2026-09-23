@@ -289,6 +289,12 @@ local Node relay.
 ## Development
 
 - Run `pnpm typecheck` after TypeScript changes.
+- Prefer `pnpm gauntlet:isolated` for repeatable real-extension regressions. It
+  builds into fresh external directories and owns a private Chromium profile,
+  relay/HOME and ports. Narrow with `GAUNTLET_CASE`; repeat with
+  `GAUNTLET_REPEAT`. Read `docs/RELIABILITY.md` for receipts and coverage limits.
+  Never relabel leaks or unrelated errors as expected failures. Case clients
+  set `BROWSER_CONTROL_AUTOSTART=false` so a crashed owned relay stays a failure.
 - Run `pnpm check:unused` (Knip) and `pnpm check:locals` during cleanup; both are
   CI gates. Keep `knip.ts` aligned with CLI/MCP, published SDK, browser-loaded,
   and sandbox-script entry points. Review findings before deleting declarations:

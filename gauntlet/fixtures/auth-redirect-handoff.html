@@ -47,7 +47,7 @@
 <p id="phase" data-phase="bootstrapping">Preparing secure sign-in…</p>
 <form id="sign-in-form" hidden>
   <label>Email <input id="email" type="email" value="gauntlet@example.com" readonly></label>
-  <button type="submit" id="sign-in">Sign in</button>
+  <button type="submit" id="sign-in" disabled>Sign in</button>
 </form>
 <script>
 (() => {
@@ -83,11 +83,7 @@
     return
   }
 
-  window.__gauntlet.phase = "form"
-  phase.textContent = "Enter your credentials"
-  phase.dataset.phase = "form"
   const form = document.getElementById("sign-in-form")
-  form.hidden = false
   form.addEventListener("submit", (event) => {
     event.preventDefault()
     window.__gauntlet.phase = "signing-in"
@@ -95,6 +91,13 @@
     document.cookie = "bc_auth=1; path=/"
     location.href = next
   })
+  // Publish readiness only after the submit handler is installed. The bootstrap
+  // document contains the same button, but it must never submit a native form.
+  document.getElementById("sign-in").disabled = false
+  form.hidden = false
+  phase.textContent = "Enter your credentials"
+  phase.dataset.phase = "form"
+  window.__gauntlet.phase = "form"
 })()
 </script>
 </body>
