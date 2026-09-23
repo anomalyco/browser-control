@@ -275,12 +275,35 @@ and the target remained at `chrome-error://chromewebdata/`.
 
 Browser Control now remembers context failures and browser crash events. Before
 the next normal execute, it gives the default page a bounded health check.
-Only a disposable relay-owned page (crashed renderer, `about:blank`, or a
+Only a disposable relay-owned page (crashed renderer or a
 `chrome-error://` document) is closed and recreated with a stale-reference
 warning; if it cannot be closed, execute fails with reset guidance instead of
 leaking ownership. Any other live page is kept. An unhealthy adopted user tab
 is never closed or replaced; the execute fails quickly and tells the agent to
 reset or adopt another tab.
+
+Blank and unknown URLs are not disposable: `setContent` and opener-written
+documents can contain unsaved user state without changing `about:blank`.
+Recovery reads the current URL and crash state after the health probe, so a
+navigation during that probe does not authorize closing the new document.
+Replacing a target clears its predecessor's crash flag; recovery evidence is
+generation-local. `scripts/check-page-preservation.ts` exercises the blank-page
+case with a real isolated Chromium process and a synthetic draft.
+
+A main-frame navigation also retires document-local crash evidence. Child-frame
+navigation and crashes of unrelated targets cannot clear or set that evidence.
+Default-page close/navigation listeners share one binding lifetime and are
+removed together on replacement or disconnect.
+
+The recovery model check in `test/execute-sandbox.test.ts` enumerates all 341
+event traces of length zero through four over crash, main-frame navigation,
+child-frame navigation, and foreign-target crash. Across both ownership modes
+and both health outcomes it checks 1,364 cases against the production sandbox,
+including replacement count, unrelated-page isolation, and listener cleanup.
+This is exhaustive only for the stated finite event alphabet and bound; it
+does not prove Chrome/CDP behavior, network ordering, persistence, or all longer
+traces. Separate target-replacement regressions and the real-Chromium repro
+cover boundaries outside this model. Failures print the exact event trace.
 
 A 2026-09-19 field failure showed why a relay-owned page must not be treated as
 disposable: a page whose execution context went stale after a sign-in redirect

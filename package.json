@@ -56,6 +56,7 @@
     "smoke:snapshot": "tsx scripts/check-snapshot.ts",
     "repro:snapshot-image-name": "tsx scripts/check-snapshot-image-name.ts",
     "repro:screenshot-zoom": "tsx scripts/check-screenshot-zoom.ts",
+    "repro:page-preservation": "tsx scripts/check-page-preservation.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "smoke:snapshot-image": "tsx scripts/check-snapshot-image-name.ts",

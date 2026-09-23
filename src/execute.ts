@@ -188,7 +188,9 @@ export const recoverSessionPage = Effect.fn("Execute.recoverSessionPage")(functi
 
 /** A relay-owned page whose document holds no user-produced state worth preserving. */
 export function isDisposableSessionPage(options: { readonly url: string; readonly crashed?: boolean }): boolean {
-  return options.crashed === true || options.url === "" || options.url === "about:blank" || options.url.startsWith("chrome-error://")
+  // Blank documents can hold setContent output, forms, and opener-written state.
+  // An unknown URL is not evidence that the document is safe to discard either.
+  return options.crashed === true || options.url.startsWith("chrome-error://")
 }
 
 export async function waitForPageContext(options: {
@@ -538,7 +540,11 @@ export class ExecuteSandbox {
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private readonly networkCapture = new NetworkCapture.Recorder()
   private pendingWarnings: string[] = []
-  private boundPageClose: { readonly page: Page; readonly listener: () => void } | undefined
+  private boundPageListeners: {
+    readonly page: Page
+    readonly close: () => void
+    readonly navigate: (frame: Frame) => void
+  } | undefined
 
   constructor(readonly options: ExecuteSandboxOptions) {}
 
@@ -992,6 +998,7 @@ export class ExecuteSandbox {
     this.page = undefined
     this.defaultPageTargetId = targetId
     this.pageHealthCheckRequired = false
+    this.pageCrashed = false
     this.pageProtectedUi = false
     this.pendingPageTarget = { targetId, warnReplaced: true }
     this.networkCapture.bindPage(undefined)
@@ -1022,27 +1029,31 @@ export class ExecuteSandbox {
     }
     this.defaultPageTargetId = targetId
     this.ownsPage = ownsPage
-    const listener = () => {
-      if (this.boundPageClose?.page === page) this.boundPageClose = undefined
+    const close = () => {
       if (this.page !== page) return
       this.page = undefined
       this.defaultPageTargetId = undefined
       this.ownsPage = false
       this.pendingPageTarget = undefined
       this.networkCapture.bindPage(undefined)
-      this.clearSnapshotRefs()
+      this.clearPageListeners()
       this.notifyDefaultTargetChange()
     }
-    this.boundPageClose = { page, listener }
-    page.once("close", listener)
+    const navigate = (frame: Frame) => {
+      if (this.page === page && frame === page.mainFrame()) this.pageCrashed = false
+    }
+    this.boundPageListeners = { page, close, navigate }
+    page.once("close", close)
+    page.on("framenavigated", navigate)
     if (notify) this.notifyDefaultTargetChange()
   }
 
-  private clearBoundPageClose(): void {
-    const bound = this.boundPageClose
+  private clearBoundPageListeners(): void {
+    const bound = this.boundPageListeners
     if (!bound) return
-    bound.page.off("close", bound.listener)
-    this.boundPageClose = undefined
+    bound.page.off("close", bound.close)
+    bound.page.off("framenavigated", bound.navigate)
+    this.boundPageListeners = undefined
   }
 
   private clearSnapshotRefs(): void {
@@ -1055,7 +1066,7 @@ export class ExecuteSandbox {
   }
 
   private clearPageListeners(): void {
-    this.clearBoundPageClose()
+    this.clearBoundPageListeners()
     this.clearSnapshotRefs()
   }
 
@@ -1187,11 +1198,14 @@ export class ExecuteSandbox {
    */
   private async checkSessionPage(page: Page, options: { readonly repaired: boolean }): Promise<Page | undefined> {
     const timeoutMs = this.options.pageHealthCheckTimeoutMs ?? sessionPageHealthCheckTimeoutMs
+    const sandbox = this
     const recovery = await Effect.runPromise(recoverSessionPage({
       ownsPage: this.ownsPage,
-      url: page.url(),
+      // Read these after the asynchronous probe: navigation may have recovered
+      // an error document or cleared the crash while its old context failed.
+      get url() { return page.url() },
       timeoutMs,
-      crashed: this.pageCrashed,
+      get crashed() { return sandbox.pageCrashed },
       repaired: options.repaired,
       healthCheck: () => waitForPageContext({
         timeoutMs,
