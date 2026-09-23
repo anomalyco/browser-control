@@ -72,6 +72,70 @@ beforeEach(() => {
 })
 
 describe("ExecuteSandbox", () => {
+  it("model-checks bounded recovery traces against document-local crash evidence", async () => {
+    // Exhaustive within this bound, not random sampling. The reference model
+    // tracks evidence, not the sandbox's connection/retry implementation.
+    const events = ["crash", "main-navigation", "child-navigation", "foreign-crash"] as const
+    type Event = typeof events[number]
+    const traces: Event[][] = [[]]
+    for (let i = 0; i < traces.length; i++) {
+      const trace = traces[i]
+      if (!trace || trace.length === 4) continue
+      for (const event of events) traces.push([...trace, event])
+    }
+    let checked = 0
+    for (const owner of ["relay", "user"] as const) {
+      for (const healthy of [false, true]) {
+        for (const trace of traces) {
+          const label = `${owner}, healthy=${healthy}: ${trace.join(" -> ") || "initial"}`
+          const context = new FakeContext()
+          connect(context)
+          const page = context.addPage("original")
+          const unrelated = context.addPage("unrelated")
+          const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test", pageHealthCheckTimeoutMs: 1 })
+          sandbox.restore({ id: page.targetId, owner })
+          try {
+            await Effect.runPromise(sandbox.execute("page.url()"))
+            page.evaluate.mockRejectedValue(new Error("Execution context was destroyed"))
+            await Effect.runPromise(sandbox.execute("page.evaluate(() => true)"))
+            let crashed = false
+            for (const event of trace) {
+              switch (event) {
+                case "crash":
+                  crashed = true
+                  sandbox.markTargetCrashed(page.targetId)
+                  break
+                case "main-navigation":
+                  crashed = false
+                  page.emit("framenavigated", page.mainFrame())
+                  break
+                case "child-navigation":
+                  page.emit("framenavigated", { url: () => "https://child.example.test" })
+                  break
+                case "foreign-crash":
+                  sandbox.markTargetCrashed(unrelated.targetId)
+                  break
+              }
+            }
+            if (healthy) page.evaluate.mockResolvedValue(true)
+            const result = await Effect.runPromise(sandbox.execute("page.url()"))
+            const replace = owner === "relay" && crashed && !healthy
+            expect(page.close.mock.calls.length, label).toBe(replace ? 1 : 0)
+            expect(context.newPage.mock.calls.length, label).toBe(replace ? 1 : 0)
+            expect(result.isError, label).toBe(!healthy && !replace)
+            expect(unrelated.close.mock.calls.length, label).toBe(0)
+            checked++
+          } finally {
+            await Effect.runPromise(sandbox.disconnectSettled())
+          }
+          expect(page.listenerCount("framenavigated"), label).toBe(0)
+          expect(page.listenerCount("close"), label).toBe(0)
+        }
+      }
+    }
+    expect(checked).toBe(1364)
+  }, 30_000)
+
   it("finishes an execute with a stalled title and keeps the adopted page usable", async () => {
     vi.useFakeTimers()
     const context = new FakeContext()
@@ -119,7 +183,7 @@ describe("ExecuteSandbox", () => {
       const sentinel = vi.fn()
       for (const event of events) page.on(event, sentinel)
       expect(yield* sandbox.execute("await network.start(); await snapshot()")).toMatchObject({ isError: false })
-      for (const event of events) expect(page.listenerCount(event)).toBe(2)
+      for (const event of events) expect(page.listenerCount(event)).toBe(event === "framenavigated" ? 3 : 2)
 
       const pageClosing = yield* Latch.make()
       const releasePage = yield* Latch.make()
@@ -269,6 +333,25 @@ describe("ExecuteSandbox", () => {
       expect(replacement.close).not.toHaveBeenCalled()
       expect(unrelated.close).not.toHaveBeenCalled()
       expect(context.newPage).toHaveBeenCalledOnce()
+      expect(result).toMatchObject({ isError: true, diagnostic: "session-page/owned-unresponsive" })
+    } finally {
+      await Effect.runPromise(sandbox.disconnectSettled())
+    }
+  })
+
+  it("forgets a recovered document's crash after main-frame navigation", async () => {
+    const context = new FakeContext()
+    connect(context)
+    const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test", pageHealthCheckTimeoutMs: 10 })
+    try {
+      await Effect.runPromise(sandbox.execute("page.url()"))
+      const page = context.targets[0]
+      if (!page) throw new Error("Expected a default page")
+      sandbox.markTargetCrashed(page.targetId)
+      page.emit("framenavigated", page.mainFrame())
+      page.evaluate.mockRejectedValue(new Error("Execution context was destroyed"))
+      const result = await Effect.runPromise(sandbox.execute("page.url()"))
+      expect(page.close).not.toHaveBeenCalled()
       expect(result).toMatchObject({ isError: true, diagnostic: "session-page/owned-unresponsive" })
     } finally {
       await Effect.runPromise(sandbox.disconnectSettled())

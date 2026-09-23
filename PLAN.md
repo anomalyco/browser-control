@@ -290,6 +290,21 @@ Replacing a target clears its predecessor's crash flag; recovery evidence is
 generation-local. `scripts/check-page-preservation.ts` exercises the blank-page
 case with a real isolated Chromium process and a synthetic draft.
 
+A main-frame navigation also retires document-local crash evidence. Child-frame
+navigation and crashes of unrelated targets cannot clear or set that evidence.
+Default-page close/navigation listeners share one binding lifetime and are
+removed together on replacement or disconnect.
+
+The recovery model check in `test/execute-sandbox.test.ts` enumerates all 341
+event traces of length zero through four over crash, main-frame navigation,
+child-frame navigation, and foreign-target crash. Across both ownership modes
+and both health outcomes it checks 1,364 cases against the production sandbox,
+including replacement count, unrelated-page isolation, and listener cleanup.
+This is exhaustive only for the stated finite event alphabet and bound; it
+does not prove Chrome/CDP behavior, network ordering, persistence, or all longer
+traces. Separate target-replacement regressions and the real-Chromium repro
+cover boundaries outside this model. Failures print the exact event trace.
+
 A 2026-09-19 field failure showed why a relay-owned page must not be treated as
 disposable: a page whose execution context went stale after a sign-in redirect
 (and one stalled by a bot-protected form) was closed and replaced with

@@ -555,7 +555,8 @@ Common diagnoses:
   diagnosis if the page still does not answer. Blank or unknown URLs are preserved:
   they can contain unsaved content. Only a crashed or
   `chrome-error://` relay-owned page is closed and recreated. It never replaces
-  an adopted user tab. When a page stays unresponsive (bot-protected sites can
+  an adopted user tab. Main-frame navigation clears an earlier crash diagnosis;
+  child-frame navigation does not. When a page stays unresponsive (bot-protected sites can
   stall the main world for automation while rendering normally for the human),
   open a fresh tab with `context.newPage()` or hand the tab to the user.
 - Handoff ends with "page execution context did not become available": the user
