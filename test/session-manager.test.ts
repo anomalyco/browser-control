@@ -126,6 +126,150 @@ const makeFakeSandbox = (options?: {
 }
 
 describe("BrowserControlSessions", () => {
+  it("concurrent ensure does not acknowledge a creation whose catalog commit fails", async () => {
+    const started = Latch.makeUnsafe(false)
+    const release = Latch.makeUnsafe(false)
+    let writes = 0
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox(), {
+      onSessionsChanged: async () => {
+        if (++writes !== 1) return
+        started.openUnsafe()
+        await Effect.runPromise(release.await)
+        throw new Error("audit initial commit failure")
+      },
+    })
+    const first = Effect.runPromise(sessions.ensure("audit-alpha").pipe(Effect.result))
+    await Effect.runPromise(started.await)
+    const second = Effect.runPromise(sessions.ensure("audit-alpha").pipe(Effect.result))
+    release.openUnsafe()
+    const outcomes = await Promise.all([first, second])
+    expect(sessions.summary("audit-alpha")).toBeUndefined()
+    expect(outcomes.map((outcome) => outcome._tag)).toEqual(["Failure", "Failure"])
+  })
+
+  it("failed delete holds same-ID recreation behind its rollback", async () => {
+    const started = Latch.makeUnsafe(false)
+    const release = Latch.makeUnsafe(false)
+    let failNextDelete = false
+    const committed: PersistedSession[][] = []
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox(), {
+      onSessionsChanged: async (entries) => {
+        if (failNextDelete && entries.length === 0) {
+          failNextDelete = false
+          started.openUnsafe()
+          await Effect.runPromise(release.await)
+          throw new Error("audit delete commit failure")
+        }
+        committed.push([...entries])
+      },
+    })
+    await Effect.runPromise(sessions.create("audit-alpha", { readOnly: false }))
+    failNextDelete = true
+    const deletion = Effect.runPromise(sessions.delete("audit-alpha").pipe(Effect.result))
+    await Effect.runPromise(started.await)
+    const recreation = Effect.runPromise(sessions.create("audit-alpha", { readOnly: true }).pipe(Effect.result))
+    expect(sessions.summary("audit-alpha")).toBeUndefined()
+    expect(() => sessions.createNew("audit-alpha")).toThrow("still committing")
+    expect(() => sessions.getOrCreate("audit-alpha")).toThrow("still committing")
+    release.openUnsafe()
+    const outcomes = await Promise.all([deletion, recreation])
+    await Effect.runPromise(sessions.persist())
+    expect(outcomes.map((outcome) => outcome._tag)).toEqual(["Failure", "Failure"])
+    expect(sessions.summary("audit-alpha")).toBeDefined()
+    expect(sessions.isReadOnly("audit-alpha")).toBe(false)
+    expect(committed.at(-1)?.[0]?.readOnly).toBe(false)
+  })
+
+  it("successful delete lets a queued same-ID creation commit a fresh identity", async () => {
+    const started = Latch.makeUnsafe(false)
+    const release = Latch.makeUnsafe(false)
+    const sandboxes: ReturnType<typeof makeFakeSandbox>[] = []
+    const committed: PersistedSession[][] = []
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => {
+      const sandbox = makeFakeSandbox()
+      sandboxes.push(sandbox)
+      return sandbox
+    }, {
+      onSessionsChanged: async (entries) => {
+        if (entries.length === 0) {
+          started.openUnsafe()
+          await Effect.runPromise(release.await)
+        }
+        committed.push([...entries])
+      },
+    })
+    await Effect.runPromise(sessions.create("alpha"))
+    const deletion = Effect.runPromise(sessions.delete("alpha"))
+    await Effect.runPromise(started.await)
+    const recreation = Effect.runPromise(sessions.create("alpha", { readOnly: true }))
+    expect(sandboxes).toHaveLength(1)
+    release.openUnsafe()
+    expect(await deletion).toBe(true)
+    expect((await recreation).readOnly).toBe(true)
+    expect(sandboxes).toHaveLength(2)
+    expect(sandboxes.map((sandbox) => sandbox.closes())).toEqual([1, 0])
+    expect(committed.at(-1)?.[0]).toMatchObject({ id: "alpha", readOnly: true })
+  })
+
+  it("blocks same-ID execute through initial commit while unrelated execute can start", async () => {
+    const started = Latch.makeUnsafe(false)
+    const release = Latch.makeUnsafe(false)
+    const executed: string[] = []
+    const unrelatedStarted = Latch.makeUnsafe(false)
+    let block = false
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", (id) => makeFakeSandbox({
+      onExecute: Effect.sync(() => {
+        executed.push(id)
+        if (id === "beta") unrelatedStarted.openUnsafe()
+      }),
+    }), {
+      onSessionsChanged: async () => {
+        if (!block) return
+        started.openUnsafe()
+        await Effect.runPromise(release.await)
+      },
+    })
+    await Effect.runPromise(sessions.create("beta"))
+    block = true
+    const creation = Effect.runPromise(sessions.ensure("alpha"))
+    await Effect.runPromise(started.await)
+    const same = Effect.runPromise(sessions.execute({ sessionId: "alpha", code: "1", createIfMissing: false }))
+    const unrelated = Effect.runPromise(sessions.execute({ sessionId: "beta", code: "1", createIfMissing: false }))
+    await Effect.runPromise(unrelatedStarted.await)
+    expect(executed).toEqual(["beta"])
+    release.openUnsafe()
+    await Promise.all([creation, same, unrelated])
+    expect(executed).toEqual(["beta", "alpha"])
+  })
+
+  it("cancelling a lifecycle waiter leaves the creator and other waiters intact", async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const started = Latch.makeUnsafe(false)
+      const release = Latch.makeUnsafe(false)
+      const sandbox = makeFakeSandbox()
+      let writes = 0
+      const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => sandbox, {
+        onSessionsChanged: async () => {
+          writes += 1
+          started.openUnsafe()
+          await Effect.runPromise(release.await)
+        },
+      })
+      const creator = yield* Effect.forkChild(sessions.ensure("alpha"))
+      yield* started.await
+      const cancelled = yield* Effect.forkChild(sessions.ensure("alpha"), { startImmediately: true })
+      const survivor = yield* Effect.forkChild(sessions.ensure("alpha"), { startImmediately: true })
+      yield* Fiber.interrupt(cancelled)
+      expect(creator.pollUnsafe()).toBeUndefined()
+      expect(survivor.pollUnsafe()).toBeUndefined()
+      release.openUnsafe()
+      expect(yield* Fiber.join(survivor)).toEqual(yield* Fiber.join(creator))
+      expect(writes).toBe(1)
+      expect(sandbox.closes()).toBe(0)
+      expect(sessions.hasPendingWork("alpha")).toBe(false)
+    }))
+  })
+
   it("atomically ensures one named session", async () => {
     const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox())
     const summaries = await Effect.runPromise(Effect.all([

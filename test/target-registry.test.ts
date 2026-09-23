@@ -94,6 +94,23 @@ describe("TargetRegistry child generations", () => {
 })
 
 describe("TargetRegistry root generations", () => {
+  it("detaching a staged-only root removes its subtree and cached frame events", () => {
+    const registry = new TargetRegistry()
+    registry.stageRootTarget(root({ sessionId: "staged-root", targetId: "staged-target" }))
+    registry.addChildTarget(child("staged-child", "child-target", "staged-root"))
+    registry.addChildTarget(child("staged-grandchild", "grandchild-target", "staged-child"))
+    registry.rememberFrameEvent({ tabId: 7, frameId: "child-target", attached: { parentFrameId: "root-frame" } })
+    const otherChild = { ...child("other-child", "other-target", "other-root"), tabId: 8 }
+    registry.addChildTarget(otherChild)
+    registry.rememberFrameEvent({ tabId: 8, frameId: "other-target", attached: { parentFrameId: "other-frame" } })
+    registry.detachRootTargetState(7)
+    expect(registry.routingRootTarget(7)).toBeUndefined()
+    expect([...registry.childTargets.values()]).toEqual([otherChild])
+    expect([...registry.childTargetsByTargetId.values()]).toEqual([otherChild])
+    expect(registry.findFrameEventsForChild(child("next-child", "child-target"), () => undefined)).toBeUndefined()
+    expect(registry.findFrameEventsForChild(otherChild, () => undefined)).toBeDefined()
+  })
+
   it("preserves ownership and reports same-tab root replacement", () => {
     const registry = new TargetRegistry()
     registry.addRootTarget(root({ sessionId: "bc-tab-1", targetId: "target-1", browserControlSessionId: "alpha" }))

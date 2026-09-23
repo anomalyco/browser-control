@@ -1,4 +1,4 @@
-import { Deferred, Effect, Fiber, Latch, Schema, Semaphore } from "effect"
+import { Deferred, Effect, Exit, Fiber, Latch, Schema, Semaphore } from "effect"
 import { defaultPageClosedWarning, ExecuteSandbox, hasExplicitTargetSelection, type ExecuteResult, type ExecuteTargetSelection } from "./execute.ts"
 import type { NetworkCaptureOptions, NetworkCaptureResult, NetworkCaptureStatus, NetworkCaptureStopOptions } from "./network-capture.ts"
 import { generateSessionId } from "./relay-helpers.ts"
@@ -90,6 +90,7 @@ export class BrowserControlSessions {
   private admission: "open" | "draining" | "closed" = "open"
   private pendingWork = 0
   private readonly pendingSessionWork = new Map<string, number>()
+  private readonly identityChanges = new Map<string, Deferred.Deferred<Exit.Exit<void, Error>>>()
   private readonly idle = Latch.makeUnsafe(true)
   private userAttachedPageUrlsProvider: (() => readonly string[]) | undefined
 
@@ -158,6 +159,7 @@ export class BrowserControlSessions {
 
   createNew(id: string | undefined, options?: { readonly readOnly?: boolean }): BrowserControlSession {
     this.assertAdmission()
+    if (id !== undefined) this.assertStableIdentity(id)
     return this.createAcceptedSession(id, options)
   }
 
@@ -197,19 +199,23 @@ export class BrowserControlSessions {
 
   private readonly createPersistedSession = Effect.fnUntraced(function* (this: BrowserControlSessions, id: string | undefined, options?: { readonly readOnly?: boolean }) {
     const manager = this
-    const session = manager.createAcceptedSession(id, options)
-    yield* manager.flushPersistence().pipe(Effect.catch((error) => Effect.gen(function* () {
-      if (manager.sessions.get(session.id) === session) manager.sessions.delete(session.id)
-      yield* manager.closeBrowserControlSession(session)
-      manager.schedulePersistence()
-      yield* manager.flushPersistence().pipe(Effect.ignore)
-      return yield* Effect.fail(error)
-    })))
-    return session
+    const sessionId = id ?? generateSessionId(this.sessions)
+    return yield* manager.withIdentityChange(sessionId, Effect.gen(function* () {
+      const session = manager.createAcceptedSession(sessionId, options)
+      yield* manager.flushPersistence().pipe(Effect.catch((error) => Effect.gen(function* () {
+        if (manager.sessions.get(session.id) === session) manager.sessions.delete(session.id)
+        yield* manager.closeBrowserControlSession(session)
+        manager.schedulePersistence()
+        yield* manager.flushPersistence().pipe(Effect.ignore)
+        return yield* Effect.fail(error)
+      })))
+      return session
+    }))
   })
 
   getOrCreate(id: string): { readonly session: BrowserControlSession; readonly created: boolean } {
     this.assertAdmission()
+    this.assertStableIdentity(id)
     return this.getOrCreateAcceptedSession(id)
   }
 
@@ -291,7 +297,7 @@ export class BrowserControlSessions {
       if (!session) {
         return false
       }
-      return yield* manager.withLifecyclePermit(session, "delete", Effect.gen(function* () {
+      return yield* manager.withLifecyclePermit(session, "delete", manager.withIdentityChange(id, Effect.gen(function* () {
         if (manager.sessions.get(id) !== session) {
           return false
         }
@@ -307,7 +313,7 @@ export class BrowserControlSessions {
         yield* manager.releaseSessionTargetOwnership(session)
         yield* manager.closeBrowserControlSession(session)
         return true
-      }))
+      })))
     }))
   }
 
@@ -318,7 +324,7 @@ export class BrowserControlSessions {
       if (!existing) {
         return undefined
       }
-      return yield* manager.withLifecyclePermit(existing, "reset", Effect.gen(function* () {
+      return yield* manager.withLifecyclePermit(existing, "reset", manager.withIdentityChange(id, Effect.gen(function* () {
         if (manager.sessions.get(id) !== existing) {
           return yield* Effect.fail(sessionError("inactive", `Session is no longer active: ${id}`, id))
         }
@@ -335,7 +341,7 @@ export class BrowserControlSessions {
         yield* manager.releaseSessionTargetOwnership(existing)
         yield* manager.closeBrowserControlSession(existing)
         return manager.sessionSummary(session)
-      }))
+      })))
     }))
   }
 
@@ -881,6 +887,34 @@ export class BrowserControlSessions {
     }
   }
 
+  private assertStableIdentity(id: string): void {
+    if (this.identityChanges.has(id)) {
+      throw sessionError("inactive", `Session lifecycle change is still committing: ${id}`, id)
+    }
+  }
+
+  private awaitStableIdentity(id: string | undefined): Effect.Effect<void, Error> {
+    return Effect.suspend(() => {
+      const pending = id === undefined ? undefined : this.identityChanges.get(id)
+      return pending
+        ? Deferred.await(pending).pipe(Effect.flatten, Effect.andThen(this.awaitStableIdentity(id)))
+        : Effect.void
+    })
+  }
+
+  /** Keep same-ID callers behind the entire commit/rollback, including corrective persistence. */
+  private withIdentityChange<A>(id: string, effect: Effect.Effect<A, Error>): Effect.Effect<A, Error> {
+    return this.awaitStableIdentity(id).pipe(Effect.andThen(Effect.suspend(() => {
+      const settled = Deferred.makeUnsafe<Exit.Exit<void, Error>>()
+      this.identityChanges.set(id, settled)
+      return effect.pipe(Effect.onExit((exit) => Effect.suspend(() => {
+        this.identityChanges.delete(id)
+        // Store the exit as a value so interruption cannot interrupt sibling waiters.
+        return Deferred.succeed(settled, Exit.asVoid(exit))
+      })))
+    })))
+  }
+
   private retainWork(sessionId?: string): () => void {
     this.pendingWork += 1
     if (sessionId !== undefined) this.pendingSessionWork.set(sessionId, (this.pendingSessionWork.get(sessionId) ?? 0) + 1)
@@ -905,7 +939,7 @@ export class BrowserControlSessions {
         },
         catch: (cause) => cause instanceof Error ? cause : new Error("Admit session operation", { cause }),
       }),
-      () => effect,
+      () => this.awaitStableIdentity(sessionId).pipe(Effect.andThen(effect)),
       (release) => Effect.sync(release),
     )
   }

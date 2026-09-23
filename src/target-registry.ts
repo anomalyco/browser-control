@@ -317,9 +317,6 @@ export class TargetRegistry {
   } = {}): { readonly target: ConnectedTarget; readonly childSessionIds: string[] } | undefined {
     this.stagedRootTargets.delete(tabId)
     const target = this.tabTargets.get(tabId)
-    if (!target) {
-      return undefined
-    }
     // Resolve the entire staged subtree before recursive detach mutates the indexes.
     const preservedSessionIds = new Set<string>()
     if (options.preserveChildParentSessionId !== undefined) {
@@ -335,13 +332,15 @@ export class TargetRegistry {
     const childSessionIds = Array.from(this.childTargets.values())
       .filter((child) => child.tabId === tabId && !preservedSessionIds.has(child.sessionId))
       .map((child) => child.sessionId)
-    this.targets.delete(target.sessionId)
-    this.tabTargets.delete(tabId)
-    this.targetsByTargetId.delete(target.targetInfo.targetId)
-    this.pendingOwnershipReservations.delete(target.targetInfo.targetId)
+    if (target) {
+      this.targets.delete(target.sessionId)
+      this.tabTargets.delete(tabId)
+      this.targetsByTargetId.delete(target.targetInfo.targetId)
+      this.pendingOwnershipReservations.delete(target.targetInfo.targetId)
+    }
     if (!options.preserveFrameEvents) this.tabFrameEvents.delete(tabId)
     for (const sessionId of childSessionIds) this.detachChildTargetState(sessionId)
-    return { target, childSessionIds }
+    return target ? { target, childSessionIds } : undefined
   }
 
   detachChildTargetState(sessionId: string): ChildTarget | undefined {
