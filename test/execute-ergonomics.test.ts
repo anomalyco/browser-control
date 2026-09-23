@@ -453,6 +453,83 @@ describe("ariaSnapshot helper", () => {
 })
 
 describe("snapshot helpers", () => {
+  it.each(["diff", "delta"] as const)("invalidates the %s baseline on reload without recycling refs", async (mode) => {
+    let navigate: ((frame: unknown) => void) | undefined
+    const mainFrame = {}
+    const page = {
+      evaluate: vi.fn().mockResolvedValue({ entries: [{ depth: 0, role: "button", name: "Save", identityName: "Save", selector: "#save" }], truncated: false }),
+      url: () => "https://example.com/same-url",
+      mainFrame: () => mainFrame,
+      on: (_event: string, handler: (frame: unknown) => void) => { navigate = handler },
+      off: vi.fn(),
+    } as unknown as Page
+    const helpers = createSnapshotHelpers(page, { selectors: new Map() })
+    expect(await helpers.snapshot()).toContain("ref=e1")
+    navigate?.({}) // Child-frame navigation must preserve the baseline.
+    expect(await helpers.snapshot({ diff: true })).toContain("1 unchanged")
+    navigate?.(mainFrame)
+    expect(() => helpers.ref("e1")).toThrow("Snapshot refs are stale")
+    if (mode === "diff") await expect(helpers.snapshot({ diff: true })).rejects.toThrow("requires a previous snapshot() baseline")
+    expect(await helpers.snapshot({ delta: true })).toBe('- button "Save" [ref=e2]')
+    expect(() => helpers.ref("e1")).toThrow("Unknown snapshot ref")
+    expect(await helpers.snapshot({ diff: true })).toContain("1 unchanged")
+  })
+
+  it.each([
+    ["SELECT", "", true, 0, null, "listbox"],
+    ["SELECT", "", false, 3, null, "listbox"],
+    ["SELECT", "", false, 1, null, "combobox"],
+    ["INPUT", "range", false, 0, null, "slider"],
+    ["INPUT", "file", false, 0, null, "button"],
+    ...["text", "search", "email", "tel", "url"].map((type) => ["INPUT", type, false, 0, "DATALIST", "combobox"] as const),
+    ["INPUT", "search", false, 0, null, "searchbox"],
+    ["INPUT", "text", false, 0, "DIV", "textbox"],
+    ["INPUT", "number", false, 0, "DATALIST", "spinbutton"],
+  ] as const)("captures native %s %s multiple=%s size=%s list=%s as %s", async (tag, type, multiple, size, listTag, role) => {
+    // Execute the serialized capture itself against a minimal DOM, rather than
+    // precomputing entries (which would bypass native role inference entirely).
+    class ElementStub {
+      tagName: string = tag
+      type = type
+      size = size
+      selectedOptions = []
+      options = []
+      parentElement = null
+      getAttribute(name: string) { return name === "aria-label" ? "Native control" : name === "id" ? "control" : name === "list" && listTag ? "choices" : null }
+      hasAttribute(name: string) { return name === "multiple" && multiple }
+      getBoundingClientRect() { return { width: 100, height: 20 } }
+      getRootNode() { return { getElementById: () => listTag ? { tagName: listTag } : null } }
+      matches(selector: string) { return selector.includes("input") }
+      closest() { return null }
+      querySelectorAll() { return [] }
+    }
+    class InputStub extends ElementStub {}
+    class SelectStub extends ElementStub {}
+    const control = tag === "INPUT" ? new InputStub() : new SelectStub()
+    const root = { matches: () => false, querySelectorAll: (selector: string) => selector.includes("input") ? [control] : [] }
+    const globals = {
+      Element: ElementStub, HTMLInputElement: InputStub, HTMLSelectElement: SelectStub,
+      window: { getComputedStyle: () => ({}) }, CSS: { escape: (s: string) => s },
+      document: { body: root, querySelectorAll: (s: string) => s === "#control" ? [control] : [], getElementById: () => listTag ? { tagName: listTag } : null },
+    }
+    for (const [key, value] of Object.entries(globals)) vi.stubGlobal(key, value)
+    for (const key of ["HTMLAnchorElement", "HTMLButtonElement", "HTMLTextAreaElement", "HTMLDialogElement", "HTMLFieldSetElement", "HTMLTableElement", "HTMLTableRowElement", "HTMLUListElement", "HTMLOListElement", "HTMLLIElement", "HTMLDetailsElement"]) vi.stubGlobal(key, class {})
+    try {
+      const selector = { and: vi.fn(() => selector) }
+      const page = {
+        evaluate: (capture: (settings: unknown) => unknown, settings: unknown) => Promise.resolve(capture(settings)),
+        url: () => "https://example.com/controls", on: vi.fn(), off: vi.fn(),
+        locator: vi.fn(() => selector), getByRole: vi.fn(),
+      } as unknown as Page
+      const helpers = createSnapshotHelpers(page, { selectors: new Map() })
+      expect(await helpers.snapshot()).toContain(`- ${role} "Native control"`)
+      helpers.ref("e1")
+      expect(page.getByRole).toHaveBeenCalledWith(role, { name: "Native control", exact: true })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it("formats a compact snapshot and resolves refs from the latest capture", async () => {
     const evaluate = vi.fn().mockResolvedValue({
       entries: [

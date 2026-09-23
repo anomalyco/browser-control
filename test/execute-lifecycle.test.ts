@@ -3,8 +3,64 @@ import { Effect } from "effect"
 import { chromium, selectors, type Browser, type BrowserContext } from "playwright-core"
 import { defaultPageRepairedWarning, ExecuteSandbox, finishHandoff, isDisposableSessionPage, isSessionPageConnected, recoverSessionPage, runPlaywrightOperation, waitForPageContext } from "../src/execute.ts"
 import { runtimeFailureKind } from "../src/runtime-diagnostics.ts"
+import { installPageReadTimeout } from "../src/page-read-timeout.ts"
 
 describe("execute lifecycle", () => {
+  it.each([false, true])("bounds title reads without activating recovery (protected UI: %s)", async (protectedUi) => {
+    const page = {
+      isClosed: () => false,
+      url: () => "https://example.test/form",
+      title: vi.fn<() => Promise<string>>().mockImplementationOnce(() => new Promise(() => {})).mockResolvedValue("Recovered"),
+      context: (): BrowserContext => context as unknown as BrowserContext,
+      on: vi.fn(), off: vi.fn(), once: vi.fn(),
+      evaluate: vi.fn().mockResolvedValue(true),
+      close: vi.fn().mockResolvedValue(undefined),
+    }
+    installPageReadTimeout(page, 100)
+    const context = {
+      pages: () => [], on: vi.fn(),
+      newPage: vi.fn().mockResolvedValueOnce(page).mockRejectedValue(new Error("Unexpected page replacement")),
+      newCDPSession: async () => ({
+        send: async () => ({ targetInfo: { targetId: "fixture-target" } }),
+        detach: async () => {},
+      }),
+    }
+    const browser = { isConnected: () => true, contexts: () => [context], close: vi.fn().mockResolvedValue(undefined) }
+    const connect = vi.spyOn(chromium, "connectOverCDP").mockResolvedValue(browser as unknown as Browser)
+    const register = vi.spyOn(selectors, "register").mockResolvedValue(undefined)
+    const sandbox = new ExecuteSandbox({ endpointUrl: "http://127.0.0.1:1" })
+    try {
+      await Effect.runPromise(sandbox.execute("state.originalPage = page; return page.url()"))
+      if (protectedUi) expect(sandbox.markTargetProtectedUi("fixture-target", true)).toBe(true)
+      vi.useFakeTimers()
+      const pending = Effect.runPromise(sandbox.execute("return await page.title()"))
+      await vi.advanceTimersByTimeAsync(100)
+      const failure = await pending
+      expect(failure.isError).toBe(true)
+      expect(failure.setupFailed).toBeUndefined()
+      expect(failure.diagnostic).toBe(protectedUi ? "target/cross-extension-page" :
+        "session-page/context-read-timeout; operation=page.title; timeoutMs=100")
+      expect(failure.warnings).toEqual(protectedUi ? [
+        "Chromium blocked protected extension UI, possibly a password manager. Ask the user to finish or dismiss it in the browser, then retry.",
+      ] : [])
+      vi.useRealTimers()
+      expect(sandbox.getStatus()).toMatchObject({ connected: true })
+      const continued = await Effect.runPromise(sandbox.execute("return { url: page.url(), samePage: page === state.originalPage }"))
+      expect(continued).toMatchObject({ isError: false, value: { url: "https://example.test/form", samePage: true } })
+      expect(page.evaluate).not.toHaveBeenCalled()
+      expect(connect).toHaveBeenCalledTimes(1)
+      expect(context.newPage).toHaveBeenCalledTimes(1)
+      expect(page.close).not.toHaveBeenCalled()
+      if (protectedUi) sandbox.markTargetProtectedUi("fixture-target", false)
+      expect(await Effect.runPromise(sandbox.execute("return await page.title()"))).toMatchObject({ isError: false, value: "Recovered" })
+    } finally {
+      vi.useRealTimers()
+      await Effect.runPromise(sandbox.disconnectSettled())
+      connect.mockRestore()
+      register.mockRestore()
+    }
+  })
+
   it("reports a session connected only when it has a live default page", () => {
     expect(isSessionPageConnected({ browserConnected: true, pageUrl: null, healthCheckRequired: false })).toBe(false)
     expect(isSessionPageConnected({ browserConnected: true, pageUrl: "about:blank", healthCheckRequired: false })).toBe(true)

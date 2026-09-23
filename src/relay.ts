@@ -320,6 +320,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     try {
       outcome = await awaitHandoffAction({
         outcome: wait.outcome,
+        deferCompletion: wait.deferCompletion,
         present: () => setActivityForTargetAcknowledged(target, "waiting", waitingBadge(options.message), {
           sessionId: options.sessionId,
           message: options.message,

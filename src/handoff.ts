@@ -27,6 +27,8 @@ type PendingHandoff = {
 export type HandoffWait = {
   readonly id: string
   readonly outcome: Promise<HandoffOutcome>
+  /** Keep the deadline and target cancellation live while a start action settles. */
+  readonly deferCompletion: () => () => void
 }
 
 export async function awaitHandoffAction(options: {
@@ -35,6 +37,7 @@ export async function awaitHandoffAction(options: {
   readonly start?: () => unknown | Promise<unknown>
   readonly cancel: () => void
   readonly cancelStart?: () => Promise<void>
+  readonly deferCompletion?: () => () => void
 }): Promise<HandoffOutcome> {
   const outcome = options.outcome.then((value) => ({ type: "handoff-completed" as const, value }))
   if (options.present) {
@@ -50,8 +53,12 @@ export async function awaitHandoffAction(options: {
     }
   }
   if (!options.start) return await options.outcome
+  const releaseCompletion = options.deferCompletion?.()
   const action = Promise.resolve().then(options.start).then(
-    () => ({ type: "action-completed" as const }),
+    () => {
+      releaseCompletion?.()
+      return { type: "action-completed" as const }
+    },
     (error: unknown) => ({ type: "action-failed" as const, error }),
   )
   const first = await Promise.race([action, outcome])
@@ -110,14 +117,19 @@ export class HandoffRegistry {
       existing.resolve("timeout")
     }
     const id = this.createId()
+    let completionHolds = 0
+    let humanCompleted = false
+    let finish: (outcome: HandoffOutcome) => void
     const outcome = new Promise<HandoffOutcome>((resolvePromise) => {
       let pending: PendingHandoff
-      const timeout = setTimeout(() => {
+      const timeout = setTimeout(() => finish("timeout"), options.timeoutMs)
+      finish = (outcome) => {
+        clearTimeout(timeout)
         if (this.pending.get(options.sessionId) === pending) {
           this.pending.delete(options.sessionId)
         }
-        resolvePromise("timeout")
-      }, options.timeoutMs)
+        resolvePromise(outcome)
+      }
       pending = {
         id,
         sessionId: options.sessionId,
@@ -126,16 +138,29 @@ export class HandoffRegistry {
         targetSessionId: options.targetSessionId,
         message: options.message,
         resolve: (outcome) => {
-          clearTimeout(timeout)
-          if (this.pending.get(options.sessionId) === pending) {
-            this.pending.delete(options.sessionId)
+          if (outcome === "resolved") {
+            humanCompleted = true
+            if (completionHolds > 0) return
           }
-          resolvePromise(outcome)
+          finish(outcome)
         },
       }
       this.pending.set(options.sessionId, pending)
     })
-    return { id, outcome }
+    return {
+      id,
+      outcome,
+      deferCompletion: () => {
+        completionHolds++
+        let released = false
+        return () => {
+          if (released) return
+          released = true
+          completionHolds--
+          if (humanCompleted && completionHolds === 0) finish("resolved")
+        }
+      },
+    }
   }
 
   /** Resolve only the waiter named by its token and exact registry target. */

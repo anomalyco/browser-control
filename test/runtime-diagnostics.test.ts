@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest"
+import { PageReadTimeoutError } from "../src/page-read-timeout.ts"
 import {
   boundedToken,
   executionContextFailureDiagnostic,
@@ -8,6 +9,25 @@ import {
 } from "../src/runtime-diagnostics.ts"
 
 describe("runtime diagnostics", () => {
+  it("names only the bounded context-read timeout through wrapped causes", () => {
+    const error = new PageReadTimeoutError(100)
+    for (const cause of [error, new Error(error.message, { cause: error })]) {
+      expect(runtimeFailureKind(cause)).toBe("timeout")
+      expect(executionContextFailureDiagnostic(cause, undefined)).toBe(
+        "session-page/context-read-timeout; operation=page.title; timeoutMs=100",
+      )
+    }
+  })
+
+  it.each([
+    "locator.click: Timeout 100ms exceeded.\nCall log:\n  - waiting for locator('#missing')",
+    "page.title() timed out after 100ms waiting for the page execution context",
+    "page.title() timed out after 100ms: the page execution-context read did not complete; the context may be unavailable or busy.",
+  ])("does not infer a context-read diagnostic from generic timeout text: %s", (message) => {
+    expect(runtimeFailureKind(new Error(message))).toBe("timeout")
+    expect(executionContextFailureDiagnostic(new Error(message), undefined)).toBeUndefined()
+  })
+
   it("classifies execution-context failures through wrapped causes", () => {
     const error = new Error("evaluate failed", {
       cause: new Error("Execution context was destroyed, most likely because of a navigation"),

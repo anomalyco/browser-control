@@ -1,11 +1,129 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { awaitHandoffAction, HandoffRegistry, resolveExactHandoffTarget, toolbarClickAction } from "../src/handoff.ts"
 
 function registryWithIds(...ids: string[]): HandoffRegistry {
   return new HandoffRegistry(() => ids.shift() ?? "unexpected-id")
 }
 
+function deferred() {
+  let resolve!: () => void
+  let reject!: (error: Error) => void
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
 describe("HandoffRegistry", () => {
+  afterEach(() => vi.useRealTimers())
+
+  it.each(["timeout", "target-detached", "target-crashed"] as const)("keeps %s effective after human completion until the start action settles", async (ending) => {
+    vi.useFakeTimers()
+    const registry = registryWithIds("handoff-1")
+    const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7", message: "m", timeoutMs: 5_000 })
+    const action = deferred()
+    const started = deferred()
+    const disconnected = deferred()
+    const cancelStarted = deferred()
+    const cancelStart = vi.fn(() => {
+      cancelStarted.resolve()
+      return disconnected.promise
+    })
+    let settled = false
+    const result = awaitHandoffAction({
+      outcome: wait.outcome,
+      deferCompletion: wait.deferCompletion,
+      start: () => {
+        started.resolve()
+        return action.promise
+      },
+      cancel: () => { registry.cancel(wait.id) },
+      cancelStart,
+    }).finally(() => { settled = true })
+    await started.promise
+    expect(registry.complete({ id: wait.id, tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7" })).toBe(true)
+    expect(registry.pendingCount).toBe(1)
+    expect(registry.cancelForTarget({ targetId: "target-7", targetSessionId: "stale", reason: "target-detached" })).toEqual([])
+    if (ending === "timeout") {
+      await vi.advanceTimersByTimeAsync(5_000)
+    } else {
+      expect(registry.cancelForTarget({ targetId: "target-7", targetSessionId: "bc-tab-7", reason: ending })).toHaveLength(1)
+    }
+    await cancelStarted.promise
+    expect(cancelStart).toHaveBeenCalledTimes(1)
+    expect(settled).toBe(false)
+    disconnected.resolve()
+    await expect(result).resolves.toEqual(ending === "timeout" ? "timeout" : { type: "cancelled", reason: ending })
+    expect(registry.pendingCount).toBe(0)
+    expect(vi.getTimerCount()).toBe(0)
+    action.reject(new Error("late disconnection rejection"))
+    await Promise.resolve()
+  })
+
+  it("preserves a start failure after the human has completed the handoff", async () => {
+    vi.useFakeTimers()
+    const registry = registryWithIds("handoff-1")
+    const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7", message: "m", timeoutMs: 5_000 })
+    const action = deferred()
+    const started = deferred()
+    const result = awaitHandoffAction({
+      outcome: wait.outcome,
+      deferCompletion: wait.deferCompletion,
+      start: () => {
+        started.resolve()
+        return action.promise
+      },
+      cancel: () => { registry.cancel(wait.id) },
+    })
+    await started.promise
+    registry.complete({ id: wait.id, tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7" })
+    const assertion = expect(result).rejects.toThrow("prompt action failed")
+    action.reject(new Error("prompt action failed"))
+    await assertion
+    expect(registry.pendingCount).toBe(0)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it("still waits for the human when the action settles first", async () => {
+    vi.useFakeTimers()
+    const registry = registryWithIds("handoff-1")
+    const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7", message: "m", timeoutMs: 5_000 })
+    let settled = false
+    const result = awaitHandoffAction({
+      outcome: wait.outcome,
+      deferCompletion: wait.deferCompletion,
+      start: () => undefined,
+      cancel: () => { registry.cancel(wait.id) },
+    }).finally(() => { settled = true })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(settled).toBe(false)
+    expect(registry.pendingCount).toBe(1)
+    registry.complete({ id: wait.id, tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7" })
+    await expect(result).resolves.toBe("resolved")
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it("keeps deferred completion bound to the rebound target and ignores a late release after replacement", async () => {
+    vi.useFakeTimers()
+    const registry = registryWithIds("handoff-1", "handoff-2")
+    const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7", message: "m", timeoutMs: 5_000 })
+    const release = wait.deferCompletion()
+    registry.complete({ id: wait.id, tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7" })
+    expect(registry.rebindTarget({ tabId: 7, previousTargetId: "target-7", previousTargetSessionId: "bc-tab-7", targetId: "new-target", targetSessionId: "new-session" })).toBe(true)
+    expect(registry.cancelForTarget({ targetId: "target-7", targetSessionId: "bc-tab-7", reason: "target-detached" })).toEqual([])
+    expect(registry.cancelForTarget({ targetId: "new-target", targetSessionId: "new-session", reason: "target-crashed" })).toHaveLength(1)
+    await expect(wait.outcome).resolves.toEqual({ type: "cancelled", reason: "target-crashed" })
+    const replacement = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "new-target", targetSessionId: "new-session", message: "m", timeoutMs: 5_000 })
+    release()
+    release()
+    expect(registry.pendingForSession("alpha")?.id).toBe(replacement.id)
+    expect(vi.getTimerCount()).toBe(1)
+    registry.cancelAll()
+    await expect(replacement.outcome).resolves.toBe("timeout")
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it("resolves only a matching handoff id and tab", async () => {
     const registry = registryWithIds("handoff-1")
     const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7", message: "do the 2fa", timeoutMs: 5_000 })
@@ -123,6 +241,7 @@ describe("HandoffRegistry", () => {
 
     await expect(awaitHandoffAction({
       outcome: wait.outcome,
+      deferCompletion: wait.deferCompletion,
       start: () => Promise.reject(new Error("prompt action failed")),
       cancel: () => {
         registry.cancel(wait.id)
@@ -147,6 +266,7 @@ describe("HandoffRegistry", () => {
     let started = false
     const result = awaitHandoffAction({
       outcome: wait.outcome,
+      deferCompletion: wait.deferCompletion,
       present: () => presented,
       start: () => {
         started = true
@@ -176,6 +296,7 @@ describe("HandoffRegistry", () => {
     let started = false
     const result = awaitHandoffAction({
       outcome: wait.outcome,
+      deferCompletion: wait.deferCompletion,
       present: () => presented,
       start: () => {
         started = true
@@ -193,6 +314,7 @@ describe("HandoffRegistry", () => {
   })
 
   it("starts a blocking action after registration and waits for both outcomes", async () => {
+    vi.useFakeTimers()
     const registry = registryWithIds("handoff-1")
     const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-1", targetSessionId: "bc-tab-1", message: "m", timeoutMs: 5_000 })
     let finishAction: (() => void) | undefined
@@ -202,6 +324,7 @@ describe("HandoffRegistry", () => {
     let settled = false
     const result = awaitHandoffAction({
       outcome: wait.outcome,
+      deferCompletion: wait.deferCompletion,
       start: () => {
         expect(registry.pendingCount).toBe(1)
         return action
@@ -218,8 +341,11 @@ describe("HandoffRegistry", () => {
     registry.complete({ id: wait.id, tabId: 7, targetId: "target-1", targetSessionId: "bc-tab-1" })
     await Promise.resolve()
     expect(settled).toBe(false)
+    expect(registry.pendingCount).toBe(1)
     finishAction?.()
     await expect(result).resolves.toBe("resolved")
+    expect(registry.pendingCount).toBe(0)
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it("disconnects a non-settling start action after the handoff times out", async () => {
@@ -228,6 +354,7 @@ describe("HandoffRegistry", () => {
     let cancelled = false
     const result = awaitHandoffAction({
       outcome: wait.outcome,
+      deferCompletion: wait.deferCompletion,
       start: () => new Promise(() => {}),
       cancel: () => {
         registry.cancel(wait.id)

@@ -5,6 +5,7 @@ import { TestClock } from "effect/testing"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { defaultPageReplacedWarning, ExecuteSandbox, type RequestHandoff } from "../src/execute.ts"
 import { awaitHandoffAction } from "../src/handoff.ts"
+import { BrowserControlSessions } from "../src/session-manager.ts"
 
 const { connectOverCDP } = vi.hoisted(() => ({ connectOverCDP: vi.fn<() => Promise<unknown>>() }))
 
@@ -69,9 +70,137 @@ function connect(context: FakeContext) {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  connectOverCDP.mockReset()
 })
 
 describe("ExecuteSandbox", () => {
+  it("adopts a cold target without connecting and releases it without closing a user tab", async () => {
+    connectOverCDP.mockImplementation(() => new Promise(() => {}))
+    const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test" })
+    expect(await Effect.runPromise(sandbox.adoptPage({ targetId: "user-target", url: "https://example.test/user" }))).toBe("https://example.test/user")
+    expect(sandbox.getStatus()).toMatchObject({ connected: false, pageUrl: null })
+    await Effect.runPromise(sandbox.disconnectSettled())
+    await Effect.runPromise(sandbox.closeSettled())
+    expect(connectOverCDP).not.toHaveBeenCalled()
+  })
+
+  it.each(["reset", "delete"] as const)("%s releases an adopted identity that never connected", async (operation) => {
+    connectOverCDP.mockImplementation(() => new Promise(() => {}))
+    const sessions = new BrowserControlSessions("http://relay.test")
+    const adopted = await Effect.runPromise(sessions.adopt({ sessionId: "cold", createIfMissing: true, targetId: "user-target", targetUrl: "https://example.test/user" }))
+    expect(adopted.session).toMatchObject({ connected: false, pageUrl: null })
+    expect(sessions.adoptedTargetId("cold")).toBe("user-target")
+    await Effect.runPromise(operation === "reset" ? sessions.reset("cold").pipe(Effect.asVoid) : sessions.delete("cold").pipe(Effect.asVoid))
+    expect(sessions.adoptedTargetId("cold")).toBeUndefined()
+    expect(connectOverCDP).not.toHaveBeenCalled()
+    await Effect.runPromise(sessions.closeAll())
+  })
+
+  it("settles the previous owned page close and cancels capture before adopting another identity", async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const context = new FakeContext()
+      connect(context)
+      const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test" })
+      yield* sandbox.execute("state.saved = 42; await network.start()")
+      const previous = context.targets[0]
+      if (!previous) throw new Error("Expected previous page")
+      const closing = yield* Latch.make()
+      const release = yield* Latch.make()
+      previous.close.mockImplementation(async () => {
+        closing.openUnsafe()
+        await Effect.runPromise(release.await)
+        previous.closed = true
+        previous.emit("close")
+      })
+      const adoption = yield* Effect.forkChild(sandbox.adoptPage({ targetId: "next", url: "https://example.test/next" }))
+      yield* closing.await
+      yield* TestClock.adjust("3 seconds")
+      expect(adoption.pollUnsafe()).toBeUndefined()
+      expect(sandbox.networkStatus().active).toBe(false)
+      expect(sandbox.getStatus()).toMatchObject({ pageUrl: previous.url(), stateKeys: ["saved"] })
+      yield* release.open
+      expect(yield* Fiber.join(adoption)).toBe("https://example.test/next")
+      expect(sandbox.getStatus()).toMatchObject({ connected: false, pageUrl: null, stateKeys: ["saved"] })
+      expect(previous.listenerCount("close")).toBe(0)
+      const next = context.addPage("next", "https://example.test/next")
+      expect(yield* sandbox.execute("return state.saved")).toMatchObject({ value: 42, isError: false })
+      expect(context.newPage).toHaveBeenCalledOnce()
+      yield* sandbox.closeSettled()
+      expect(next.close).not.toHaveBeenCalled()
+    }).pipe(Effect.provide(TestClock.layer())))
+  })
+
+  it("bounds adopted initialization, never runs failed setup code, and recovers the exact same-URL target", async () => {
+    const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test", sessionId: "lazy-adopt" })
+    const url = "https://example.test/user"
+    await Effect.runPromise(sandbox.adoptPage({ targetId: "user-target", url }))
+    connectOverCDP.mockRejectedValueOnce(Object.assign(new Error("browserType.connectOverCDP: Timeout 8000ms exceeded"), { name: "TimeoutError" }))
+    const failed = await Effect.runPromise(sandbox.execute("state.lateMutation = true"))
+    expect(failed).toMatchObject({ isError: true, setupFailed: true, diagnostic: "session-page/adopted-initialization-timeout" })
+    expect(connectOverCDP).toHaveBeenLastCalledWith("http://relay.test", expect.objectContaining({ timeout: 8_000 }))
+    expect(sandbox.getStatus()).toMatchObject({ connected: false, pageUrl: null, stateKeys: [] })
+    const context = new FakeContext()
+    const decoy = context.addPage("same-url-decoy", url)
+    const target = context.addPage("user-target", url)
+    connect(context)
+    expect(await Effect.runPromise(sandbox.execute("return { url: page.url(), mutated: Boolean(state.lateMutation) }"))).toMatchObject({
+      isError: false, value: { url, mutated: false },
+    })
+    expect(target.listenerCount("close")).toBe(1)
+    expect(decoy.listenerCount("close")).toBe(0)
+    expect(context.newPage).not.toHaveBeenCalled()
+    await Effect.runPromise(sandbox.closeSettled())
+    expect(target.close).not.toHaveBeenCalled()
+    expect(decoy.close).not.toHaveBeenCalled()
+  })
+
+  it("retains the previous page and state when its adoption close fails", async () => {
+    const context = new FakeContext()
+    connect(context)
+    const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test" })
+    await Effect.runPromise(sandbox.execute("state.saved = 42"))
+    const previous = context.targets[0]
+    if (!previous) throw new Error("Expected previous page")
+    previous.close.mockRejectedValueOnce(new Error("Close failed"))
+    await expect(Effect.runPromise(sandbox.adoptPage({ targetId: "next", url: "https://example.test/next" }))).rejects.toThrow("Close failed")
+    expect(await Effect.runPromise(sandbox.execute("return state.saved"))).toMatchObject({ value: 42, isError: false })
+    expect(previous.listenerCount("close")).toBe(1)
+    expect(context.newPage).toHaveBeenCalledOnce()
+    await Effect.runPromise(sandbox.closeSettled())
+  })
+
+  it("does not fall back to a same-URL page or create a page when the adopted target is absent", async () => {
+    vi.useFakeTimers()
+    const context = new FakeContext()
+    const decoy = context.addPage("decoy", "https://example.test/user")
+    connect(context)
+    const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test" })
+    try {
+      await Effect.runPromise(sandbox.adoptPage({ targetId: "absent", url: decoy.url() }))
+      const execute = Effect.runPromise(sandbox.execute("state.wrongPage = true"))
+      await vi.advanceTimersByTimeAsync(3_100)
+      expect(await execute).toMatchObject({ isError: true, setupFailed: true, diagnostic: "session-page/target-unavailable" })
+      expect(sandbox.getStatus()).toMatchObject({ stateKeys: [], pageUrl: null })
+      expect(context.newPage).not.toHaveBeenCalled()
+      expect(decoy.listenerCount("close")).toBe(0)
+    } finally {
+      await Effect.runPromise(sandbox.closeSettled())
+      expect(decoy.close).not.toHaveBeenCalled()
+      vi.useRealTimers()
+    }
+  })
+
+  it("preserves non-timeout connection failures rather than diagnosing an unresponsive page", async () => {
+    const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test" })
+    await Effect.runPromise(sandbox.adoptPage({ targetId: "user-target", url: "https://example.test/user" }))
+    connectOverCDP.mockRejectedValueOnce(new Error("ECONNREFUSED"))
+    expect(await Effect.runPromise(sandbox.execute("state.setupRan = true"))).toMatchObject({
+      isError: true, setupFailed: true, text: "ECONNREFUSED",
+    })
+    expect(sandbox.getStatus()).toMatchObject({ stateKeys: [] })
+    await Effect.runPromise(sandbox.closeSettled())
+  })
+
   it("finishes an execute with a stalled title and keeps the adopted page usable", async () => {
     vi.useFakeTimers()
     const context = new FakeContext()

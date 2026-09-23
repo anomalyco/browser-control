@@ -32,6 +32,9 @@ const nodeModuleAliases = Object.keys(nodeModules).join(", ")
 
 const playwrightCloseTimeoutMs = 2_000
 const playwrightConnectTimeoutMs = 15_000
+// CdpRuntime can spend two 3s observation windows replaying shared contexts.
+// Leave room for that healthy reconnect path while bounding adopted setup.
+const adoptedPageConnectTimeoutMs = 8_000
 const sessionPageHealthCheckTimeoutMs = 3_000
 const sessionPageHealthRetryDelayMs = 100
 const handoffPageContextTimeoutMs = 15_000
@@ -54,7 +57,7 @@ class SessionPageRecoveryError extends Schema.TaggedError<SessionPageRecoveryErr
   "Execute.SessionPageRecoveryError",
   {
     message: Schema.String,
-    reason: Schema.Literals(["adopted-unresponsive", "owned-unresponsive", "close-failed", "target-unavailable"]),
+    reason: Schema.Literals(["adopted-unresponsive", "adopted-initialization-timeout", "owned-unresponsive", "close-failed", "target-unavailable"]),
     cause: Schema.Defect(),
   },
 ) {}
@@ -377,6 +380,7 @@ type SnapshotRefRegistry = {
   url?: string
   selectors: Map<string, { readonly selector: string; readonly role: string; readonly name?: string }>
   previousSnapshot?: SnapshotBaseline
+  nextRef?: number
   locatorScopes?: WeakMap<Locator, number>
   nextLocatorScope?: number
   removeNavigationListener?: () => void
@@ -395,7 +399,6 @@ type SnapshotBaseline = {
   readonly page: Page
   readonly signature: string
   readonly entries: readonly SnapshotRenderedEntry[]
-  readonly nextRef: number
 }
 
 type InputTarget = AriaSnapshotTarget
@@ -718,68 +721,36 @@ export class ExecuteSandbox {
   adoptPage(target: AdoptTarget): Effect.Effect<string, Error> {
     const sandbox = this
     return Effect.gen(function* () {
-      if (!sandbox.browser?.isConnected()) {
-        const staleBrowser = sandbox.browser
-        if (staleBrowser) {
-          yield* runSettledPlaywrightOperation({
-            label: "Close stale browser connection before adoption",
-            run: () => staleBrowser.close(),
-          }).pipe(Effect.ignore)
-        }
-        const browser = yield* runSettledPlaywrightOperation({
-          label: "Connect to the relay for session adoption",
-          run: () => chromium.connectOverCDP(sandbox.options.endpointUrl, {
-            timeout: playwrightConnectTimeoutMs,
-            ...(sandbox.options.sessionId ? { headers: { "Browser-Control-Session-Id": sandbox.options.sessionId, "Browser-Control-Client-Kind": "sandbox" } } : {}),
-          }),
-        })
-        sandbox.browser = browser
-        sandbox.page = undefined
-        sandbox.defaultPageTargetId = undefined
-        sandbox.ownsPage = false
-        sandbox.pageHealthCheckRequired = false
-        sandbox.pendingPageTarget = undefined
-        sandbox.networkCapture.bindPage(undefined)
-      }
-      const browser = sandbox.browser
-      if (!browser) {
-        return yield* Effect.fail(new Error("Browser connection unavailable for session adoption"))
-      }
-      const existingContext = browser.contexts()[0]
-      const context = existingContext ?? (yield* runSettledPlaywrightOperation({
-        label: "Create a browser context for session adoption",
-        run: () => browser.newContext(),
-      }))
-      yield* Effect.tryPromise({
-        try: () => registerAriaSnapshotSelector(context),
-        catch: (cause) => cause instanceof Error ? cause : new Error("Register ARIA snapshot selector", { cause }),
-      })
-      const selected = yield* Effect.tryPromise({
-        try: () => waitForPageTarget({ context, targetId: target.targetId, timeoutMs: sessionPageHealthCheckTimeoutMs }),
-        catch: (cause) => cause instanceof Error ? cause : new Error("Select page for session adoption", { cause }),
-      })
-      if (!selected) {
-        return yield* Effect.fail(new Error(`No attached page found for target ${target.targetId} (${target.url})`))
-      }
+      // The manager reserves and validates the exact registry generation. Adoption
+      // binds that identity, not renderer readiness: a cold CDP connection waits
+      // for every announced page to initialize, which a busy user tab cannot do.
       const currentPage = sandbox.page
+      const sameTarget = sandbox.defaultPageTargetId === target.targetId
+      yield* sandbox.networkCapture.cancel()
       if (shouldCloseCurrentPageOnAdopt({
         hasCurrentPage: currentPage !== undefined,
         ownsCurrentPage: sandbox.ownsPage,
-        currentPageIsSelected: currentPage === selected,
+        currentPageIsSelected: sameTarget,
         currentPageIsClosed: currentPage?.isClosed() ?? true,
       }) && currentPage) {
-        sandbox.page = undefined
+        // Keep the old binding until close settles. A failed close must not
+        // publish the new identity or orphan an open relay-owned page.
         yield* runSettledPlaywrightOperation({
           label: "Close the previous session page during adoption",
           run: () => currentPage.close(),
-        }).pipe(Effect.ignore)
+        })
       }
-      sandbox.bindDefaultPage(selected, target.targetId, false, false)
+      sandbox.clearPageListeners()
+      sandbox.page = undefined
+      sandbox.defaultPageTargetId = target.targetId
+      sandbox.ownsPage = false
       sandbox.pageHealthCheckRequired = false
-      sandbox.pendingPageTarget = undefined
-      sandbox.networkCapture.bindPage(selected)
-      return selected.url()
-    })
+      sandbox.pageCrashed = false
+      sandbox.pageProtectedUi = false
+      sandbox.pendingPageTarget = { targetId: target.targetId, warnReplaced: false }
+      sandbox.networkCapture.bindPage(undefined)
+      return target.url
+    }).pipe(Effect.uninterruptible)
   }
 
   private async connectContext(): Promise<{ readonly browser: Browser; readonly context: BrowserContext }> {
@@ -793,10 +764,24 @@ export class ExecuteSandbox {
           run: () => staleBrowser.close(),
         }).pipe(Effect.ignore))
       }
-      this.browser = await chromium.connectOverCDP(this.options.endpointUrl, {
-        timeout: playwrightConnectTimeoutMs,
-        ...(this.options.sessionId ? { headers: { "Browser-Control-Session-Id": this.options.sessionId, "Browser-Control-Client-Kind": "sandbox" } } : {}),
-      })
+      const pendingAdoptedTarget = this.defaultPageTargetId !== undefined && !this.ownsPage
+      try {
+        // Let Playwright own timeout/transport cleanup; never race and abandon
+        // a connect promise that could bind a page after reporting failure.
+        this.browser = await chromium.connectOverCDP(this.options.endpointUrl, {
+          timeout: pendingAdoptedTarget ? adoptedPageConnectTimeoutMs : playwrightConnectTimeoutMs,
+          ...(this.options.sessionId ? { headers: { "Browser-Control-Session-Id": this.options.sessionId, "Browser-Control-Client-Kind": "sandbox" } } : {}),
+        })
+      } catch (cause) {
+        if (pendingAdoptedTarget && cause instanceof Error && cause.name === "TimeoutError") {
+          throw new SessionPageRecoveryError({
+            message: `Automation connection initialization for the adopted tab did not finish within ${adoptedPageConnectTimeoutMs}ms. The tab and exact target were kept; user code did not run. Retry after the browser or page becomes responsive.`,
+            reason: "adopted-initialization-timeout",
+            cause,
+          })
+        }
+        throw cause
+      }
       this.page = undefined
       if (this.defaultPageTargetId && this.pendingPageTarget?.targetId !== this.defaultPageTargetId) {
         this.pendingPageTarget = { targetId: this.defaultPageTargetId, warnReplaced: false }
@@ -1479,6 +1464,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       registry.selectors.clear()
       delete registry.page
       delete registry.url
+      delete registry.previousSnapshot
     }
     const removeNavigationListener = () => page.off("framenavigated", onFrameNavigated)
     page.on("framenavigated", onFrameNavigated)
@@ -1558,13 +1544,19 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         // Chromium exposes native disclosure controls without an ARIA button role.
         if (element.tagName === "SUMMARY") return "summary"
         if (element instanceof HTMLTextAreaElement) return "textbox"
-        if (element instanceof HTMLSelectElement) return "combobox"
+        if (element instanceof HTMLSelectElement) return element.hasAttribute("multiple") || element.size > 1 ? "listbox" : "combobox"
         if (element instanceof HTMLInputElement) {
           if (element.type === "checkbox") return "checkbox"
           if (element.type === "radio") return "radio"
           if (element.type === "number") return "spinbutton"
+          if (element.type === "range") return "slider"
+          if (["email", "search", "tel", "text", "url"].includes(element.type)) {
+            const listId = element.getAttribute("list")?.trim().split(/\s+/)[0]
+            const list = listId ? (element.getRootNode() as Document | ShadowRoot).getElementById(listId) : null
+            if (list?.tagName === "DATALIST") return "combobox"
+          }
           if (element.type === "search") return "searchbox"
-          if (element.type === "button" || element.type === "submit" || element.type === "reset") return "button"
+          if (element.type === "button" || element.type === "submit" || element.type === "reset" || element.type === "file") return "button"
           return "textbox"
         }
         if (element instanceof HTMLDialogElement) return "dialog"
@@ -1915,7 +1907,8 @@ return (${capture.toString()})(rootOrSettings, locatorSettings)`,
     const compatiblePrevious = previousSnapshot?.page === page && previousSnapshot.signature === signature
       ? previousSnapshot
       : undefined
-    let nextRef = compatiblePrevious?.nextRef ?? 1
+    // Ref ids must not identify a new document or incompatible capture later.
+    let nextRef = registry.nextRef ?? 1
     const reusableRefs = new Map<string, string[]>()
     for (const entry of compatiblePrevious?.entries ?? []) {
       if (!entry.refId) continue
@@ -1931,6 +1924,7 @@ return (${capture.toString()})(rootOrSettings, locatorSettings)`,
       const reused = reusableRefs.get(key)?.shift()
       return { ...entry, refId: reused ?? `e${nextRef++}` }
     })
+    registry.nextRef = nextRef
 
     const registerRef = (entry: SnapshotRenderedEntry, id: string): void => {
       if (!entry.selector || !entry.role) return
@@ -1950,7 +1944,7 @@ return (${capture.toString()})(rootOrSettings, locatorSettings)`,
       const lines = entries.map((entry) => {
         return formatSnapshotLine(entry, entry.refId)
       })
-      registry.previousSnapshot = { page, signature, entries, nextRef }
+      registry.previousSnapshot = { page, signature, entries }
       return options.find === undefined
         ? lines.join("\n")
         : findSnapshotLines(lines, options.find, options.context)
@@ -1975,7 +1969,7 @@ return (${capture.toString()})(rootOrSettings, locatorSettings)`,
       lines.push(formatSnapshotDiffLine("+", operation.entry, operation.entry.refId))
     }
     lines.push(`${additions} ${additions === 1 ? "addition" : "additions"}, ${removals} ${removals === 1 ? "removal" : "removals"}, ${unchanged} unchanged`)
-    registry.previousSnapshot = { page, signature, entries, nextRef }
+    registry.previousSnapshot = { page, signature, entries }
     return lines.join("\n")
   }
 
@@ -2104,9 +2098,11 @@ function snapshotRefAriaRole(role: string): Parameters<Page["getByRole"]>[0] | u
     case "checkbox":
     case "combobox":
     case "link":
+    case "listbox":
     case "menuitem":
     case "radio":
     case "searchbox":
+    case "slider":
     case "spinbutton":
     case "tab":
     case "textbox":

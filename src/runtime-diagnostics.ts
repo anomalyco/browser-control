@@ -1,4 +1,5 @@
 import crypto from "node:crypto"
+import { PageReadTimeoutError } from "./page-read-timeout.ts"
 import type { ExecuteAftermath } from "./relay-schema.ts"
 import type { JsonObject } from "./protocol.ts"
 
@@ -31,6 +32,12 @@ export function executionContextFailureDiagnostic(cause: unknown, aftermath: Exe
   const kind = runtimeFailureKind(cause)
   if (kind === "cross-extension-page") {
     return "target/cross-extension-page"
+  }
+  for (const error of errorCauses(cause)) {
+    if (error instanceof PageReadTimeoutError) {
+      // This is read-deadline evidence, not a lost context requiring page recovery.
+      return `session-page/context-read-timeout; operation=${error.operation}; timeoutMs=${error.timeoutMs}`
+    }
   }
   if (kind !== "context-destroyed" && kind !== "context-missing") {
     return undefined
@@ -88,20 +95,21 @@ export function boundedToken(value: string | undefined): string {
 }
 
 function errorMessages(cause: unknown): string[] {
-  const messages: string[] = []
+  return errorCauses(cause).flatMap((error) => error instanceof Error ? [error.message] : typeof error === "string" ? [error] : [])
+}
+
+function errorCauses(cause: unknown): unknown[] {
+  const causes: unknown[] = []
   const seen = new Set<unknown>()
   let current = cause
   for (let depth = 0; depth < 5 && current !== undefined && current !== null && !seen.has(current); depth++) {
     seen.add(current)
+    causes.push(current)
     if (current instanceof Error) {
-      messages.push(current.message)
       current = current.cause
       continue
     }
-    if (typeof current === "string") {
-      messages.push(current)
-    }
     break
   }
-  return messages
+  return causes
 }
