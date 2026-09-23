@@ -3,7 +3,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import type { Page, Request, Response } from "playwright-core"
 import * as AuthProfile from "./auth-profile.ts"
-import { type CredentialSlot, SecretCollector } from "./network-redaction.ts"
+import { SecretCollector } from "./network-redaction.ts"
 
 export type NetworkCaptureOptions = {
   readonly urlFilter?: string
@@ -494,8 +494,7 @@ function finishCapture(
     let protectedEntries: readonly CapturedEntry[] | undefined
     if (options.outputPath) {
       const structurallyProtected = active.entries.map((entry) => protectEntry(entry, collector))
-      const slots = collector.slots()
-      protectedEntries = structurallyProtected.map((entry) => redactEntryKnownValues(entry, slots))
+      protectedEntries = structurallyProtected.map((entry) => redactEntryKnownValues(entry, collector))
     } else if (secrets) {
       for (const entry of active.entries) protectEntry(entry, collector)
     }
@@ -640,39 +639,37 @@ function protectCapturedBody(
     : { ...body, text }
 }
 
-function redactEntryKnownValues(entry: CapturedEntry, slots: readonly CredentialSlot[]): CapturedEntry {
+function redactEntryKnownValues(entry: CapturedEntry, collector: SecretCollector): CapturedEntry {
   return {
     ...entry,
     request: {
       ...entry.request,
-      ...(entry.request.body?.text ? { body: redactStructuredBody(entry.request.body, slots) } : {}),
+      ...(entry.request.body?.text ? { body: redactStructuredBody(entry.request.body, collector) } : {}),
     },
     ...(entry.response ? {
       response: {
         ...entry.response,
-        ...(entry.response.body?.text ? { body: redactStructuredBody(entry.response.body, slots) } : {}),
+        ...(entry.response.body?.text ? { body: redactStructuredBody(entry.response.body, collector) } : {}),
       },
     } : {}),
   }
 }
 
-function redactStructuredBody(body: CapturedBody, slots: readonly CredentialSlot[]): CapturedBody {
+function redactStructuredBody(body: CapturedBody, collector: SecretCollector): CapturedBody {
   if (!body.text || !body.mimeType.toLowerCase().includes("json")) return body
   try {
-    return { ...body, text: JSON.stringify(redactKnownScalars(JSON.parse(body.text), slots)) }
+    return { ...body, text: JSON.stringify(redactKnownScalars(JSON.parse(body.text), collector)) }
   } catch {
     return { size: body.size, mimeType: body.mimeType, truncated: true }
   }
 }
 
-function redactKnownScalars(value: unknown, slots: readonly CredentialSlot[]): unknown {
-  if (Array.isArray(value)) return value.map((item) => redactKnownScalars(item, slots))
+function redactKnownScalars(value: unknown, collector: SecretCollector): unknown {
+  if (Array.isArray(value)) return value.map((item) => redactKnownScalars(item, collector))
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactKnownScalars(item, slots)]))
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactKnownScalars(item, collector)]))
   }
-  const serialized = typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? String(value) : undefined
-  const slot = serialized === undefined ? undefined : slots.find((candidate) => candidate.value.length >= 8 && candidate.value === serialized)
-  return slot ? `\${${slot.ref}}` : value
+  return collector.redactExactValue(value, 8)
 }
 
 function toHarEntry(entry: CapturedEntry): Record<string, unknown> {

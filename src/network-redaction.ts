@@ -22,6 +22,8 @@ export class SecretCollector {
   private readonly slotsByRef = new Map<string, MutableCredentialSlot>()
   private readonly refsByValue = new Map<string, string>()
   private readonly refsBySource = new Map<string, string>()
+  // Retired values are redaction-only: never include them in persisted profile slots.
+  private readonly retiredSlots = new Map<string, CredentialSlot>()
   private nextRef = 1
   private updated = new Set<string>()
   private observed = new Set<string>()
@@ -58,20 +60,26 @@ export class SecretCollector {
   }
 
   protectUrl(rawUrl: string, requestScope = ""): string {
-    let url: URL
-    try {
-      url = new URL(rawUrl)
-    } catch {
-      return protectRelativeUrl(rawUrl, (name, value, occurrence) => this.reference(
-        value,
-        sourceName(requestScope, `query.${name}`, occurrence),
-      ))
-    }
-    url.search = protectSearchParams(url.searchParams, (name, value, occurrence) => this.reference(
+    const fragmentStart = rawUrl.indexOf("#")
+    const base = fragmentStart < 0 ? rawUrl : rawUrl.slice(0, fragmentStart)
+    const protectQuery = (name: string, value: string, occurrence: number) => this.reference(
       value,
       sourceName(requestScope, `query.${name}`, occurrence),
-    )).toString()
-    return restoreReferencePlaceholders(url.toString())
+    )
+    let protectedUrl: string
+    try {
+      const url = new URL(base)
+      url.search = protectSearchParams(url.searchParams, protectQuery).toString()
+      protectedUrl = restoreReferencePlaceholders(url.toString())
+    } catch {
+      protectedUrl = protectRelativeUrl(base, protectQuery)
+    }
+    if (fragmentStart < 0) return protectedUrl
+    const fragment = protectFragment(rawUrl.slice(fragmentStart + 1), (name, value, occurrence) => this.reference(
+      value,
+      sourceName(requestScope, `fragment.${name}`, occurrence),
+    ))
+    return `${protectedUrl}#${fragment}`
   }
 
   protectBody(body: string, contentType: string | undefined, location: "request" | "response", requestScope = ""): string | undefined {
@@ -109,11 +117,26 @@ export class SecretCollector {
   }
 
   redactText(text: string): string {
-    return redactKnownValues(text, this.slots())
+    return redactKnownValues(text, this.redactionSlots())
   }
 
   redactValue(value: unknown): unknown {
-    return redactKnownValue(value, this.slots())
+    return redactKnownValue(value, this.redactionSlots())
+  }
+
+  redactExactValue(value: unknown, minimumLength: number): unknown {
+    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") return value
+    const serialized = String(value)
+    if (serialized.length < minimumLength) return value
+    for (const slot of this.slotsByRef.values()) {
+      if (slot.value === serialized) return `\${${slot.ref}}`
+    }
+    const retired = this.retiredSlots.get(serialized)
+    return retired ? `\${${retired.ref}}` : value
+  }
+
+  private redactionSlots(): readonly CredentialSlot[] {
+    return [...this.slots(), ...this.retiredSlots.values()]
   }
 
   private protectHeader(name: string, value: string, source: string): string {
@@ -218,6 +241,7 @@ export class SecretCollector {
           return `\${${sourceRef}}`
         }
         if (slot.sources.length === 1) {
+          this.retiredSlots.set(slot.value, { ref: slot.ref, value: slot.value, sources: [] })
           if (this.refsByValue.get(slot.value) === sourceRef) this.refsByValue.delete(slot.value)
           slot.value = value
           const expiresAt = jwtExpiration(value)
@@ -293,6 +317,25 @@ function protectSearchParams(
     result.append(name, value && secretNamePattern.test(name) ? protect(name, value, occurrence) : value)
   }
   return result
+}
+
+function protectFragment(
+  fragment: string,
+  protect: (name: string, value: string, occurrence: number) => string,
+): string {
+  const occurrences = new Map<string, number>()
+  return fragment.split("&").map((part) => {
+    const separator = part.indexOf("=")
+    if (separator < 1) return part
+    const entry = new URLSearchParams(part).entries().next().value
+    if (!entry) return part
+    const [name, value] = entry
+    // Recognize parameter names, not route/anchor text containing token-like words.
+    if (!/^[\w.-]+$/.test(name) || !secretNamePattern.test(name)) return part
+    const occurrence = occurrences.get(name) ?? 0
+    occurrences.set(name, occurrence + 1)
+    return value ? `${part.slice(0, separator + 1)}${protect(name, value, occurrence)}` : part
+  }).join("&")
 }
 
 function sourceName(requestScope: string, location: string, occurrence = 0): string {

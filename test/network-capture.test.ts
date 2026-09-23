@@ -239,6 +239,30 @@ describe("NetworkCapture", () => {
     await Effect.runPromise(recorder.cancel())
   })
 
+  it("redacts rotated credentials from output and artifact echoes while saving only the latest value", async () => {
+    const directory = await temporaryDirectory()
+    const outputPath = path.join(directory, "capture.har")
+    const page = new FakePage()
+    const recorder = new Recorder({ authProfileBaseDir: directory })
+    await Effect.runPromise(recorder.start(page as unknown as Page))
+    for (const value of ["original-token", "rotated-token"]) {
+      page.exchange({
+        requestHeaders: [{ name: "Authorization", value: `Bearer ${value}` }],
+        responseHeaders: [{ name: "Content-Type", value: "application/json" }],
+        responseBody: Buffer.from(JSON.stringify({ echo: value })),
+      })
+      await recorder.settleForOutput()
+    }
+    const text = recorder.redactText("original-token rotated-token")
+    await Effect.runPromise(recorder.stop({ outputPath, secrets: "rotation" }))
+    const artifact = await fs.readFile(outputPath, "utf8")
+    const profile = await Effect.runPromise(AuthProfile.read("rotation", { baseDir: directory }))
+    expect.soft(text).toBe("${BC_SECRET_1} ${BC_SECRET_1}")
+    expect(artifact).not.toContain("original-token")
+    expect(artifact).not.toContain("rotated-token")
+    expect(profile.slots).toEqual([expect.objectContaining({ ref: "BC_SECRET_1", value: "rotated-token" })])
+  })
+
   it("fails execute output closed while a matching request is still pending", async () => {
     const page = new FakePage()
     const recorder = new Recorder({ outputSettleTimeoutMs: 10 })

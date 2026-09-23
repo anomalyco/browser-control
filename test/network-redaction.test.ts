@@ -112,6 +112,50 @@ describe("SecretCollector", () => {
     expect(collector.updatedRefs()).toEqual([])
   })
 
+  it("retains rotated values for output redaction without persisting history", () => {
+    const collector = new SecretCollector([{ ref: "BC_SECRET_4", value: "old-token", sources: ["request.header.authorization"] }])
+    for (const value of ["middle-token", "latest-token"]) {
+      collector.protectHeaders([{ name: "Authorization", value: `Bearer ${value}` }], "request")
+    }
+    expect(collector.redactText("old-token middle-token latest-token ${BC_SECRET_4}"))
+      .toBe("${BC_SECRET_4} ${BC_SECRET_4} ${BC_SECRET_4} ${BC_SECRET_4}")
+    expect(collector.redactValue({ echoes: ["old-token", "middle-token", "latest-token"] }))
+      .toEqual({ echoes: ["${BC_SECRET_4}", "${BC_SECRET_4}", "${BC_SECRET_4}"] })
+    expect(collector.slots()).toEqual([{ ref: "BC_SECRET_4", value: "latest-token", sources: ["request.header.authorization"] }])
+    expect(new SecretCollector(collector.slots()).redactText("old-token middle-token latest-token"))
+      .toBe("old-token middle-token ${BC_SECRET_4}")
+  })
+
+  it.each(["https://example.com/callback", "/callback", "", "//example.com/callback"])("protects OAuth fragments in Location URLs: %s", (base) => {
+    const collector = new SecretCollector()
+    expect(collector.protectHeaders([{
+      name: "Location",
+      value: `${base}#access_token=first-token&id_token=second-token&access_token=third-token&label=a%20b&flag`,
+    }], "response")).toEqual([{
+      name: "Location",
+      value: `${base}#access_token=\${BC_SECRET_1}&id_token=\${BC_SECRET_2}&access_token=\${BC_SECRET_3}&label=a%20b&flag`,
+    }])
+    expect(collector.slots().map((slot) => slot.sources)).toEqual([
+      ["response.header.location.url.fragment.access_token"],
+      ["response.header.location.url.fragment.id_token"],
+      ["response.header.location.url.fragment.access_token.1"],
+    ])
+  })
+
+  it("keeps query and fragment credential sources independent", () => {
+    const collector = new SecretCollector()
+    expect(collector.protectUrl("/callback?access_token=query-token#access_token=fragment-token"))
+      .toBe("/callback?access_token=${BC_SECRET_1}#access_token=${BC_SECRET_2}")
+    expect(collector.slots().map((slot) => slot.value)).toEqual(["query-token", "fragment-token"])
+  })
+
+  it.each(["#public%20anchor", "#tab=hello%20world&flag", "#/route?tab=public", "#section?access_token=public-text"])("preserves public fragments verbatim: %s", (fragment) => {
+    const collector = new SecretCollector()
+    expect(collector.protectUrl(`/callback${fragment}`)).toBe(`/callback${fragment}`)
+    expect(collector.protectUrl(`https://example.com/callback${fragment}`)).toBe(`https://example.com/callback${fragment}`)
+    expect(collector.slots()).toEqual([])
+  })
+
   it("keeps credentials from different request sources independent", () => {
     const collector = new SecretCollector()
     const first = collector.protectHeaders([{ name: "Authorization", value: "Bearer first" }], "request", "GET https://one.example/api")
