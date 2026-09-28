@@ -1,5 +1,20 @@
 # @opencode-ai/browser-control
 
+## 0.8.3
+
+### Patch Changes
+
+- 34726b9: Keep handoff deadlines and exact-target cancellation active after human completion while the start action is still settling. Timeout or target loss disconnects the sandbox before execution resumes, preventing a stuck start action from hanging the execute call indefinitely.
+- 124da97: Avoid the Runtime reset wait when reconnecting a canonical CDP client to a live target with valid cached execution contexts. Replay missing contexts only to that client after its frame-tree response, preserve target and ownership validation, and retain bounded recovery for cache misses and command aliases.
+- 34726b9: Name bounded page.title() failures with a session-page/context-read-timeout diagnostic and the operation's timeout budget. The diagnostic reports an unavailable or busy execution-context read without claiming renderer failure or activating page recovery. Ordinary locator timeouts remain unclassified, and protected extension UI retains its more specific diagnosis.
+- 7393e6b: Serialize same-session callers behind durable lifecycle commits and rollbacks so concurrent creation, ensure, reset, and deletion cannot acknowledge or replace uncommitted identities. Clean up child targets and cached frame events when a staged-only root detaches.
+- da7c8d2: Support `BROWSER_CONTROL_AUTOSTART=false` for externally supervised relays. Ordinary calls fail if the relay is unavailable instead of starting a detached replacement; existing relays and explicit restart commands retain their normal behavior.
+- f5ae66a: Update to Effect 4.0.0-rc.118 and Playwright 1.63. MCP tool failures now follow the updated Effect MCP server behavior: an `isError` tool result on protocol 2025-11-25, and JSON-RPC `-32603` rather than `-32602` on older protocols.
+- 34726b9: Adopt attached user tabs by exact target identity without waiting for a responsive renderer. Resolve Playwright pages lazily with a bounded native connection timeout, preserve adopted targets after setup failure, and report when user code did not run.
+- c2ea370: Keep rotated credentials in transient redaction memory so execute output and captured JSON echoes remain protected while auth profiles retain only current values. Protect OAuth credential fragment parameters in absolute and relative redirect URLs while preserving public fragment text.
+- 34726b9: Invalidate compact snapshot diff baselines on main-frame navigation and keep old reference IDs retired after a new capture. Correct native roles for multi-select and sized selects, range and file inputs, and datalist-backed text controls so their snapshot references resolve through Playwright.
+- 4463bbe: Clear relay tab state when a tab detaches before its root target commits, and close a race that could let two same-ID session lifecycle changes proceed together.
+
 ## 0.8.2
 
 ### Patch Changes
