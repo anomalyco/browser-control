@@ -84,7 +84,7 @@ function runCli(args: string[]) {
   return command
 }
 
-describe("CLI opt-in boolean flags", () => {
+describe("CLI opt-in boolean flags", { timeout: 15_000 }, () => {
   // These verify CLI/HTTP contracts, not latency. Let the existing 10s child
   // deadline report first, with time left for teardown before the next test.
   it.each([false, true])("execute accepts --json supplied=%s", async (json) => {
@@ -97,7 +97,7 @@ describe("CLI opt-in boolean flags", () => {
     }
     expect(stderr).toBe(`Session: ${session.id}. Continue with --session ${session.id}.\n`)
     expect(requests).toEqual([{ route: "POST /cli/execute", body: { code: "return 1", createIfMissing: true } }])
-  }, 15_000)
+  })
 
   it.each([false, true])("session adopt creates the target session when needed explicit=%s", async (explicit) => {
     const { stdout, stderr } = await runCli(["session", "adopt", "--target-url", "example.test", ...(explicit ? ["--session", session.id] : [])])
@@ -108,7 +108,7 @@ describe("CLI opt-in boolean flags", () => {
       route: "POST /cli/session/adopt",
       body: { ...(explicit ? { sessionId: session.id } : {}), createIfMissing: true, targetSelection: { urlIncludes: "example.test" } },
     }])
-  }, 15_000)
+  })
 
   it.each([false, true])("session new accepts --read-only supplied=%s", async (readOnly) => {
     const { stdout, stderr } = await runCli(["session", "new", ...(readOnly ? ["--read-only"] : [])])
@@ -116,7 +116,7 @@ describe("CLI opt-in boolean flags", () => {
     expect(stdout).toBe(`${session.id}\n`)
     expect(stderr).toBe("")
     expect(requests).toEqual([{ route: "POST /cli/session/new", body: readOnly ? { readOnly: true } : {} }])
-  }, 15_000)
+  })
 
   it.each([false, true])("recording start accepts --audio supplied=%s", async (audio) => {
     const outputPath = path.join(home, "recording.webm")
@@ -125,5 +125,5 @@ describe("CLI opt-in boolean flags", () => {
     expect(stdout).toContain(`Recording started: ${outputPath}`)
     expect(stderr).toBe("")
     expect(requests).toEqual([{ route: "POST /recording/start", body: { outputPath, audio } }])
-  }, 15_000)
+  })
 })

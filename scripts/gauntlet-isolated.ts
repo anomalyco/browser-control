@@ -1,12 +1,17 @@
 #!/usr/bin/env tsx
-import { Cause, Config, Effect, Exit, Option } from "effect"
+import { Cause, Config, Effect, Exit, Option, Schema } from "effect"
+import type { ChildProcess } from "node:child_process"
 import fs from "node:fs/promises"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { chromium } from "playwright-core"
-import { spawnOwned, waitForOwned, type OwnedProcess } from "../gauntlet/owned-process.ts"
+import { cases } from "../gauntlet/cases.ts"
+import { failOnExit, spawnOwned, waitForOwned, type OwnedProcess } from "../gauntlet/owned-process.ts"
+import { parseConfig } from "../gauntlet/report.ts"
+import { defaultPrimaryPort, defaultSecondaryPort } from "../gauntlet/server.ts"
+import { ExtensionStatus, RelayVersion } from "../src/relay-schema.ts"
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const attempt = <A>(run: () => PromiseLike<A>) => Effect.tryPromise({
@@ -20,6 +25,15 @@ const main = Effect.fn("Gauntlet.isolated")(function* () {
   const headed = yield* Config.boolean("GAUNTLET_HEADED").pipe(Config.withDefault(false))
   const executable = yield* Config.option(Config.string("GAUNTLET_BROWSER_PATH"))
   if (timeoutMs < 1) return yield* Effect.fail(new Error("GAUNTLET_TIMEOUT_MS must be a positive integer"))
+  // Reject case selection typos before paying for a build and a browser launch.
+  yield* Effect.try({
+    try: () => parseConfig(
+      { GAUNTLET_CASE: process.env.GAUNTLET_CASE, GAUNTLET_REPEAT: process.env.GAUNTLET_REPEAT, GAUNTLET_WARMUP: process.env.GAUNTLET_WARMUP, GAUNTLET_VERBOSE: process.env.GAUNTLET_VERBOSE },
+      cases.map((testCase) => testCase.name),
+      { primaryPort: defaultPrimaryPort, secondaryPort: defaultSecondaryPort },
+    ),
+    catch: (cause) => cause instanceof Error ? cause : new Error(String(cause)),
+  })
   yield* attempt(() => fs.mkdir(artifactsBase, { recursive: true }))
   const directory = yield* attempt(() => fs.mkdtemp(path.join(artifactsBase, "run-")))
   const home = path.join(directory, "home")
@@ -57,11 +71,12 @@ const main = Effect.fn("Gauntlet.isolated")(function* () {
       GAUNTLET_SECONDARY_PORT: String(ports.secondary),
       GAUNTLET_REPORT: report,
     })
+    const own = (label: string, command: string, args: readonly string[], echo = false) => Effect.acquireRelease(
+      Effect.sync(() => spawnOwned({ command, args, cwd: root, env, logPath: path.join(directory, `${label}.log`), echo })),
+      stop,
+    )
     const command = (label: string, args: readonly string[]) => Effect.scoped(Effect.gen(function* () {
-      const child = yield* Effect.acquireRelease(
-        Effect.sync(() => spawnOwned({ command: process.execPath, args, cwd: root, env, logPath: path.join(directory, `${label}.log`) })),
-        stop,
-      )
+      const child = yield* own(label, process.execPath, args)
       const code = yield* attempt(() => waitForOwned(child, 120_000))
       if (code !== 0) return yield* Effect.fail(new Error(`${label} failed (${code}); see ${directory}/${label}.log`))
     }))
@@ -82,42 +97,32 @@ const main = Effect.fn("Gauntlet.isolated")(function* () {
 
     yield* Effect.scoped(Effect.gen(function* () {
       phase = "relay-startup"
-      const relay = yield* Effect.acquireRelease(
-        Effect.sync(() => spawnOwned({ command: process.execPath, args: [path.join(runtime, "cli.js"), "serve"], cwd: root, env, logPath: path.join(directory, "relay.log") })),
-        stop,
-      )
-      yield* attempt(() => waitForReady(endpoint, false, relay.child))
+      const relay = yield* own("relay", process.execPath, [path.join(runtime, "cli.js"), "serve"])
+      yield* attempt(() => waitForReady(endpoint, relay.child, "/version", (body) => Schema.decodeUnknownOption(RelayVersion)(body).pipe(Option.exists((version) => version.pid === relay.child.pid))))
       phase = "browser-startup"
       // Own Chromium's process group directly so teardown does not depend on a
       // responsive renderer or an unbounded BrowserContext.close() promise.
       const browserPath = Option.isSome(executable) ? executable.value : chromium.executablePath()
-      const browser = yield* Effect.acquireRelease(
-        Effect.sync(() => spawnOwned({
-          command: browserPath,
-          args: [
-            "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
-            "--disable-component-update", "--disable-default-apps", "--disable-sync",
-            "--password-store=basic", "--use-mock-keychain", "--site-per-process",
-            // Chromium's normal test-runner flags; only this synthetic profile is affected.
-            ...(process.platform === "linux" ? ["--no-sandbox"] : []),
-            ...(!headed ? ["--headless=new"] : []),
-            "--remote-debugging-address=127.0.0.1", `--remote-debugging-port=${ports.browser}`,
-            `--user-data-dir=${profile}`, `--disable-extensions-except=${extension}`, `--load-extension=${extension}`,
-            "about:blank",
-          ],
-          cwd: root, env, logPath: path.join(directory, "browser.log"),
-        })),
-        stop,
-      )
+      const browser = yield* own("browser", browserPath, [
+        "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
+        "--disable-component-update", "--disable-default-apps", "--disable-sync",
+        "--password-store=basic", "--use-mock-keychain", "--site-per-process",
+        // Chromium's normal test-runner flags; only this synthetic profile is affected.
+        ...(process.platform === "linux" ? ["--no-sandbox"] : []),
+        ...(!headed ? ["--headless=new"] : []),
+        "--remote-debugging-address=127.0.0.1", `--remote-debugging-port=${ports.browser}`,
+        `--user-data-dir=${profile}`, `--disable-extensions-except=${extension}`, `--load-extension=${extension}`,
+        "about:blank",
+      ])
       yield* attempt(() => Promise.race([
-        waitForReady(endpoint, true, relay.child),
-        browser.exit.then((code) => { throw new Error(`Owned Chromium exited during startup (${code}); inspect browser.log`) }),
+        waitForReady(endpoint, relay.child, "/extension/status", (body) => Schema.decodeUnknownOption(ExtensionStatus)(body).pipe(Option.exists((status) => status.connected))),
+        failOnExit(browser, (code) => `Owned Chromium exited during startup (${code}); inspect browser.log`),
       ]))
       const browserVersion = yield* attempt(async () => {
         const response = await fetch(`http://127.0.0.1:${ports.browser}/json/version`, { signal: AbortSignal.timeout(5_000) })
-        const value: unknown = await response.json()
-        if (!response.ok || typeof value !== "object" || value === null || !("Browser" in value) || typeof value.Browser !== "string") throw new Error("Chromium did not report its version")
-        return value.Browser
+        const version = Schema.decodeUnknownOption(ChromiumVersion)(await response.json())
+        if (!response.ok || Option.isNone(version)) throw new Error("Chromium did not report its version")
+        return version.value.Browser
       })
       yield* attempt(() => fs.writeFile(path.join(directory, "environment.json"), JSON.stringify({
         endpoint, browserVersion, node: process.version, platform: process.platform,
@@ -127,23 +132,17 @@ const main = Effect.fn("Gauntlet.isolated")(function* () {
       console.log(`Ready: ${browserVersion}, private relay ${endpoint}`)
       setupMs = performance.now() - started
       phase = "cases"
-      const runner = yield* Effect.acquireRelease(
-        Effect.sync(() => spawnOwned({ command: process.execPath, args: ["--import", "tsx", "scripts/gauntlet.ts"], cwd: root, env, logPath: path.join(directory, "gauntlet.log"), echo: true })),
-        stop,
-      )
+      const runner = yield* own("gauntlet", process.execPath, ["--import", "tsx", "scripts/gauntlet.ts"], true)
       const code = yield* attempt(() => Promise.race([
         waitForOwned(runner, timeoutMs),
-        relay.exit.then((exitCode) => { throw new Error(`Owned relay exited during the run (${exitCode}); refusing to continue against a replacement`) }),
-        browser.exit.then((exitCode) => { throw new Error(`Owned Chromium exited during the run (${exitCode})`) }),
+        failOnExit(relay, (exitCode) => `Owned relay exited during the run (${exitCode}); refusing to continue against a replacement`),
+        failOnExit(browser, (exitCode) => `Owned Chromium exited during the run (${exitCode})`),
       ]))
       if (code !== 0) return yield* Effect.fail(new Error(`Gauntlet failed (${code}); evidence retained at ${directory}`))
-      yield* attempt(async () => {
-        const result: unknown = JSON.parse(await fs.readFile(report, "utf8"))
-        if (typeof result !== "object" || result === null || !("ok" in result) || result.ok !== true ||
-          !("results" in result) || !Array.isArray(result.results) || result.results.length === 0) {
-          throw new Error("Gauntlet exited successfully without a successful nonempty result receipt")
-        }
-      })
+      const receipt = yield* attempt(async () => JSON.parse(await fs.readFile(report, "utf8")) as unknown)
+      if (!Schema.is(SuccessfulReceipt)(receipt)) {
+        return yield* Effect.fail(new Error("Gauntlet exited successfully without a successful nonempty result receipt"))
+      }
       phase = "cleanup"
     }))
   }).pipe(Effect.onExit((exit) => attempt(async () => {
@@ -172,13 +171,13 @@ const main = Effect.fn("Gauntlet.isolated")(function* () {
   console.log(`PASS isolated gauntlet; report ${report}`)
 })
 
+const ChromiumVersion = Schema.Struct({ Browser: Schema.String })
+const SuccessfulReceipt = Schema.Struct({ ok: Schema.Literal(true), results: Schema.NonEmptyArray(Schema.Unknown) })
+
 /** Node adapter boundary: never inherit an agent's browser target or identity. */
 function isolatedEnvironment(home: string, overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env = { ...process.env }
-  for (const key of Object.keys(env)) {
-    if (key.startsWith("BROWSER_CONTROL_") || ["GAUNTLET_CLI", "GAUNTLET_PRIMARY_PORT", "GAUNTLET_SECONDARY_PORT", "GAUNTLET_REPORT"].includes(key)) delete env[key]
-  }
-  return { ...env, HOME: home, USERPROFILE: home, ...overrides }
+  const inherited = Object.entries(process.env).filter(([key]) => !key.startsWith("BROWSER_CONTROL_"))
+  return { ...Object.fromEntries(inherited), HOME: home, USERPROFILE: home, ...overrides }
 }
 
 async function reservePorts(): Promise<{ relay: number; primary: number; secondary: number; browser: number }> {
@@ -201,21 +200,17 @@ async function reservePorts(): Promise<{ relay: number; primary: number; seconda
   }
 }
 
-async function waitForReady(endpoint: string, extension: boolean, child: import("node:child_process").ChildProcess): Promise<void> {
+async function waitForReady(endpoint: string, relay: ChildProcess, route: string, ready: (body: unknown) => boolean): Promise<void> {
   const deadline = performance.now() + 30_000
   while (performance.now() < deadline) {
-    if (child.exitCode !== null || child.signalCode !== null) throw new Error("Owned relay exited during startup; inspect relay.log")
+    if (relay.exitCode !== null || relay.signalCode !== null) throw new Error("Owned relay exited during startup; inspect relay.log")
     try {
-      const response = await fetch(new URL(extension ? "/extension/status" : "/version", endpoint), { signal: AbortSignal.timeout(1_000) })
-      if (response.ok) {
-        const value: unknown = await response.json()
-        if (!extension && typeof value === "object" && value !== null && "pid" in value && value.pid === child.pid) return
-        if (extension && typeof value === "object" && value !== null && "connected" in value && value.connected === true) return
-      }
+      const response = await fetch(new URL(route, endpoint), { signal: AbortSignal.timeout(1_000) })
+      if (response.ok && ready(await response.json())) return
     } catch { /* Startup connection refusal is expected until our owned process binds. */ }
     await new Promise((resolve) => setTimeout(resolve, 100))
   }
-  throw new Error(`${extension ? "Extension" : "Relay"} did not become ready at ${endpoint} within 30s`)
+  throw new Error(`${endpoint}${route} did not become ready within 30s`)
 }
 
 if (import.meta.main) {

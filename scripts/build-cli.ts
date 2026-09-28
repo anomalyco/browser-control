@@ -5,17 +5,15 @@ import { fileURLToPath } from "node:url"
 import { parseArgs, promisify } from "node:util"
 import { build } from "esbuild"
 import { Config, ConfigProvider, Effect, Schema } from "effect"
+import { prepareBuildOutput } from "./build-output.ts"
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const { values } = parseArgs({ options: { outdir: { type: "string" } } })
-const requested = path.resolve(await Effect.runPromise(
-  Config.string("outdir").pipe(Config.withDefault(path.join(root, "dist")))
+const defaultOutput = path.join(root, "dist")
+const dist = await prepareBuildOutput(root, defaultOutput, await Effect.runPromise(
+  Config.string("outdir").pipe(Config.withDefault(defaultOutput))
     .parse(ConfigProvider.fromUnknown(values)),
 ))
-const dist = path.join(await fs.realpath(path.dirname(requested)), path.basename(requested))
-if (dist !== path.join(root, "dist") && (dist === root || root.startsWith(`${dist}${path.sep}`) || dist.startsWith(`${root}${path.sep}`))) {
-  throw new Error("Alternate build output must be outside the source checkout")
-}
 
 const packageJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Struct({ version: Schema.String })))(
   await fs.readFile(path.join(root, "package.json"), "utf8"),
@@ -23,9 +21,6 @@ const packageJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Struct
 const buildId = new Date().toISOString()
 const execFileAsync = promisify(execFile)
 
-if (dist === path.join(root, "dist")) await fs.rm(dist, { recursive: true, force: true })
-// A custom output is a fresh candidate, never permission to delete another tree.
-await fs.mkdir(dist)
 await Promise.all([
   build({
     entryPoints: {

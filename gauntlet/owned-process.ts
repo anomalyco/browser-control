@@ -92,17 +92,7 @@ export function spawnOwned(options: {
     }
     // Also await pipe/log closure, but an escaped descendant holding a pipe must
     // not turn finalization into an unbounded wait.
-    let timer: ReturnType<typeof setTimeout> | undefined
-    try {
-      await Promise.race([
-        exit,
-        new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error("Owned process output did not close after termination")), 2_000)
-        }),
-      ])
-    } finally {
-      if (timer) clearTimeout(timer)
-    }
+    await withDeadline(exit, 2_000, "Owned process output did not close after termination")
   }
   return {
     child,
@@ -113,16 +103,26 @@ export function spawnOwned(options: {
 }
 
 export async function waitForOwned(process: OwnedProcess, timeoutMs: number): Promise<number> {
+  try {
+    return await withDeadline(process.exit, timeoutMs, `Owned process exceeded ${timeoutMs}ms deadline`)
+  } finally {
+    await process.stop()
+  }
+}
+
+/** Reject once an owned process exits, e.g. a browser or relay that must outlive a phase. */
+export function failOnExit(process: OwnedProcess, message: (code: number) => string): Promise<never> {
+  return process.exit.then((code) => { throw new Error(message(code)) })
+}
+
+async function withDeadline<A>(promise: Promise<A>, timeoutMs: number, message: string): Promise<A> {
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     return await Promise.race([
-      process.exit,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`Owned process exceeded ${timeoutMs}ms deadline`)), timeoutMs)
-      }),
+      promise,
+      new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(message)), timeoutMs) }),
     ])
   } finally {
-    if (timer) clearTimeout(timer)
-    await process.stop()
+    clearTimeout(timer)
   }
 }

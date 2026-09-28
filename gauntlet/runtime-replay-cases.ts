@@ -3,7 +3,7 @@ import { chromium } from "playwright-core"
 import type { GauntletCase } from "./cases.ts"
 import { assert, boundedCleanup, endpointUrl, playwright } from "./harness.ts"
 
-/** Run only through the isolated runner: the first client remains connected during reconnect. */
+/** The first raw client stays connected while a second canonical client reconnects; prefer the isolated runner, where no unrelated CDP clients share the relay. */
 export const runtimeReplayCases: readonly GauntletCase[] = [{
   name: "runtime-context-replay",
   summary: "Canonical reconnect reuses live contexts without replacing the first client's worlds",

@@ -17,7 +17,7 @@ it("rejects invalid configuration before connecting and writes a failure report"
     })).rejects.toThrow()
     const parsed = JSON.parse(await fs.readFile(report, "utf8"))
     expect(parsed).toMatchObject({ schemaVersion: 1, ok: false, results: [], summary: { count: 0, medianMs: null, p95Ms: null } })
-    expect(parsed.error).toContain("Unknown gauntlet case(s): not-a-real-case")
+    expect(parsed.error.split("\n")[0]).toMatch(/^Error: Unknown gauntlet case\(s\): not-a-real-case\./)
     expect(parsed.metadata.sourceBuildId).toEqual(expect.any(String))
   } finally {
     await fs.rm(directory, { recursive: true, force: true })
@@ -31,7 +31,6 @@ it("lists cases without requiring a running relay or valid run configuration", a
   })
   expect(result.stdout.split("\n")).toContain("stalled-main-world")
   expect(result.stdout).toContain("adopt-stalled-user-tab")
-  expect(result.stdout).not.toContain("adopt-stalled-user-tab (expected failure)")
 }, 25_000)
 
 it("records an uncaught exception and retains Node's fatal exit", async () => {

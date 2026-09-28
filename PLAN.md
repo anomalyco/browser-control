@@ -739,7 +739,7 @@ commands never replace a running relay.
   and an authenticated adopted tab without automating credentials, tokens, or
   production account state.
 
-## Reliability feedback loop
+## Reliability
 
 Canonical CDP clients can replay validated execution-context descriptions after
 their frame-tree response and successful Runtime enable acknowledgment. Replay
@@ -754,17 +754,10 @@ watchdogs report an operation-specific context-read timeout without triggering
 page replacement or blocking cached URL reads. A timeout alone does not prove
 renderer unresponsiveness.
 
-The gauntlet's automated path owns a disposable Chromium profile, a built real
-MV3 shim, an isolated relay/HOME and fixture ports. `pnpm gauntlet:isolated`
-tests the current checkout without selecting or restarting the active runtime.
-The launcher disables automatic relay startup for case clients and monitors its
-owned relay/browser processes so a crash cannot silently replace the candidate.
-Keep unit regressions browser-free and synchronize lifecycle races explicitly.
-Run a short real-extension PR lane and repeat the hostile suite nightly; preserve
-per-attempt evidence, exact expected-failure signatures and cleanup failures.
-Warmups do not enter latency summaries and correctness failures are never retried
-into green. See `docs/RELIABILITY.md` for commands, coverage limits, research and
-the next fault-injection/performance work.
+`pnpm gauntlet:isolated` tests the current checkout through a disposable
+Chromium profile, the real MV3 shim and a private relay without touching the
+active runtime. Correctness failures are never retried into green. See
+`docs/RELIABILITY.md` for CI lanes, evidence boundaries and next work.
 
 Durable same-ID session lifecycle operations serialize publication and rollback;
 an existing in-flight identity is not a durable acknowledgment. Credential

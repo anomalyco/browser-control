@@ -58,7 +58,10 @@ const main = Effect.fn("Gauntlet.main")(function* () {
   }
   reportPath = env.GAUNTLET_REPORT
   if (args.length) return yield* Effect.fail(new Error(`Unknown arguments: ${args.join(" ")}`))
-  config = yield* Effect.try(() => parseConfig(env, cases.map((item) => item.name), { primaryPort: defaultPrimaryPort, secondaryPort: defaultSecondaryPort }))
+  config = yield* Effect.try({
+    try: () => parseConfig(env, cases.map((item) => item.name), { primaryPort: defaultPrimaryPort, secondaryPort: defaultSecondaryPort }),
+    catch: (cause) => cause instanceof Error ? cause : new Error(String(cause)),
+  })
   const { repeatCount, warmupCount, primaryPort, secondaryPort, cliOverride, selected } = config
   verbose = config.verbose
   const selectedCases = cases.filter((testCase) => selected.includes(testCase.name))
@@ -90,8 +93,12 @@ const main = Effect.fn("Gauntlet.main")(function* () {
       (running) => boundedCleanup("close fixture servers", () => running.close()),
     )
     yield* Console.log(`fixtures: ${servers.primaryOrigin} (primary), ${servers.secondaryOrigin} (secondary)`)
+    const runs = [
+      ...range(warmupCount).map((index) => ({ iteration: index + 1, warmup: true })),
+      ...range(repeatCount).map((index) => ({ iteration: index + 1, warmup: false })),
+    ].flatMap((run) => selectedCases.map((testCase) => ({ ...run, testCase })))
     return yield* Effect.forEach(
-      range(warmupCount + repeatCount).flatMap((index) => selectedCases.map((testCase) => ({ iteration: index < warmupCount ? index + 1 : index - warmupCount + 1, warmup: index < warmupCount, testCase }))),
+      runs,
       ({ testCase, iteration, warmup }) => runCase({ testCase, iteration, warmup, cli, servers }).pipe(Effect.scoped, Effect.tap((result) => Effect.sync(() => { results.push(result); delete metadata.activeCase })), Effect.tap(printCaseResult)),
       { concurrency: 1, discard: true },
     )
@@ -118,7 +125,8 @@ const runCase = Effect.fn("Gauntlet.runCase")(function* (options: {
   metadata.activeCase = { name: testCase.name, iteration: options.iteration, warmup: options.warmup }
   // This watchdog lives outside the case fiber: an uninterruptible teardown
   // cannot defeat it. The isolated parent then retires the owned relay/browser.
-  const deadlineMs = testCase.budgetMs + (testCase.userTabCleanupGraceMs ?? 15_000) + 10_000
+  const cleanupGraceMs = testCase.userTabCleanupGraceMs ?? 15_000
+  const deadlineMs = testCase.budgetMs + cleanupGraceMs + 10_000
   yield* Effect.acquireRelease(
     Effect.sync(() => setTimeout(() => {
       throw new Error(`Gauntlet case ${testCase.name} exceeded its ${deadlineMs}ms hard deadline (including cleanup)`)
@@ -133,7 +141,7 @@ const runCase = Effect.fn("Gauntlet.runCase")(function* (options: {
   const start = yield* Clock.currentTimeMillis
   // Case assertions throw synchronously inside generators; surface them as
   // typed failures so they are reported like any other case error.
-  const attempt = withUserTab((page) => testCase.run(page, ctx), testCase.userTabCleanupGraceMs ?? 15_000).pipe(
+  const attempt = withUserTab((page) => testCase.run(page, ctx), cleanupGraceMs).pipe(
     Effect.catchDefect((defect) => Effect.fail(defect instanceof Error ? defect : new Error(`gauntlet case defect: ${formatValue(defect)}`))),
   )
   const outcome = yield* Effect.result(attempt)
@@ -143,9 +151,11 @@ const runCase = Effect.fn("Gauntlet.runCase")(function* (options: {
   const cleanup = yield* Effect.result(waitForRelayCleanup(leakCheck))
   const cleanupError = cleanup._tag === "Failure" ? formatError(cleanup.failure) : undefined
   const leaks = cleanup._tag === "Success" ? resourceLeaks({ after: cleanup.success, ...leakCheck }) : undefined
-  if (leaks) notes.push(`leaked relay resources: ${leaks}`)
-
-  if (cleanupError) notes.push(`cleanup verification failed: ${cleanupError}`)
+  const errors = [
+    outcome._tag === "Failure" ? formatError(outcome.failure) : undefined,
+    leaks ? `Gauntlet case leaked relay resources: ${leaks}` : undefined,
+    cleanupError ? `Cleanup verification failed: ${cleanupError}` : undefined,
+  ].filter((error) => error !== undefined)
   const status = classifyCase({ error: outcome._tag === "Failure" ? outcome.failure : undefined, leaks, cleanupError, expectedFailure: testCase.expectedFailure, durationMs, budgetMs: testCase.budgetMs })
   return {
     name: testCase.name,
@@ -157,7 +167,7 @@ const runCase = Effect.fn("Gauntlet.runCase")(function* (options: {
     ...(testCase.expectedFailure ? { expectedFailure: testCase.expectedFailure } : {}),
     notes,
     ...(outcome._tag === "Success" ? { value: outcome.success } : {}),
-    ...((outcome._tag === "Failure" || leaks || cleanupError) ? { error: [outcome._tag === "Failure" ? formatError(outcome.failure) : undefined, leaks ? `Gauntlet case leaked relay resources: ${leaks}` : undefined, cleanupError].filter(Boolean).join("\n") } : {}),
+    ...(errors.length ? { error: errors.join("\n") } : {}),
   }
 })
 

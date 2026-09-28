@@ -8,6 +8,7 @@ import {
   assertTabPreserved,
   playwright,
   sleep,
+  withSession,
   type ExecuteEnvelope,
   type GauntletContext,
   type OwnerCdpPage,
@@ -45,21 +46,6 @@ const stallReleasedExpression = "new Promise((resolve) => { const check = () => 
 function valueObject(envelope: ExecuteEnvelope): Record<string, unknown> {
   return envelope.value && typeof envelope.value === "object" && !Array.isArray(envelope.value) ? envelope.value as Record<string, unknown> : {}
 }
-
-const withSession = <A>(ctx: GauntletContext, body: (sessionId: string) => Effect.Effect<A, Error>): Effect.Effect<A, Error> =>
-  Effect.gen(function* () {
-    const sessionId = yield* ctx.createSession()
-    return yield* Effect.gen(function* () {
-      const before = yield* ctx.sessionTargets(sessionId)
-      const original = before[0]
-      assert(before.length === 1 && original, "fixture session must start with exactly one owned target", before)
-      return yield* body(sessionId).pipe(Effect.ensuring(Effect.gen(function* () {
-        const after = yield* ctx.sessionTargets(sessionId)
-        assert(after.length === 1 && after[0]?.id === original.id && after[0]?.tabId === original.tabId,
-          "fixture replaced its original physical tab or target", { before, after })
-      }).pipe(Effect.orDie)))
-    }).pipe(Effect.ensuring(ctx.deleteSession(sessionId)))
-  })
 
 export const cases: readonly GauntletCase[] = [
   ...snapshotCases,

@@ -529,13 +529,6 @@ existence, and report the viewport, state, and interaction path actually tested.
 
 ## Troubleshooting
 
-When developing Browser Control, use `pnpm gauntlet:isolated` in the source
-checkout for repeatable local fixtures through a disposable real extension and
-relay. `GAUNTLET_CASE=<name>` narrows the run; `GAUNTLET_REPEAT=3` retains three
-attempts without retrying failures into success. Reports and logs are saved in
-the printed evidence directory. This does not test personal account state or
-replace the active browser/relay. See `docs/RELIABILITY.md` in the repository.
-
 1. Run `browser-control doctor`; it checks package metadata, CLI/relay build
    identity, extension protocol compatibility, sessions, targets, and artifacts.
 2. Use `status --json` to inspect exact sessions and target ownership.

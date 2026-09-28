@@ -533,14 +533,9 @@ GAUNTLET_CASE=cross-origin-payment-iframe pnpm gauntlet:isolated
 GAUNTLET_WARMUP=1 GAUNTLET_REPEAT=9 pnpm gauntlet:isolated
 ```
 
-Each run retains JSON results, measured median/p95 timings, and build/relay logs.
-`GAUNTLET_ARTIFACT_DIR` chooses the evidence parent directory;
-`GAUNTLET_TIMEOUT_MS` bounds the owned case process (default ten minutes).
-Warmups are excluded from measured timings but their failures still fail the run.
-The temporary profile/HOME are removed after verified browser and relay cleanup;
-they are retained if process cleanup fails.
-See [the reliability loop](docs/RELIABILITY.md) for CI lanes, evidence boundaries,
-research, and the next fault-injection work.
+Each run prints its evidence directory with JSON results, timings, and logs.
+See [the reliability loop](docs/RELIABILITY.md) for options, CI lanes, evidence
+boundaries, and the next fault-injection work.
 
 `pnpm gauntlet` runs an adversarial suite of locally served hostile pages against
 the live relay and browser. Each case reproduces one real-world behaviour that
@@ -581,7 +576,8 @@ To add a fixture: drop a self-contained `gauntlet/fixtures/<name>.html` (no
 external network; explain the hostile mechanism in a leading HTML comment; take
 tunables from the query string), add any dynamic route to `gauntlet/server.ts`,
 and add a `GauntletCase` to `gauntlet/cases.ts` whose `run` drives the CLI via
-`ctx.execute` and ends with `assertTabPreserved`. Cases that need a user-owned
+`ctx.execute`, usually inside `withSession`, which asserts the session kept its
+original tab and target (or call `assertTabPreserved` directly). Cases that need a user-owned
 tab receive one as `page`; set `userTabCleanupGraceMs` if the fixture can leave
 that tab's renderer busy at cleanup time.
 

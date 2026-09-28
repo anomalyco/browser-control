@@ -49,7 +49,9 @@ GAUNTLET_HEADED=true pnpm gauntlet:isolated
 the full Chromium channel installed for the lockfile's Playwright version;
 branded browsers may reject extension sideload flags. `GAUNTLET_ARTIFACT_DIR`
 selects the parent of a fresh `run-*` evidence directory. `GAUNTLET_TIMEOUT_MS`
-sets the outer case-process deadline (default ten minutes).
+sets the outer case-process deadline (default ten minutes). The temporary
+profile and HOME are removed only after verified browser and relay cleanup;
+they are retained for inspection when process cleanup fails.
 
 The launcher builds the CLI and shim outside the checkout, allocates private
 ports, uses a temporary HOME/catalog and Chromium profile, and selects the
@@ -116,9 +118,9 @@ future work; do not parallelize cases inside one shared browser just for speed.
 
 - Named fixture barriers for navigation, WAIT acknowledgment, worker attach and
   server responses; remove wall-clock phase guesses as cases are revisited.
-- Real reconnect, MV3 suspension, relay restart and nested OOPIF cases. Use
-  cross-site hosts with site isolation and assert child target attachment;
-  different ports alone do not prove OOPIF coverage.
+- Relay restart, MV3 suspension and nested OOPIF cases. Keep using cross-site
+  hosts with site isolation and assert child target attachment; different ports
+  alone do not prove OOPIF coverage.
 - Same-browser multi-session/stale-client scenarios with exact ownership and
   event visibility assertions before and after failure.
 - Mutation cancellation/outcome checks: a timeout alone must not be mistaken

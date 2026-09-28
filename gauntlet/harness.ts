@@ -92,6 +92,22 @@ export function assert(condition: unknown, message: string, details?: unknown): 
  * on the fixture URL, and no about:blank replacement or silent new page was
  * created.
  */
+/** Run a case body in a fresh session and assert it kept its original physical tab and target. */
+export const withSession = <A>(ctx: GauntletContext, body: (sessionId: string) => Effect.Effect<A, Error>): Effect.Effect<A, Error> =>
+  Effect.gen(function* () {
+    const sessionId = yield* ctx.createSession()
+    return yield* Effect.gen(function* () {
+      const before = yield* ctx.sessionTargets(sessionId)
+      const original = before[0]
+      assert(before.length === 1 && original, "fixture session must start with exactly one owned target", before)
+      return yield* body(sessionId).pipe(Effect.ensuring(Effect.gen(function* () {
+        const after = yield* ctx.sessionTargets(sessionId)
+        assert(after.length === 1 && after[0]?.id === original.id && after[0]?.tabId === original.tabId,
+          "fixture replaced its original physical tab or target", { before, after })
+      }).pipe(Effect.orDie)))
+    }).pipe(Effect.ensuring(ctx.deleteSession(sessionId)))
+  })
+
 export const assertTabPreserved = Effect.fnUntraced(function* (
   ctx: GauntletContext,
   options: { readonly sessionId: string; readonly urlIncludes: string; readonly envelopes?: readonly ExecuteEnvelope[]; readonly label?: string },
