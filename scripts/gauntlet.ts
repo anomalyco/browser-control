@@ -54,7 +54,7 @@ const main = Effect.fn("Gauntlet.main")(function* () {
   }
   const env: Record<string, string | undefined> = {}
   for (const key of ["GAUNTLET_REPORT", "GAUNTLET_CASE", "GAUNTLET_REPEAT", "GAUNTLET_WARMUP", "GAUNTLET_CLI", "GAUNTLET_PRIMARY_PORT", "GAUNTLET_SECONDARY_PORT", "GAUNTLET_VERBOSE", "BROWSER_CONTROL_ENDPOINT"]) {
-    env[key] = Option.getOrUndefined(yield* Config.option(Config.string(key)))
+    env[key] = Option.getOrUndefined(yield* Config.option(Config.String(key)))
   }
   reportPath = env.GAUNTLET_REPORT
   if (args.length) return yield* Effect.fail(new Error(`Unknown arguments: ${args.join(" ")}`))

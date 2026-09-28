@@ -85,7 +85,7 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
   }
 
   if (relayWasAbsent) {
-    const autoStart = yield* Config.boolean("BROWSER_CONTROL_AUTOSTART").pipe(
+    const autoStart = yield* Config.Boolean("BROWSER_CONTROL_AUTOSTART").pipe(
       Config.withDefault(true),
       Effect.mapError((cause) => new Error("Invalid BROWSER_CONTROL_AUTOSTART configuration", { cause })),
     )

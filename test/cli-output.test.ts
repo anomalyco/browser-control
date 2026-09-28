@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 import { NodeServices } from "@effect/platform-node"
 import { Effect, Option } from "effect"
-import { Command } from "effect/unstable/cli"
+import { Command } from "effect/cli"
 
 vi.mock("@effect/platform-node", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@effect/platform-node")>()

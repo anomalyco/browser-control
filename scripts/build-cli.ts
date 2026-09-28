@@ -11,7 +11,7 @@ const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const { values } = parseArgs({ options: { outdir: { type: "string" } } })
 const defaultOutput = path.join(root, "dist")
 const dist = await prepareBuildOutput(root, defaultOutput, await Effect.runPromise(
-  Config.string("outdir").pipe(Config.withDefault(defaultOutput))
+  Config.String("outdir").pipe(Config.withDefault(defaultOutput))
     .parse(ConfigProvider.fromUnknown(values)),
 ))
 

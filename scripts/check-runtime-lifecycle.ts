@@ -1,7 +1,7 @@
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
 import { ConfigProvider, Console, Effect, Schedule, Schema } from "effect"
-import { Command, Flag } from "effect/unstable/cli"
-import { FetchHttpClient } from "effect/unstable/http"
+import { Command, Flag } from "effect/cli"
+import { FetchHttpClient } from "effect/http"
 import assert from "node:assert/strict"
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process"
 import { randomUUID } from "node:crypto"
@@ -247,8 +247,8 @@ const check = Effect.fn("LifecycleCheck.run")(function* (options: { previous: st
 })
 
 Command.make("check-runtime-lifecycle", {
-  previous: Flag.string("previous").pipe(Flag.withDescription("Absolute standalone install prefix; requires shutdown protocol 2")),
-  candidate: Flag.string("candidate").pipe(Flag.withDescription("Absolute standalone install prefix with a strictly later build id")),
+  previous: Flag.String("previous").pipe(Flag.withDescription("Absolute standalone install prefix; requires shutdown protocol 2")),
+  candidate: Flag.String("candidate").pipe(Flag.withDescription("Absolute standalone install prefix with a strictly later build id")),
 }, (options) => check(options).pipe(Effect.scoped, Effect.flatMap(Console.log))).pipe(
   Command.run({ version: "1" }), Effect.provide(NodeServices.layer), NodeRuntime.runMain,
 )

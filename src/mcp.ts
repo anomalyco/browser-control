@@ -1,6 +1,6 @@
 import { NodeStdio } from "@effect/platform-node"
 import { Config, Context, Effect, Layer, Option } from "effect"
-import { McpProtocol, McpSchema, McpServer } from "effect/unstable/ai"
+import { McpProtocol, McpSchema, McpServer } from "effect/ai"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -490,7 +490,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
 const registerTools = Effect.gen(function* () {
   const server = yield* McpServer.McpServer
   const relay = yield* RelayClient.Service
-  const configuredSession = Option.getOrUndefined(yield* Config.option(Config.string("BROWSER_CONTROL_SESSION")))
+  const configuredSession = Option.getOrUndefined(yield* Config.option(Config.String("BROWSER_CONTROL_SESSION")))
   const currentSession: CurrentSession = {
     id: configuredSession || `mcp-${crypto.randomUUID().slice(0, 8)}`,
     established: Boolean(configuredSession),

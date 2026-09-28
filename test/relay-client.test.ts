@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { Effect } from "effect"
-import { FetchHttpClient } from "effect/unstable/http"
+import { FetchHttpClient } from "effect/http"
 import http from "node:http"
 import * as RelayClient from "../src/relay-client.ts"
 import type { RelayShutdownRequest } from "../src/relay-schema.ts"

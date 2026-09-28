@@ -1,5 +1,5 @@
 import { Config, Context, Effect, Layer, Option, Schema } from "effect"
-import { FetchHttpClient, HttpClient, HttpClientRequest, type HttpClientResponse } from "effect/unstable/http"
+import { FetchHttpClient, HttpClient, HttpClientRequest, type HttpClientResponse } from "effect/http"
 import {
   type AuthProfileRequest,
   type AuthenticatedJsonRequest,
@@ -51,7 +51,7 @@ import {
  * the relay's own error message as the top-level message.
  */
 
-export const portConfig = Config.int("BROWSER_CONTROL_PORT").pipe(Config.withDefault(19989))
+export const portConfig = Config.Int("BROWSER_CONTROL_PORT").pipe(Config.withDefault(19989))
 
 /**
  * Extra `chrome-extension://<id>` origins to allowlist for the extension
@@ -59,7 +59,7 @@ export const portConfig = Config.int("BROWSER_CONTROL_PORT").pipe(Config.withDef
  * installs whose path-derived id cannot match the relay's bundled path. Parsed
  * by `parseAdditionalExtensionOrigins`.
  */
-export const extensionOriginsConfig = Config.string("BROWSER_CONTROL_EXTENSION_ORIGINS").pipe(Config.withDefault(""))
+export const extensionOriginsConfig = Config.String("BROWSER_CONTROL_EXTENSION_ORIGINS").pipe(Config.withDefault(""))
 
 export const endpointForPort = (port: number): string => `http://127.0.0.1:${port}`
 

@@ -602,7 +602,7 @@ reconciles existing client announcements, browser grouping, and page status.
 
 ### The relay owns orchestration
 
-- Node-side code uses Effect v4 (`4.0.0-rc.112`), with matching
+- Node-side code uses Effect v4 (`4.0.0-rc.118`), with matching
   `@effect/platform-node`. The local `effect` checkout is the API and pattern
   reference; the former `effect-smol` repository is archived.
 - Effect-returning functions prefer `Effect.fn` or `Effect.fnUntraced`.

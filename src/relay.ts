@@ -498,9 +498,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     refreshPageStatus(tabId)
     refreshTabGrouping(tabId)
   }
-  const managed = yield* Config.boolean("BROWSER_CONTROL_MANAGED_RELAY").pipe(Config.withDefault(false))
-  const restartTimeoutMs = yield* Config.int("BROWSER_CONTROL_RESTART_TIMEOUT_MS").pipe(Config.withDefault(10_000))
-  const restartRequestId = yield* Config.option(Config.string("BROWSER_CONTROL_RESTART_REQUEST_ID"))
+  const managed = yield* Config.Boolean("BROWSER_CONTROL_MANAGED_RELAY").pipe(Config.withDefault(false))
+  const restartTimeoutMs = yield* Config.Int("BROWSER_CONTROL_RESTART_TIMEOUT_MS").pipe(Config.withDefault(10_000))
+  const restartRequestId = yield* Config.option(Config.String("BROWSER_CONTROL_RESTART_REQUEST_ID"))
   const lifecycleLogPath = path.join(path.dirname(defaultSessionCatalogPath(port)), "lifecycle.jsonl")
   const audit = (event: RelayLifecycleEvent) => Effect.try(() => appendRelayLifecycleEvent(lifecycleLogPath, event))
   const settleRootWork = Effect.fnUntraced(function* () {
@@ -555,7 +555,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     relayRequestHandler(request, response)
   })
 
-  const debugEnabled = yield* Config.boolean("BROWSER_CONTROL_DEBUG").pipe(Config.withDefault(false))
+  const debugEnabled = yield* Config.Boolean("BROWSER_CONTROL_DEBUG").pipe(Config.withDefault(false))
   const debugLog = debugEnabled ? (line: string) => console.error(`[bc ${new Date().toISOString().slice(11, 23)}] ${line}`) : undefined
   const contextDebugLog = debugLog ? (line: string) => debugLog(`[bc:ctx] ${line}`) : undefined
   const websocketServer = new WebSocketServer({ noServer: true })

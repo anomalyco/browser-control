@@ -20,10 +20,10 @@ const attempt = <A>(run: () => PromiseLike<A>) => Effect.tryPromise({
 })
 
 const main = Effect.fn("Gauntlet.isolated")(function* () {
-  const artifactsBase = yield* Config.string("GAUNTLET_ARTIFACT_DIR").pipe(Config.withDefault(path.join(os.tmpdir(), "browser-control-gauntlet")))
-  const timeoutMs = yield* Config.int("GAUNTLET_TIMEOUT_MS").pipe(Config.withDefault(600_000))
-  const headed = yield* Config.boolean("GAUNTLET_HEADED").pipe(Config.withDefault(false))
-  const executable = yield* Config.option(Config.string("GAUNTLET_BROWSER_PATH"))
+  const artifactsBase = yield* Config.String("GAUNTLET_ARTIFACT_DIR").pipe(Config.withDefault(path.join(os.tmpdir(), "browser-control-gauntlet")))
+  const timeoutMs = yield* Config.Int("GAUNTLET_TIMEOUT_MS").pipe(Config.withDefault(600_000))
+  const headed = yield* Config.Boolean("GAUNTLET_HEADED").pipe(Config.withDefault(false))
+  const executable = yield* Config.option(Config.String("GAUNTLET_BROWSER_PATH"))
   if (timeoutMs < 1) return yield* Effect.fail(new Error("GAUNTLET_TIMEOUT_MS must be a positive integer"))
   // Reject case selection typos before paying for a build and a browser launch.
   yield* Effect.try({

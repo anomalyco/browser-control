@@ -1,6 +1,6 @@
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
 import { Console, Effect, Schema } from "effect"
-import { Command, Flag } from "effect/unstable/cli"
+import { Command, Flag } from "effect/cli"
 import { execFile, spawn } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import fs from "node:fs/promises"
@@ -340,13 +340,13 @@ export const selectRuntime = Effect.fn("RuntimeInstall.select")(function* (optio
 
 const command = Command.make("runtime").pipe(Command.withSubcommands([
   Command.make("prepare", {
-    source: Flag.string("source").pipe(Flag.withDefault(root)),
-    staging: Flag.string("staging").pipe(Flag.withDescription("Fresh absolute staging directory outside the checkout; parent must exist")),
-    install: Flag.string("install").pipe(Flag.withDescription("Fresh absolute standalone install directory; parent must exist")),
+    source: Flag.String("source").pipe(Flag.withDefault(root)),
+    staging: Flag.String("staging").pipe(Flag.withDescription("Fresh absolute staging directory outside the checkout; parent must exist")),
+    install: Flag.String("install").pipe(Flag.withDescription("Fresh absolute standalone install directory; parent must exist")),
   }, (options) => prepareRuntime(options).pipe(Effect.flatMap((result) => Console.log(JSON.stringify(result, null, 2))))),
   Command.make("select", {
-    install: Flag.string("install").pipe(Flag.withDescription("Absolute directory of a validated candidate")),
-    active: Flag.string("active").pipe(Flag.withDescription("Absolute shared symlink path; parent must exist")),
+    install: Flag.String("install").pipe(Flag.withDescription("Absolute directory of a validated candidate")),
+    active: Flag.String("active").pipe(Flag.withDescription("Absolute shared symlink path; parent must exist")),
   },
     (options) => selectRuntime(options).pipe(Effect.flatMap((result) => Console.log(JSON.stringify(result, null, 2))))),
 ]))

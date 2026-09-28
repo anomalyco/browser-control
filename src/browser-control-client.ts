@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url"
 import { Context, Effect, Layer, Redacted, Schema } from "effect"
-import { FetchHttpClient } from "effect/unstable/http"
+import { FetchHttpClient } from "effect/http"
 import * as AuthenticatedOriginInternal from "./authenticated-origin.ts"
 import * as RelayClient from "./relay-client.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"

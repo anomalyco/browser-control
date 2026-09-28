@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { ConfigProvider, Effect, Layer, Queue, Schema, Sink, Stdio, Stream } from "effect"
-import { McpSchema, McpServer } from "effect/unstable/ai"
+import { McpSchema, McpServer } from "effect/ai"
 import { spawn } from "node:child_process"
 import fs from "node:fs/promises"
 import { mcpErrorMessage, mcpServerLayer, mcpToolRequiresRelayCompatibility, mcpToolsLayer, toolResultForValue } from "../src/mcp.ts"
