@@ -6,6 +6,7 @@ import {
   createSnapshotHelpers,
   defaultAriaSnapshotTimeoutMs,
   fillInputs,
+  formatNodeContextWarning,
   pageTargetId,
   runUserCode,
 } from "../src/execute.ts"
@@ -123,6 +124,26 @@ describe("user code execution", () => {
       },
     })
     expect(page.off).toHaveBeenCalledTimes(3)
+  })
+
+  it("explains page globals and relative fetch used from Node-side execute code", async () => {
+    const page = {
+      isClosed: vi.fn(() => false),
+      url: vi.fn(() => "https://example.com"),
+      on: vi.fn(),
+      off: vi.fn(),
+      mainFrame: vi.fn(() => ({})),
+    }
+    const globals = { page, handoffTracker: { count: 0 }, modules: {} } as never
+    const failure = (code: string) => runUserCode({ code, globals }).then(
+      () => { throw new Error("expected user code to fail") },
+      (error: { readonly originalError: Error }) => error.originalError,
+    )
+
+    expect(formatNodeContextWarning(await failure("return window.location.href"))).toContain("`window` is undefined")
+    expect(formatNodeContextWarning(await failure('return await fetch("/api/me")'))).toContain("page.evaluate(() => fetch(...))")
+    expect(formatNodeContextWarning(await failure("return missingHelper()"))).toBeUndefined()
+    expect(formatNodeContextWarning(new Error("page.evaluate: ReferenceError: window is not defined"))).toBeUndefined()
   })
 })
 

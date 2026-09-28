@@ -323,7 +323,9 @@ diffs include visible page content: inspect for private information before shari
 
 Execute code can use `page`, `context`, `browser`, persistent `state`, selected
 Node modules through `modules` and aliases such as `fs` and `path`, plus the
-Browser Control helpers documented here. Single expressions auto-return;
+Browser Control helpers documented here. Execute code runs in Node. Use
+`page.evaluate` for `window`, `document`, storage, and same-origin `fetch`
+with page cookies. Single expressions auto-return;
 multi-statement scripts need `return`. Use `--file` for longer scripts:
 
 ```bash
