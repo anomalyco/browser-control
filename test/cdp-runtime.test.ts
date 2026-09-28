@@ -9,6 +9,7 @@ import type { ChildTarget, ConnectedTarget } from "../src/relay-types.ts"
 import { TargetRegistry } from "../src/target-registry.ts"
 
 type Command = Parameters<ConstructorParameters<typeof CdpRuntime>[0]["send"]>[0]
+type Viewer = { readonly events: CdpEvent[] }
 
 function root(tabId = 1, sessionId = "root-session", targetId = "root-target"): ConnectedTarget {
   return {
@@ -17,8 +18,12 @@ function root(tabId = 1, sessionId = "root-session", targetId = "root-target"): 
   }
 }
 
-function context(sessionId: string, isDefault = true): CdpEvent {
-  return { sessionId, method: "Runtime.executionContextCreated", params: { context: { id: 1, auxData: { isDefault, frameId: "fixture-frame" } } } }
+function context(sessionId: string, isDefault = true, id = 1): CdpEvent {
+  return { sessionId, method: "Runtime.executionContextCreated", params: { context: { id, auxData: { isDefault, frameId: "fixture-frame" } } } }
+}
+
+function frameTree(frameId = "fixture-frame"): JsonObject {
+  return { frameTree: { frame: { id: frameId } } }
 }
 
 function fixture() {
@@ -30,8 +35,8 @@ function fixture() {
   }
   registry.addRootTarget(target)
   registry.addChildTarget(child)
-  const clients = new CdpClientPool<object>(() => {})
-  const client = {}
+  const clients = new CdpClientPool<Viewer>(() => {}, (viewer, sessionId) => runtime.detach(viewer, sessionId))
+  const client: Viewer = { events: [] }
   clients.register(client, "owner")
   const router = new CdpRouter(clients, registry)
   const commands: Command[] = []
@@ -41,9 +46,10 @@ function fixture() {
     generation: number
     intercept: (command: Command) => Effect.Effect<JsonObject, Error> | undefined
   } = { generation: 1, intercept: () => undefined }
-  const runtime = new CdpRuntime({
+  const runtime = new CdpRuntime<Viewer>({
     registry,
     generation: () => state.generation,
+    sendEvent: (viewer, event) => viewer.events.push(event),
     send: (command) => Effect.suspend(() => {
       commands.push(command)
       sent.openUnsafe()
@@ -62,31 +68,29 @@ describe("CdpRuntime", () => {
   const replayFixture = () => {
     const f = fixture()
     const route = { tabId: f.target.tabId, rootSessionId: f.target.sessionId }
-    const events: CdpEvent[] = []
     const permitted = () => f.clients.has(f.client) && f.router.session(f.client, route.rootSessionId) !== undefined
     const response = f.runtime.frameTreeResponse(f.client, route, permitted)
-    const frameSent = () => response("fixture-frame")
-    const enable = () => f.runtime.enable(route, {}, permitted, { client: f.client, send: (event) => events.push(event) })
-    return { ...f, route, events, frameSent, enable }
+    const frameSent = () => response(frameTree())
+    const enable = () => f.runtime.enable(route, {}, permitted, f.client)
+    return { ...f, route, events: f.client.events, frameSent, enable }
   }
 
   it("replays full contexts to a second canonical client without advancing the clock or resetting Runtime", async () => {
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const f = replayFixture()
-      const firstClient = {}
-      const firstEvents: CdpEvent[] = []
-      f.runtime.frameTreeResponse(firstClient, f.route, () => true)("fixture-frame")
+      const firstClient: Viewer = { events: [] }
+      f.runtime.frameTreeResponse(firstClient, f.route, () => true)(frameTree())
       const event: CdpEvent = { sessionId: f.target.sessionId, method: "Runtime.executionContextCreated", params: {
         context: { id: 7, uniqueId: "fixture-unique", name: "", origin: "https://example.test", auxData: { isDefault: true, frameId: "fixture-frame" } },
       } }
       f.runtime.notify(event)
-      f.runtime.deliver(firstClient, event, () => firstEvents.push(event))
+      f.runtime.deliver(firstClient, event)
       f.frameSent()
       expect(yield* f.enable()).toBe(f.firstResult)
       expect(f.events).toEqual([event])
-      expect(firstEvents).toEqual([event])
+      expect(firstClient.events).toEqual([event])
       // Native duplicates after replay must not replace Playwright's existing world.
-      f.runtime.deliver(f.client, event, () => f.events.push(event))
+      f.runtime.deliver(f.client, event)
       expect(f.events).toEqual([event])
       expect(f.commands.map((command) => command.method)).toEqual(["Runtime.enable"])
     })).pipe(Effect.provide(TestClock.layer())))
@@ -110,13 +114,15 @@ describe("CdpRuntime", () => {
     })).pipe(Effect.provide(TestClock.layer())))
   })
 
-  it.each(["destroyed", "cleared", "disable", "disable-in-flight", "replacement", "generation", "ownership", "disconnect", "visibility"])("rejects cached contexts after %s", async (kind) => {
+  it.each(["destroyed", "cleared", "frame-detached", "overflow", "disable", "disable-in-flight", "replacement", "generation", "ownership", "disconnect", "visibility"])("rejects cached contexts after %s", async (kind) => {
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const f = replayFixture()
       f.runtime.notify(context(f.target.sessionId))
       f.frameSent()
       if (kind === "destroyed") f.runtime.notify({ sessionId: f.target.sessionId, method: "Runtime.executionContextDestroyed", params: { executionContextId: 1 } })
       if (kind === "cleared") f.runtime.notify({ sessionId: f.target.sessionId, method: "Runtime.executionContextsCleared" })
+      if (kind === "frame-detached") f.runtime.notify({ sessionId: f.target.sessionId, method: "Page.frameDetached", params: { frameId: "fixture-frame" } })
+      if (kind === "overflow") for (let id = 2; id <= 513; id++) f.runtime.notify(context(f.target.sessionId, false, id))
       if (kind === "disable" || kind === "disable-in-flight") {
         const done = f.runtime.beginDisable(f.target.tabId)
         if (kind === "disable") done()
@@ -163,7 +169,8 @@ describe("CdpRuntime", () => {
       if (kind === "ownership") f.registry.reserveTargetOwnership(f.target.targetInfo.targetId, "other")
       if (kind === "disconnect") { f.runtime.disconnect(f.client); f.clients.unregister(f.client) }
       if (kind === "announcement") {
-        f.runtime.deliver(f.client, { method: "Target.detachedFromTarget", params: { sessionId: f.target.sessionId } }, () => {})
+        f.clients.announce(f.client, f.target)
+        f.clients.detach(f.client, f.target.sessionId)
         f.clients.unregister(f.client)
       }
       f.frameSent()
@@ -195,11 +202,9 @@ describe("CdpRuntime", () => {
   it("preserves raw canonical clients that never request a frame tree", async () => {
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const f = fixture()
-      const events: CdpEvent[] = []
       f.state.intercept = () => { f.runtime.notify(context(f.target.sessionId)); return undefined }
-      expect(yield* f.runtime.enable({ tabId: 1, rootSessionId: f.target.sessionId }, {}, () => true,
-        { client: f.client, send: (event) => events.push(event) })).toBe(f.firstResult)
-      expect(events).toEqual([])
+      expect(yield* f.runtime.enable({ tabId: 1, rootSessionId: f.target.sessionId }, {}, () => true, f.client)).toBe(f.firstResult)
+      expect(f.client.events).toEqual([])
       expect(f.commands).toHaveLength(1)
     })).pipe(Effect.provide(TestClock.layer())))
   })
@@ -231,7 +236,7 @@ describe("CdpRuntime", () => {
       f.frameSent()
       yield* f.enable()
       f.runtime.detach(f.client, f.target.sessionId)
-      f.runtime.frameTreeResponse(f.client, f.route, () => true)("fixture-frame")
+      f.runtime.frameTreeResponse(f.client, f.route, () => true)(frameTree())
       yield* f.enable()
       expect(f.events).toEqual([context(f.target.sessionId), context(f.target.sessionId)])
       expect(f.commands.map((command) => command.method)).toEqual(["Runtime.enable", "Runtime.enable"])
@@ -247,27 +252,28 @@ describe("CdpRuntime", () => {
       }
       f.registry.addChildTarget(grandchild)
       const targets = [f.target, f.child, grandchild]
-      const client: { events: CdpEvent[] } = { events: [] }
-      const other: { events: CdpEvent[] } = { events: [] }
-      const pool = new CdpClientPool<typeof client>((viewer, event) => f.runtime.deliver(viewer, event, () => viewer.events.push(event)))
+      const client: Viewer = { events: [] }
+      const other: Viewer = { events: [] }
+      const pool = new CdpClientPool<Viewer>((viewer, event) => f.runtime.deliver(viewer, event), (viewer, sessionId) => f.runtime.detach(viewer, sessionId))
       const router = new CdpRouter(pool, f.registry)
       const routeFor = (target: ConnectedTarget | ChildTarget) => ({
         tabId: target.tabId, rootSessionId: f.target.sessionId,
         ...(target === f.target ? {} : { chromeSessionId: target.sessionId }),
       })
-      const permitted = (viewer: typeof client, sessionId: string) => () => pool.hasSession(viewer, sessionId) && router.session(viewer, sessionId) !== undefined
-      const response = (viewer: typeof client, target: ConnectedTarget | ChildTarget) =>
+      // Deliberately omit announcement checks: the pool's retirement sink alone must retire requesters.
+      const permitted = (viewer: Viewer, sessionId: string) => () => router.session(viewer, sessionId) !== undefined
+      const response = (viewer: Viewer, target: ConnectedTarget | ChildTarget) =>
         f.runtime.frameTreeResponse(viewer, routeFor(target), permitted(viewer, target.sessionId))
-      const enable = (viewer: typeof client, target: ConnectedTarget | ChildTarget) =>
-        f.runtime.enable(routeFor(target), {}, permitted(viewer, target.sessionId), { client: viewer, send: (event) => viewer.events.push(event) })
-      const oldResponses = new Map<string, (frameId: string) => void>()
+      const enable = (viewer: Viewer, target: ConnectedTarget | ChildTarget) =>
+        f.runtime.enable(routeFor(target), {}, permitted(viewer, target.sessionId), viewer)
+      const oldResponses = new Map<string, (result: unknown) => void>()
       for (const viewer of [client, other]) {
         pool.register(viewer)
         for (const target of targets) {
           pool.announce(viewer, target)
           const sent = response(viewer, target)
           if (viewer === client) oldResponses.set(target.sessionId, sent)
-          sent("fixture-frame")
+          sent(frameTree())
           f.runtime.notify(context(target.sessionId))
           yield* enable(viewer, target)
         }
@@ -275,18 +281,17 @@ describe("CdpRuntime", () => {
       }
       const detached = kind === "root" ? f.target : f.child
       const retired = kind === "root" ? targets : [f.child, grandchild]
-      // Match the relay's explicit Target.detachFromTarget transition.
-      for (const sessionId of pool.detach(client, detached.sessionId)) f.runtime.detach(client, sessionId)
+      pool.detach(client, detached.sessionId)
       for (const target of retired) pool.announce(client, target)
       client.events.length = 0
       for (const target of retired) {
         const sent = response(client, target)
-        oldResponses.get(target.sessionId)?.("fixture-frame")
+        oldResponses.get(target.sessionId)?.(frameTree())
         const fiber = yield* enable(client, target).pipe(Effect.forkChild)
         yield* TestClock.adjust(1)
         expect(fiber.pollUnsafe()).toBeUndefined()
         expect(client.events).toEqual([])
-        sent("fixture-frame")
+        sent(frameTree())
         expect(yield* Fiber.join(fiber)).toBe(f.firstResult)
         expect(client.events).toEqual([context(target.sessionId)])
         client.events.length = 0
@@ -299,6 +304,39 @@ describe("CdpRuntime", () => {
       expect(other.events).toEqual([])
       expect(client.events).toEqual([])
       expect(f.commands.every((command) => command.method === "Runtime.enable")).toBe(true)
+    })).pipe(Effect.provide(TestClock.layer())))
+  })
+
+  it("keeps a default context that Chrome reports before its frame navigation event", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const f = replayFixture()
+      // A restored renderer session re-reports live contexts before any later
+      // frameNavigated; only destroyed or cleared events retire contexts.
+      f.runtime.notify({ sessionId: f.target.sessionId, method: "Runtime.executionContextsCleared" })
+      f.runtime.notify(context(f.target.sessionId))
+      f.runtime.notify({ sessionId: f.target.sessionId, method: "Page.frameNavigated", params: { frame: { id: "fixture-frame", loaderId: "next", url: "https://example.test/next" } } })
+      f.frameSent()
+      const fiber = yield* f.enable().pipe(Effect.forkChild)
+      yield* TestClock.adjust(6_000)
+      expect(yield* Fiber.join(fiber)).toBe(f.firstResult)
+      expect(f.events).toEqual([context(f.target.sessionId)])
+      expect(f.commands.map((command) => command.method)).toEqual(["Runtime.enable"])
+    })).pipe(Effect.provide(TestClock.layer())))
+  })
+
+  it("resumes caching after an overflowed session clears its contexts", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const f = replayFixture()
+      for (let id = 2; id <= 514; id++) f.runtime.notify(context(f.target.sessionId, false, id))
+      f.runtime.notify(context(f.target.sessionId))
+      f.runtime.notify({ sessionId: f.target.sessionId, method: "Runtime.executionContextsCleared" })
+      f.runtime.notify(context(f.target.sessionId))
+      f.frameSent()
+      const fiber = yield* f.enable().pipe(Effect.forkChild)
+      yield* TestClock.adjust(6_000)
+      expect(yield* Fiber.join(fiber)).toBe(f.firstResult)
+      expect(f.events).toEqual([context(f.target.sessionId)])
+      expect(f.commands).toHaveLength(1)
     })).pipe(Effect.provide(TestClock.layer())))
   })
 
@@ -324,16 +362,15 @@ describe("CdpRuntime", () => {
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       const f = fixture()
       const route = { tabId: f.target.tabId, rootSessionId: f.target.sessionId, chromeSessionId: f.child.sessionId }
-      const events: CdpEvent[] = []
-      f.runtime.frameTreeResponse(f.client, route, () => f.router.session(f.client, f.child.sessionId) !== undefined)("fixture-frame")
+      f.runtime.frameTreeResponse(f.client, route, () => f.router.session(f.client, f.child.sessionId) !== undefined)(frameTree())
       const event = context(f.child.sessionId)
       f.runtime.notify(event)
       if (replace) f.registry.addChildTarget({ ...f.child, targetInfo: { ...f.child.targetInfo, targetId: "replacement-child" } })
-      const fiber = yield* f.runtime.enable(route, {}, () => f.router.session(f.client, f.child.sessionId) !== undefined,
-        { client: f.client, send: (event) => events.push(event) }).pipe(Effect.exit, Effect.forkChild)
+      const fiber = yield* f.runtime.enable(route, {}, () => f.router.session(f.client, f.child.sessionId) !== undefined, f.client)
+        .pipe(Effect.exit, Effect.forkChild)
       if (replace) yield* TestClock.adjust(6_000)
       yield* Fiber.join(fiber)
-      expect(events).toEqual(replace ? [] : [event])
+      expect(f.client.events).toEqual(replace ? [] : [event])
       expect(f.commands[0]).toEqual({ tabId: 1, sessionId: f.child.sessionId, method: "Runtime.enable", params: {} })
     })).pipe(Effect.provide(TestClock.layer())))
   })
@@ -609,7 +646,7 @@ describe("CdpRuntime", () => {
       f.state.intercept = () => f.commands.length === 1 ? ack.await.pipe(Effect.as({})) : undefined
       const idle = yield* f.runtime.disableIdle(() => f.clients.isCurrentIdleGeneration(generation)).pipe(Effect.forkChild)
       yield* f.sent.await
-      if (change === "client") f.clients.register({})
+      if (change === "client") f.clients.register({ events: [] })
       else if (change === "extension") f.state.generation += 1
       else if (change === "staged-root") f.registry.stageRootTarget(root(2, "successor-session", "successor-target"))
       else f.registry.addRootTarget(root(2, "second-session", "successor-target"))

@@ -34,7 +34,7 @@ function root(options: {
 
 function setup() {
   const events: { client: object; event: CdpEvent }[] = []
-  const clients = new CdpClientPool<object>((client, event) => events.push({ client, event }))
+  const clients = new CdpClientPool<object>((client, event) => events.push({ client, event }), () => {})
   const registry = new TargetRegistry()
   const router = new CdpRouter(clients, registry)
   return { clients, registry, router, events }

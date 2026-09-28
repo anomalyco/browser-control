@@ -26,7 +26,7 @@ const fixture = Effect.fnUntraced(function* () {
   const clients = new CdpClientPool<object>((_client, event) => {
     if (event.method === "Target.detachedFromTarget") events.push(`detach:${event.params?.sessionId}`)
     if (event.method === "Target.attachedToTarget") events.push(`attach:${event.params?.sessionId}`)
-  })
+  }, () => {})
   clients.register(client)
   const state: {
     generation: number

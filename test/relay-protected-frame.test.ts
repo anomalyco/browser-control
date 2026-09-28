@@ -177,6 +177,68 @@ describe("relay protected frames", () => {
     })))
   })
 
+  it("forgets protected frames when a tab detaches before its root commits", async () => {
+    const port = await freePort()
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port, sessionCatalogPath: null })
+      yield* Effect.tryPromise(async () => {
+        const endpoint = relay.url.replace("http://", "ws://")
+        const extension = await openSocket(`${endpoint}/extension`)
+        let holdAutoAttach = true
+        let heldAutoAttachId: number | undefined
+        let markAutoAttachHeld: () => void = () => {}
+        const autoAttachHeld = new Promise<void>((resolve) => {
+          markAutoAttachHeld = resolve
+        })
+        extension.on("message", (data) => {
+          const command = JSON.parse(data.toString()) as ExtensionCommand
+          if (holdAutoAttach && command.method === "debugger.sendCommand" && command.params?.method === "Target.setAutoAttach") {
+            heldAutoAttachId = command.id
+            markAutoAttachHeld()
+            return
+          }
+          const result = command.method === "debugger.sendCommand" && command.params?.method === "Target.getTargetInfo"
+            ? { targetInfo: targetInfo("root-target") }
+            : {}
+          extension.send(JSON.stringify({ id: command.id, result }))
+        })
+        extension.send(JSON.stringify({ method: "hello", params: { version: "test", protocolVersion: 2 } }))
+        extension.send(JSON.stringify({ method: "ready" }))
+        const client = await openSocket(`${endpoint}/devtools/browser/test`)
+        const events: CdpEvent[] = []
+        client.on("message", (data) => {
+          const message = JSON.parse(data.toString()) as CdpEvent | CdpReply
+          if ("method" in message) events.push(message)
+        })
+        const emit = (method: string, params: JsonObject) => {
+          extension.send(JSON.stringify({ method: "debugger.event", params: { tabId: 1, method, params } }))
+        }
+        try {
+          extension.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 1 } }))
+          await autoAttachHeld
+          // The staged root already routes events, so the protected frame is tracked before commit.
+          emit("Page.frameAttached", { frameId: "menu-frame", parentFrameId: "root-target" })
+          emit("Page.frameNavigated", { frame: { id: "menu-frame", parentId: "root-target", url: protectedFrameUrl, loaderId: "menu-loader", securityOrigin: "", mimeType: "text/html" } })
+          extension.send(JSON.stringify({ method: "debugger.detached", params: { tabId: 1, reason: "canceled_by_user" } }))
+          holdAutoAttach = false
+          extension.send(JSON.stringify({ id: heldAutoAttachId, result: {} }))
+
+          const rootAnnounced = nextMessage(client, (message) => "method" in message && message.method === "Target.attachedToTarget")
+          extension.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 1 } }))
+          await rootAnnounced
+          const delivered = nextMessage(client, (message) => "method" in message && message.method === "Runtime.consoleAPICalled")
+          emit("Page.lifecycleEvent", { frameId: "menu-frame", loaderId: "menu-loader", name: "load", timestamp: 1 })
+          emit("Runtime.consoleAPICalled", { type: "log", args: [], executionContextId: 1, timestamp: 2 })
+          await delivered
+          expect(events.filter((event) => event.method === "Page.lifecycleEvent").map((event) => event.params?.frameId)).toEqual(["menu-frame"])
+        } finally {
+          client.close()
+          extension.close()
+        }
+      })
+    })))
+  })
+
   it("clears the debugger block when a later command succeeds", async () => {
     const port = await freePort()
     await Effect.runPromise(Effect.scoped(Effect.gen(function* () {

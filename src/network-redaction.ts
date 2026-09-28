@@ -5,6 +5,7 @@ export type CredentialSlot = {
   expiresAt?: string
 }
 
+type RedactionSlot = Pick<CredentialSlot, "ref" | "value">
 type MutableCredentialSlot = Omit<CredentialSlot, "sources"> & { readonly sources: string[] }
 
 const secretNamePattern = /auth(?:orization)?|cookie|credential|csrf|xsrf|token|secret|session|password|passwd|pwd|passcode|otp|(?:^|[-_.])code(?:$|[-_.])|(?:api|access|refresh)[-_.]?key|signature|(?:^|[-_.])sig(?:$|[-_.])/i
@@ -23,7 +24,7 @@ export class SecretCollector {
   private readonly refsByValue = new Map<string, string>()
   private readonly refsBySource = new Map<string, string>()
   // Retired values are redaction-only: never include them in persisted profile slots.
-  private readonly retiredSlots = new Map<string, CredentialSlot>()
+  private readonly retiredRefsByValue = new Map<string, string>()
   private nextRef = 1
   private updated = new Set<string>()
   private observed = new Set<string>()
@@ -128,15 +129,12 @@ export class SecretCollector {
     if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") return value
     const serialized = String(value)
     if (serialized.length < minimumLength) return value
-    for (const slot of this.slotsByRef.values()) {
-      if (slot.value === serialized) return `\${${slot.ref}}`
-    }
-    const retired = this.retiredSlots.get(serialized)
-    return retired ? `\${${retired.ref}}` : value
+    const ref = this.refsByValue.get(serialized) ?? this.retiredRefsByValue.get(serialized)
+    return ref ? `\${${ref}}` : value
   }
 
-  private redactionSlots(): readonly CredentialSlot[] {
-    return [...this.slots(), ...this.retiredSlots.values()]
+  private redactionSlots(): readonly RedactionSlot[] {
+    return [...this.slotsByRef.values(), ...Array.from(this.retiredRefsByValue, ([value, ref]) => ({ ref, value }))]
   }
 
   private protectHeader(name: string, value: string, source: string): string {
@@ -241,7 +239,7 @@ export class SecretCollector {
           return `\${${sourceRef}}`
         }
         if (slot.sources.length === 1) {
-          this.retiredSlots.set(slot.value, { ref: slot.ref, value: slot.value, sources: [] })
+          this.retiredRefsByValue.set(slot.value, slot.ref)
           if (this.refsByValue.get(slot.value) === sourceRef) this.refsByValue.delete(slot.value)
           slot.value = value
           const expiresAt = jwtExpiration(value)
@@ -292,17 +290,15 @@ function restoreReferencePlaceholders(value: string): string {
   return value.replace(/(?:%24|\$)%7B(BC_SECRET_\d+)%7D/gi, (_match, ref: string) => `\${${ref}}`)
 }
 
+/** Protect the query of a fragment-free URL that `new URL` cannot parse. */
 function protectRelativeUrl(
   rawUrl: string,
   protect: (name: string, value: string, occurrence: number) => string,
 ): string {
   const queryStart = rawUrl.indexOf("?")
   if (queryStart < 0) return rawUrl
-  const fragmentStart = rawUrl.indexOf("#", queryStart)
-  const queryEnd = fragmentStart < 0 ? rawUrl.length : fragmentStart
-  const params = new URLSearchParams(rawUrl.slice(queryStart + 1, queryEnd))
-  const protectedQuery = protectSearchParams(params, protect).toString()
-  return restoreReferencePlaceholders(`${rawUrl.slice(0, queryStart)}?${protectedQuery}${rawUrl.slice(queryEnd)}`)
+  const protectedQuery = protectSearchParams(new URLSearchParams(rawUrl.slice(queryStart + 1)), protect).toString()
+  return restoreReferencePlaceholders(`${rawUrl.slice(0, queryStart)}?${protectedQuery}`)
 }
 
 function protectSearchParams(
@@ -343,13 +339,13 @@ function sourceName(requestScope: string, location: string, occurrence = 0): str
   return occurrence === 0 ? base : `${base}.${occurrence}`
 }
 
-export function redactKnownValues(text: string, slots: readonly CredentialSlot[]): string {
+export function redactKnownValues(text: string, slots: readonly RedactionSlot[]): string {
   return [...slots]
     .sort((left, right) => right.value.length - left.value.length)
     .reduce((output, slot) => replaceOutsideReferences(output, slot.value, `\${${slot.ref}}`), text)
 }
 
-function redactKnownValue(value: unknown, slots: readonly CredentialSlot[]): unknown {
+function redactKnownValue(value: unknown, slots: readonly RedactionSlot[]): unknown {
   if (typeof value === "string") return redactKnownValues(value, slots)
   if (typeof value === "number" || typeof value === "boolean") {
     const slot = slots.find((candidate) => candidate.value === String(value))

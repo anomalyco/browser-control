@@ -15,7 +15,7 @@ function setup() {
       events.push(parseJsonObject(data))
     },
   }
-  const clients = new CdpClientPool<typeof socket>(sendCdpEvent)
+  const clients = new CdpClientPool<typeof socket>(sendCdpEvent, () => {})
   clients.register(socket)
   return { socket, clients, events, registry: new TargetRegistry() }
 }

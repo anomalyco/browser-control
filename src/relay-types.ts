@@ -1,5 +1,5 @@
 import type { Effect, Semaphore } from "effect"
-import type { AdoptTarget, ExecuteOptions, ExecuteResult } from "./execute.ts"
+import type { ExecuteOptions, ExecuteResult } from "./execute.ts"
 import type { NetworkCaptureOptions, NetworkCaptureResult, NetworkCaptureStatus, NetworkCaptureStopOptions } from "./network-capture.ts"
 import type { JsonObject, TargetInfo } from "./protocol.ts"
 import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest, SessionSummary } from "./relay-schema.ts"
@@ -56,7 +56,7 @@ export type PendingExtensionRequest = {
 export interface ExecuteSandboxLike {
   execute(code: string, options?: ExecuteOptions): Effect.Effect<ExecuteResult>
   authenticatedJson(request: Omit<AuthenticatedJsonRequest, "sessionId">): Effect.Effect<AuthenticatedJsonOutcome, Error>
-  adoptPage(target: AdoptTarget): Effect.Effect<string, Error>
+  adoptPage(targetId: string): Effect.Effect<void, Error>
   /** Shutdown and handoff cancellation await disconnection without closing or forgetting the default tab. */
   disconnectSettled(): Effect.Effect<void, Error>
   /** Adoption rollback cleanup does not settle before started Playwright close promises settle. */

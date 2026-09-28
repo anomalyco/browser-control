@@ -28,7 +28,11 @@ export class CdpClientPool<Client extends object> implements Iterable<Client> {
   private nextAliasId = 1
   private connectionGeneration = 0
 
-  constructor(private readonly send: (client: Client, event: CdpEvent) => void) {}
+  constructor(
+    private readonly send: (client: Client, event: CdpEvent) => void,
+    /** Observe every canonical session this client stops seeing, announced or silent. */
+    private readonly retired: (client: Client, sessionId: string) => void,
+  ) {}
 
   register(client: Client, browserControlSessionId?: string, kind: "raw" | "sandbox" = "raw"): void {
     if (this.states.has(client)) throw new Error("CDP client is already registered")
@@ -90,11 +94,10 @@ export class CdpClientPool<Client extends object> implements Iterable<Client> {
     })
   }
 
-  /** Return the exact canonical subtree retired by this silent client transition. */
-  detach(client: Client, sessionId: string): readonly string[] {
+  detach(client: Client, sessionId: string): void {
     const state = this.requireState(client)
-    if (state.aliases.delete(sessionId)) return []
-    return this.detachSession(client, state, sessionId, { notify: false })
+    if (state.aliases.delete(sessionId)) return
+    this.detachSession(client, state, sessionId, { notify: false })
   }
 
   detachTab(tabId: number, options: { readonly destroyed?: boolean } = {}): void {
@@ -170,18 +173,17 @@ export class CdpClientPool<Client extends object> implements Iterable<Client> {
   private detachSession(client: Client, state: CdpClientState, sessionId: string, options: {
     readonly notify?: boolean
     readonly destroyed?: boolean
-  } = {}): string[] {
+  } = {}): void {
     const announced = state.announcements.get(sessionId)
-    if (!announced) return []
+    if (!announced) return
     state.announcements.delete(sessionId)
     this.removeTargetAliases(state, (alias) => alias.targetId === announced.targetId)
-    const retired: string[] = []
     // Descendants must disappear before their parent, including on replacement.
     for (const child of state.announcements.values()) {
-      if (child.parentSessionId === sessionId) retired.push(...this.detachSession(client, state, child.sessionId, options))
+      if (child.parentSessionId === sessionId) this.detachSession(client, state, child.sessionId, options)
     }
-    retired.push(sessionId)
-    if (options.notify === false) return retired
+    this.retired(client, sessionId)
+    if (options.notify === false) return
     if (options.destroyed && announced.parentSessionId === undefined) {
       this.send(client, { method: "Target.targetDestroyed", params: { targetId: announced.targetId } })
     }
@@ -190,7 +192,6 @@ export class CdpClientPool<Client extends object> implements Iterable<Client> {
       method: "Target.detachedFromTarget",
       params: { sessionId, targetId: announced.targetId },
     })
-    return retired
   }
 
   private removeTargetAliases(state: CdpClientState, matches: (alias: Data.TaggedEnum.Value<ClientCdpSessionAlias, "Target">) => boolean): void {

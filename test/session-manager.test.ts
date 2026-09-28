@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
-import { Deferred, Effect, Exit, Fiber, Latch } from "effect"
+import { Deferred, Effect, Exit, Fiber, Latch, Scheduler } from "effect"
 import { TestClock } from "effect/testing"
 import { adoptionTipForUrl, BrowserControlSessions, shouldAppendAdoptionTip } from "../src/session-manager.ts"
 import type { ExecuteSandboxLike, SessionTarget } from "../src/relay-types.ts"
@@ -8,7 +8,7 @@ import { TargetRegistry } from "../src/target-registry.ts"
 
 type FakeSandbox = ExecuteSandboxLike & {
   readonly closes: () => number
-  readonly adoptedSelections: () => unknown[]
+  readonly adoptedTargetIds: () => string[]
   readonly crashedTargets: () => string[]
   readonly detachedTargets: () => string[]
   readonly replacedTargets: () => Array<readonly [string, string]>
@@ -28,7 +28,7 @@ const makeFakeSandbox = (options?: {
   readonly redactText?: (text: string) => string
 }): FakeSandbox => {
   let closes = 0
-  const adoptedSelections: unknown[] = []
+  const adoptedTargetIds: string[] = []
   const crashedTargets: string[] = []
   const detachedTargets: string[] = []
   const replacedTargets: Array<readonly [string, string]> = []
@@ -84,15 +84,14 @@ const makeFakeSandbox = (options?: {
     networkCancel: () => Effect.succeed({ cancelled: false }),
     authRefresh: () => Effect.fail(new Error("auth refresh is not configured")),
     redactNetworkCaptureText: (text) => options?.redactText?.(text) ?? text,
-    adoptPage: (selection) => (options?.onAdopt
-      ? options.onAdopt(selection)
+    adoptPage: (targetId) => (options?.onAdopt
+      ? options.onAdopt(targetId)
       : options?.adoptFailure
       ? Effect.fail(options.adoptFailure)
       : Effect.sync(() => {
-          adoptedSelections.push(selection)
-          return "https://example.com/adopted"
+          adoptedTargetIds.push(targetId)
         })).pipe(Effect.tap(() => Effect.sync(() => {
-          persistenceTarget = { id: selection.targetId, owner: "user" }
+          persistenceTarget = { id: targetId, owner: "user" }
         }))),
     markTargetCrashed: (targetId) => {
       crashedTargets.push(targetId)
@@ -116,7 +115,7 @@ const makeFakeSandbox = (options?: {
     },
     getStatus: () => ({ connected: false, pageUrl: null, stateKeys: [] }),
     closes: () => closes,
-    adoptedSelections: () => adoptedSelections,
+    adoptedTargetIds: () => adoptedTargetIds,
     crashedTargets: () => crashedTargets,
     detachedTargets: () => detachedTargets,
     replacedTargets: () => replacedTargets,
@@ -209,6 +208,28 @@ describe("BrowserControlSessions", () => {
     expect(sandboxes).toHaveLength(2)
     expect(sandboxes.map((sandbox) => sandbox.closes())).toEqual([1, 0])
     expect(committed.at(-1)?.[0]).toMatchObject({ id: "alpha", readOnly: true })
+  })
+
+  it("claims a same-ID lifecycle change atomically when the run loop yields between operations", async () => {
+    const started = Latch.makeUnsafe(false)
+    const release = Latch.makeUnsafe(false)
+    let writes = 0
+    const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox(), {
+      onSessionsChanged: async () => {
+        if (++writes !== 1) return
+        started.openUnsafe()
+        await Effect.runPromise(release.await)
+      },
+    })
+    const create = () => Effect.runPromiseExit(sessions.create("alpha").pipe(Effect.provideService(Scheduler.MaxOpsBeforeYield, 3)))
+    const outcomes = Promise.all([create(), create()])
+    await Effect.runPromise(started.await)
+    // A losing claimant must not clear the committing creator's gate.
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(() => sessions.getOrCreate("alpha")).toThrow("still committing")
+    release.openUnsafe()
+    expect((await outcomes).map(Exit.isSuccess)).toEqual([true, false])
+    expect(writes).toBe(1)
   })
 
   it("blocks same-ID execute through initial commit while unrelated execute can start", async () => {
@@ -876,7 +897,7 @@ describe("BrowserControlSessions", () => {
       const committed: PersistedSession[][] = []
       const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => {
         const sandbox = makeFakeSandbox(sandboxes.length === 0 ? {
-          onAdopt: () => adopted.open.pipe(Effect.andThen(releaseAdopt.await), Effect.as("https://example.com")),
+          onAdopt: () => adopted.open.pipe(Effect.andThen(releaseAdopt.await), Effect.asVoid),
           onClose: closing.open.pipe(Effect.andThen(releaseClose.await)),
         } : undefined)
         sandboxes.push(sandbox)
@@ -1301,7 +1322,7 @@ describe("BrowserControlSessions", () => {
           ? {
               onAdopt: () => Deferred.succeed(started, undefined).pipe(
                 Effect.andThen(Deferred.await(release)),
-                Effect.as("https://example.com/adopted"),
+                Effect.asVoid,
               ),
             }
           : undefined)
@@ -1407,10 +1428,10 @@ describe("BrowserControlSessions", () => {
       const sessions = new BrowserControlSessions("http://127.0.0.1:0", (id) => makeFakeSandbox({
         onAdopt: () => (id === "alpha" ? Deferred.succeed(firstStarted, undefined).pipe(
           Effect.andThen(Deferred.await(releaseFirst)),
-          Effect.as("https://example.com/alpha"),
+          Effect.asVoid,
         ) : Deferred.succeed(secondStarted, undefined).pipe(
           Effect.andThen(Deferred.await(releaseSecond)),
-          Effect.as("https://example.com/beta"),
+          Effect.asVoid,
         )),
       }), { lifecycleTimeoutMs: 5_000 })
       sessions.createNew("alpha")
@@ -1454,14 +1475,13 @@ describe("BrowserControlSessions", () => {
         ? {
             onAdopt: () => Deferred.succeed(firstStarted, undefined).pipe(
               Effect.andThen(Deferred.await(releaseFirst)),
-              Effect.as("https://example.com/alpha"),
+              Effect.asVoid,
             ),
           }
         : {
             onExecute: Deferred.succeed(executeStarted, undefined).pipe(Effect.andThen(Deferred.await(releaseExecute))),
             onAdopt: () => Effect.sync(() => {
               betaAdopted = true
-              return "https://example.com/beta"
             }),
           }), { lifecycleTimeoutMs: 20 })
       sessions.createNew("alpha")
@@ -1879,7 +1899,7 @@ describe("BrowserControlSessions", () => {
 
     expect(result.session.id).toBe("alpha")
     expect(result.adoptedUrl).toBe("https://example.com/adopted")
-    expect(sandbox.adoptedSelections()).toEqual([{ targetId: "target-2", url: "https://example.com/adopted" }])
+    expect(sandbox.adoptedTargetIds()).toEqual(["target-2"])
   })
 
   it("uses the target registry as adoption ownership authority", async () => {
@@ -1953,7 +1973,7 @@ describe("BrowserControlSessions", () => {
         ? {
             onAdopt: () => Deferred.succeed(started, undefined).pipe(
               Effect.andThen(Deferred.await(release)),
-              Effect.as("https://example.com/adopted"),
+              Effect.asVoid,
             ),
           }
         : undefined))
@@ -2008,7 +2028,7 @@ describe("BrowserControlSessions", () => {
       const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox({
         onAdopt: () => Deferred.succeed(started, undefined).pipe(
           Effect.andThen(Deferred.await(release)),
-          Effect.as("https://example.com/adopted"),
+          Effect.asVoid,
         ),
       }), { lifecycleTimeoutMs: 20 }, registry)
       sessions.createNew("alpha")
@@ -2053,12 +2073,11 @@ describe("BrowserControlSessions", () => {
     addTarget(2, "bc-tab-b", "target-b")
     let sessions: BrowserControlSessions
     sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox({
-      onAdopt: (target) => Effect.sync(() => {
-        if (target.targetId === "target-b") {
+      onAdopt: (targetId) => Effect.sync(() => {
+        if (targetId === "target-b") {
           addTarget(1, "bc-tab-a2", "target-a2")
           sessions.markTargetReplaced("target-a", "target-a2")
         }
-        return target.url
       }),
     }), undefined, registry)
     sessions.createNew("alpha")
@@ -2099,9 +2118,9 @@ describe("BrowserControlSessions", () => {
     addTarget(1, "target-a")
     addTarget(2, "target-b")
     const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox({
-      onAdopt: (target) => target.targetId === "target-b"
+      onAdopt: (targetId) => targetId === "target-b"
         ? Effect.fail(new Error("prompt target vanished"))
-        : Effect.succeed(target.url),
+        : Effect.void,
     }), undefined, registry)
     sessions.createNew("alpha")
     await Effect.runPromise(sessions.adopt({
@@ -2128,8 +2147,8 @@ describe("BrowserControlSessions", () => {
     let failRollback = false
     const sessions = new BrowserControlSessions("http://127.0.0.1:0", (_id, onDefaultTargetChange) => makeFakeSandbox({
       onDefaultTargetChange,
-      onAdopt: (target) => target.targetId === "target-a"
-        ? Effect.succeed(target.url)
+      onAdopt: (targetId) => targetId === "target-a"
+        ? Effect.void
         : Effect.fail(new Error("target vanished")),
     }), {
       onSessionsChanged: (entries) => failRollback && entries.some((entry) => entry.id === "alpha" && !entry.target)
@@ -2167,7 +2186,7 @@ describe("BrowserControlSessions", () => {
           ? {
               onAdopt: () => Deferred.succeed(started, undefined).pipe(
                 Effect.andThen(Deferred.await(release)),
-                Effect.as("https://example.com/alpha"),
+                Effect.asVoid,
               ),
             }
           : undefined)
@@ -2233,7 +2252,6 @@ describe("BrowserControlSessions", () => {
                   canAccessOpener: false,
                 },
               })
-              return "https://example.com/adopted"
             }),
           }
         : undefined)

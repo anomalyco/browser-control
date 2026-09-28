@@ -27,19 +27,20 @@ type PendingHandoff = {
 export type HandoffWait = {
   readonly id: string
   readonly outcome: Promise<HandoffOutcome>
-  /** Keep the deadline and target cancellation live while a start action settles. */
-  readonly deferCompletion: () => () => void
+  /** End the wait as a timeout if it is still pending. */
+  readonly cancel: () => void
+  /** Defer human completion once, keeping the deadline and target cancellation live while a start action settles. */
+  readonly holdCompletion: () => () => void
 }
 
 export async function awaitHandoffAction(options: {
-  readonly outcome: Promise<HandoffOutcome>
+  readonly wait: HandoffWait
   readonly present?: () => Promise<void>
   readonly start?: () => unknown | Promise<unknown>
-  readonly cancel: () => void
   readonly cancelStart?: () => Promise<void>
-  readonly deferCompletion?: () => () => void
 }): Promise<HandoffOutcome> {
-  const outcome = options.outcome.then((value) => ({ type: "handoff-completed" as const, value }))
+  const { wait } = options
+  const outcome = wait.outcome.then((value) => ({ type: "handoff-completed" as const, value }))
   if (options.present) {
     const presentation = options.present().then(
       () => ({ type: "presented" as const }),
@@ -48,25 +49,26 @@ export async function awaitHandoffAction(options: {
     const first = await Promise.race([presentation, outcome])
     if (first.type === "handoff-completed") return first.value
     if (first.type === "presentation-failed") {
-      options.cancel()
+      wait.cancel()
       throw first.error
     }
   }
-  if (!options.start) return await options.outcome
-  const releaseCompletion = options.deferCompletion?.()
+  if (!options.start) return await wait.outcome
+  const releaseCompletion = wait.holdCompletion()
   const action = Promise.resolve().then(options.start).then(
     () => {
-      releaseCompletion?.()
+      releaseCompletion()
       return { type: "action-completed" as const }
     },
     (error: unknown) => ({ type: "action-failed" as const, error }),
   )
   const first = await Promise.race([action, outcome])
   if (first.type === "action-failed") {
-    options.cancel()
+    wait.cancel()
     throw first.error
   }
-  if (first.type === "action-completed") return await options.outcome
+  if (first.type === "action-completed") return await wait.outcome
+  // A human completion delivered before the hold still lets the action settle.
   if (first.value === "resolved" || !options.cancelStart) {
     const actionResult = await action
     if (actionResult.type === "action-failed") throw actionResult.error
@@ -117,7 +119,7 @@ export class HandoffRegistry {
       existing.resolve("timeout")
     }
     const id = this.createId()
-    let completionHolds = 0
+    let held = false
     let humanCompleted = false
     let finish: (outcome: HandoffOutcome) => void
     const outcome = new Promise<HandoffOutcome>((resolvePromise) => {
@@ -138,9 +140,9 @@ export class HandoffRegistry {
         targetSessionId: options.targetSessionId,
         message: options.message,
         resolve: (outcome) => {
-          if (outcome === "resolved") {
+          if (outcome === "resolved" && held) {
             humanCompleted = true
-            if (completionHolds > 0) return
+            return
           }
           finish(outcome)
         },
@@ -150,14 +152,15 @@ export class HandoffRegistry {
     return {
       id,
       outcome,
-      deferCompletion: () => {
-        completionHolds++
-        let released = false
+      cancel: () => {
+        this.cancel(id)
+      },
+      holdCompletion: () => {
+        held = true
         return () => {
-          if (released) return
-          released = true
-          completionHolds--
-          if (humanCompleted && completionHolds === 0) finish("resolved")
+          if (!held) return
+          held = false
+          if (humanCompleted) finish("resolved")
         }
       },
     }

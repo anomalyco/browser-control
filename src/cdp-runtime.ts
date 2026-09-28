@@ -5,74 +5,56 @@ import { getObject } from "./relay-helpers.ts"
 import { boundedToken, runtimeFailureKind } from "./runtime-diagnostics.ts"
 import type { TargetRegistry } from "./target-registry.ts"
 
-type Waiter = { readonly sessionId: string; readonly ready: Deferred.Deferred<boolean>; readonly nativeReady: (event: CdpEvent) => boolean }
+const maxCachedContexts = 512
+
+type Waiter = {
+  readonly sessionId: string
+  readonly ready: Deferred.Deferred<boolean>
+  readonly nativeReady: (event: CdpEvent) => boolean
+  /** Installed once the enable command succeeds. */
+  replay?: () => boolean
+}
 
 type Contexts = Map<number, CdpEvent>
-type ContextCache = { readonly current: () => boolean; readonly contexts: Contexts; overflow: boolean }
+/** `contexts` is undefined once the cache overflowed and can no longer prove completeness. */
+type ContextCache = { readonly current: () => boolean; contexts: Contexts | undefined }
 type Requester = {
   readonly current: () => boolean
   readonly delivered: Map<number, string | undefined>
   frameId?: string
 }
 
-type RuntimeReplay = {
-  readonly client: object
-  readonly send: (event: CdpEvent) => void
-}
+const routeSessionId = (route: CdpRoutedSession) => route.chromeSessionId ?? route.rootSessionId
+const disableKey = (tabId: number, chromeSessionId?: string) => `${tabId}:${chromeSessionId ?? "root"}`
+const contextAux = (event: CdpEvent) => getObject(getObject(event.params?.context)?.auxData)
 
-export class CdpRuntime {
+export class CdpRuntime<Client extends object> {
   private readonly waiters = new Set<Waiter>()
   private readonly contexts = new Map<string, ContextCache>()
-  private readonly requesters = new WeakMap<object, Map<string, Requester>>()
-  private readonly pendingReplays = new Set<() => void>()
+  private readonly requesters = new WeakMap<Client, Map<string, Requester>>()
   private readonly disabling = new Map<string, number>()
 
   constructor(private readonly options: {
     readonly registry: TargetRegistry
     readonly generation: () => number
     readonly send: (command: { readonly tabId: number; readonly sessionId?: string; readonly method: string; readonly params: JsonObject }) => Effect.Effect<JsonObject, Error>
+    readonly sendEvent: (client: Client, event: CdpEvent) => void
     readonly trace?: (message: string) => void
   }) {}
 
   notify(event: CdpEvent): void {
-    if (event.sessionId && (event.method.startsWith("Runtime.executionContext") || event.method === "Page.frameDetached" || event.method === "Page.frameNavigated")) {
-      const cache = this.cacheFor(event.sessionId)
-      if (event.method === "Runtime.executionContextsCleared") {
-        cache?.contexts.clear()
-        if (cache) cache.overflow = false
-      } else if (event.method === "Page.frameDetached" || event.method === "Page.frameNavigated") {
-        const frameId = event.method === "Page.frameDetached" ? event.params?.frameId : getObject(event.params?.frame)?.id
-        for (const [id, created] of cache?.contexts ?? []) {
-          if (getObject(getObject(created.params?.context)?.auxData)?.frameId === frameId) cache?.contexts.delete(id)
-        }
-      } else if (event.method === "Runtime.executionContextDestroyed") {
-        const id = event.params?.executionContextId
-        if (typeof id === "number") cache?.contexts.delete(id)
-      } else if (event.method === "Runtime.executionContextCreated" && cache && !cache.overflow) {
-        const id = getObject(event.params?.context)?.id
-        if (typeof id === "number") cache.contexts.set(id, event)
-        if (cache.contexts.size > 512) {
-          cache.contexts.clear()
-          cache.overflow = true
-        }
-      }
-    }
-    if (event.method !== "Runtime.executionContextCreated") return
-    const auxData = getObject(getObject(event.params?.context)?.auxData)
-    if (auxData?.isDefault !== true) return
+    if (event.sessionId) this.recordContextEvent(event.sessionId, event)
+    if (event.method !== "Runtime.executionContextCreated" || contextAux(event)?.isDefault !== true) return
     // Replay missing sibling contexts before waking the native waiter: resolving
-    // its Deferred can synchronously retire the pending replay callback.
-    for (const replay of this.pendingReplays) replay()
+    // its Deferred can synchronously retire the waiter's pending replay.
+    for (const waiter of this.waiters) this.settle(waiter)
     for (const waiter of this.waiters) {
-      if (waiter.nativeReady(event) && event.sessionId === waiter.sessionId) Deferred.doneUnsafe(waiter.ready, Effect.succeed(true))
+      if (waiter.sessionId === event.sessionId && waiter.nativeReady(event)) Deferred.doneUnsafe(waiter.ready, Effect.succeed(true))
     }
   }
 
   /** Observe the exact events actually sent to this canonical client. Aliases never enter here. */
-  deliver(client: object, event: CdpEvent, send: () => void): void {
-    if (event.method === "Target.detachedFromTarget" && typeof event.params?.sessionId === "string") {
-      this.detach(client, event.params.sessionId)
-    }
+  deliver(client: Client, event: CdpEvent): void {
     const requester = event.sessionId ? this.requesters.get(client)?.get(event.sessionId) : undefined
     const active = requester?.current() ? requester : undefined
     const context = getObject(event.params?.context)
@@ -86,47 +68,70 @@ export class CdpRuntime {
       if (active.delivered.has(id) && active.delivered.get(id) === unique) return
       active.delivered.set(id, unique)
     }
-    send()
+    this.options.sendEvent(client, event)
   }
 
-  /** Construct at request admission; invoke only after its successful response is sent. */
-  frameTreeResponse(client: object, route: CdpRoutedSession, canContinue: () => boolean): (frameId: string) => void {
+  /** Construct at request admission; invoke with the result only after its successful response is sent. */
+  frameTreeResponse(client: Client, route: CdpRoutedSession, canContinue: () => boolean): (result: unknown) => void {
     const requester = this.requester(client, route, canContinue)
-    return (frameId) => {
-      if (!requester.current()) return
+    return (result) => {
+      const frameId = getObject(getObject(getObject(result)?.frameTree)?.frame)?.id
+      if (typeof frameId !== "string" || !requester.current()) return
       requester.frameId = frameId
-      for (const replay of this.pendingReplays) replay()
+      for (const waiter of this.waiters) this.settle(waiter)
     }
   }
 
-  disconnect(client: object): void {
+  disconnect(client: Client): void {
     this.requesters.delete(client)
   }
 
-  detach(client: object, sessionId: string): void {
+  detach(client: Client, sessionId: string): void {
     this.requesters.get(client)?.delete(sessionId)
   }
 
-  clear(): void {
-    this.contexts.clear()
-  }
-
-  invalidate(tabId: number, chromeSessionId?: string): void {
-    for (const [sessionId] of this.contexts) {
-      const target = this.options.registry.targets.get(sessionId) ?? this.options.registry.childTargets.get(sessionId)
-      if (target?.tabId === tabId && (chromeSessionId === undefined || sessionId === chromeSessionId)) this.contexts.delete(sessionId)
-    }
-  }
-
   beginDisable(tabId: number, chromeSessionId?: string): () => void {
-    const key = `${tabId}:${chromeSessionId ?? "root"}`
+    const key = disableKey(tabId, chromeSessionId)
     this.disabling.set(key, (this.disabling.get(key) ?? 0) + 1)
     this.invalidate(tabId, chromeSessionId)
     return () => {
-      this.invalidate(tabId, chromeSessionId)
       const count = (this.disabling.get(key) ?? 1) - 1
       if (count === 0) this.disabling.delete(key)
       else this.disabling.set(key, count)
+    }
+  }
+
+  private recordContextEvent(sessionId: string, event: CdpEvent): void {
+    if (!event.method.startsWith("Runtime.executionContext") && event.method !== "Page.frameDetached") return
+    const cache = this.cacheFor(sessionId)
+    if (!cache) return
+    switch (event.method) {
+      case "Runtime.executionContextsCleared":
+        cache.contexts = new Map()
+        return
+      case "Runtime.executionContextDestroyed": {
+        const id = event.params?.executionContextId
+        if (typeof id === "number") cache.contexts?.delete(id)
+        return
+      }
+      case "Page.frameDetached":
+        for (const [id, created] of cache.contexts ?? []) {
+          if (contextAux(created)?.frameId === event.params?.frameId) cache.contexts?.delete(id)
+        }
+        return
+      case "Runtime.executionContextCreated": {
+        const id = getObject(event.params?.context)?.id
+        if (!cache.contexts || typeof id !== "number") return
+        cache.contexts.set(id, event)
+        if (cache.contexts.size > maxCachedContexts) cache.contexts = undefined
+      }
+    }
+  }
+
+  private invalidate(tabId: number, chromeSessionId?: string): void {
+    for (const [sessionId] of this.contexts) {
+      const target = this.options.registry.targets.get(sessionId) ?? this.options.registry.childTargets.get(sessionId)
+      if (target?.tabId === tabId && (chromeSessionId === undefined || sessionId === chromeSessionId)) this.contexts.delete(sessionId)
     }
   }
 
@@ -138,68 +143,58 @@ export class CdpRuntime {
     const route = root ? { tabId: root.tabId, rootSessionId: root.sessionId }
       : child && parent ? { tabId: child.tabId, rootSessionId: parent.sessionId, chromeSessionId: child.sessionId } : undefined
     if (!route) return undefined
-    if (this.disabling.has(`${route.tabId}:root`) || this.disabling.has(`${route.tabId}:${route.chromeSessionId}`)) return undefined
+    if (this.disabling.has(disableKey(route.tabId)) || this.disabling.has(disableKey(route.tabId, route.chromeSessionId))) return undefined
     let cache = this.contexts.get(sessionId)
-    if (!cache?.current()) {
-      cache = { current: this.capture(route), contexts: new Map(), overflow: false }
+    if (!cache) {
+      cache = { current: this.capture(route), contexts: new Map() }
       this.contexts.set(sessionId, cache)
     }
     return cache
   }
 
-  private requester(client: object, route: CdpRoutedSession, canContinue: () => boolean): Requester {
-    let sessions = this.requesters.get(client)
-    if (!sessions) {
-      sessions = new Map()
-      this.requesters.set(client, sessions)
+  private requester(client: Client, route: CdpRoutedSession, canContinue: () => boolean): Requester {
+    const sessions = this.requesters.get(client) ?? new Map<string, Requester>()
+    this.requesters.set(client, sessions)
+    const sessionId = routeSessionId(route)
+    const existing = sessions.get(sessionId)
+    if (existing?.current()) return existing
+    const captured = this.capture(route)
+    const next: Requester = {
+      current: () => captured() && canContinue() && this.requesters.get(client) === sessions && sessions.get(sessionId) === next,
+      delivered: new Map(),
     }
-    const sessionId = route.chromeSessionId ?? route.rootSessionId
-    let requester = sessions.get(sessionId)
-    if (!requester?.current()) {
-      const captured = this.capture(route)
-      requester = { current: () => captured() && canContinue() && this.requesters.get(client) === sessions && sessions?.get(sessionId) === requester, delivered: new Map() }
-      sessions.set(sessionId, requester)
-    }
-    return requester
+    sessions.set(sessionId, next)
+    return next
   }
 
   readonly enable = Effect.fn("CdpRuntime.enable")(function* (
-    this: CdpRuntime,
+    this: CdpRuntime<Client>,
     route: CdpRoutedSession,
     params: JsonObject,
     canContinue: () => boolean,
-    replay?: RuntimeReplay,
+    client?: Client,
   ) {
     const current = this.capture(route)
     const permitted = () => current() && canContinue()
     // Raw CDP clients need not request a frame tree. Preserve their ordinary
     // native-event path; cached replay requires a frame-tree request already admitted.
-    const requester = replay ? this.requesters.get(replay.client)?.get(route.chromeSessionId ?? route.rootSessionId) : undefined
-    const replayMissing = replay && requester ? () => {
-      if (!permitted() || !requester.current() || requester.frameId === undefined) return false
-      const sessionId = route.chromeSessionId ?? route.rootSessionId
-      const cache = this.contexts.get(sessionId)
-      if (!cache?.current() || cache.overflow) return false
-      if (![...cache.contexts.values()].some((event) => {
-        const aux = getObject(getObject(event.params?.context)?.auxData)
-        return aux?.isDefault === true && aux.frameId === requester.frameId
-      })) return false
-      let seen = false
-      for (const event of cache.contexts.values()) {
-        if (!permitted() || !requester.current()) return false
-        this.deliver(replay.client, event, () => replay.send(event))
-        if (getObject(getObject(event.params?.context)?.auxData)?.isDefault === true) seen = true
-      }
-      if (seen) this.trace(route, "runtime-replay defaultContextSeen=true")
-      return seen
-    } : undefined
+    const requester = client ? this.requesters.get(client)?.get(routeSessionId(route)) : undefined
+    const rootFrame = () => requester && permitted() && requester.current() ? requester.frameId : undefined
     const first = yield* this.observe(route, Effect.suspend(() => permitted()
       ? this.options.send({
         tabId: route.tabId, method: "Runtime.enable", params,
         ...(route.chromeSessionId === undefined ? {} : { sessionId: route.chromeSessionId }),
       })
-      : Effect.fail(new Error("CDP target changed before Runtime.enable"))), replayMissing,
-      (event) => requester === undefined || (permitted() && requester.current() && requester.frameId !== undefined && getObject(getObject(event.params?.context)?.auxData)?.frameId === requester.frameId))
+      : Effect.fail(new Error("CDP target changed before Runtime.enable"))), client && requester ? {
+      replay: () => {
+        const frameId = rootFrame()
+        return frameId !== undefined && this.replayCached(client, route, frameId)
+      },
+      nativeReady: (event) => {
+        const frameId = rootFrame()
+        return frameId !== undefined && contextAux(event)?.frameId === frameId
+      },
+    } : {})
     this.trace(route, `runtime-enable defaultContextSeen=${first.seen}`)
     if (!first.seen && permitted()) {
       // The shared debugger may acknowledge enable without replaying its context.
@@ -212,7 +207,7 @@ export class CdpRuntime {
     return first.result
   })
 
-  readonly disableIdle = Effect.fn("CdpRuntime.disableIdle")(function* (this: CdpRuntime, stillIdle: () => boolean) {
+  readonly disableIdle = Effect.fn("CdpRuntime.disableIdle")(function* (this: CdpRuntime<Client>, stillIdle: () => boolean) {
     const { registry } = this.options
     const routes: CdpRoutedSession[] = registry.listRootTargets().map((target) => ({ tabId: target.tabId, rootSessionId: target.sessionId }))
     for (const target of registry.childTargets.values()) {
@@ -226,11 +221,31 @@ export class CdpRuntime {
     }
   })
 
-  private observe<A>(route: CdpRoutedSession, command: Effect.Effect<A, Error>, replay?: () => boolean, nativeReady: (event: CdpEvent) => boolean = () => true): Effect.Effect<{ readonly result: A; readonly seen: boolean }, Error> {
+  /** Replay a complete cache only when it already holds the requester's root-frame default context. */
+  private replayCached(client: Client, route: CdpRoutedSession, frameId: string): boolean {
+    const cache = this.contexts.get(routeSessionId(route))
+    const contexts = cache?.current() ? cache.contexts : undefined
+    if (!contexts || ![...contexts.values()].some((event) => {
+      const aux = contextAux(event)
+      return aux?.isDefault === true && aux.frameId === frameId
+    })) return false
+    for (const event of contexts.values()) this.deliver(client, event)
+    this.trace(route, "runtime-replay defaultContextSeen=true")
+    return true
+  }
+
+  private settle(waiter: Waiter): void {
+    if (waiter.replay?.()) Deferred.doneUnsafe(waiter.ready, Effect.succeed(true))
+  }
+
+  private observe<A>(route: CdpRoutedSession, command: Effect.Effect<A, Error>, options: {
+    readonly replay?: () => boolean
+    readonly nativeReady?: (event: CdpEvent) => boolean
+  } = {}): Effect.Effect<{ readonly result: A; readonly seen: boolean }, Error> {
     const runtime = this
     return Effect.acquireUseRelease(
       Effect.sync(() => {
-        const waiter: Waiter = { sessionId: route.chromeSessionId ?? route.rootSessionId, ready: Deferred.makeUnsafe(), nativeReady }
+        const waiter: Waiter = { sessionId: routeSessionId(route), ready: Deferred.makeUnsafe(), nativeReady: options.nativeReady ?? (() => true) }
         runtime.waiters.add(waiter)
         return waiter
       }),
@@ -241,12 +256,9 @@ export class CdpRuntime {
           orElse: () => Effect.succeed(false),
         })), { startImmediately: true })
         const result = yield* command
-        const complete = () => { if (replay?.()) Deferred.doneUnsafe(waiter.ready, Effect.succeed(true)) }
-        runtime.pendingReplays.add(complete)
-        return yield* Effect.gen(function* () {
-          complete()
-          return { result, seen: yield* Fiber.join(seen) }
-        }).pipe(Effect.ensuring(Effect.sync(() => { runtime.pendingReplays.delete(complete) })))
+        if (options.replay) waiter.replay = options.replay
+        runtime.settle(waiter)
+        return { result, seen: yield* Fiber.join(seen) }
       }).pipe(Effect.scoped),
       (waiter) => Effect.sync(() => { runtime.waiters.delete(waiter) }),
     )

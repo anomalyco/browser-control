@@ -19,6 +19,16 @@ export type SessionExecuteRecord = {
   readonly result: ExecuteResult
 }
 
+type CreatedSessionSummary = SessionSummary & { readonly created?: boolean }
+
+type ExecutionResponse = { readonly result: ExecuteResult; readonly session: CreatedSessionSummary }
+
+type AdoptionResult = {
+  readonly adoptedUrl: string
+  readonly session: CreatedSessionSummary
+  readonly releasedTargetIds: readonly string[]
+}
+
 export type SessionHooks = {
   /** Called when a session starts (true) or finishes (false) an execute. */
   readonly onExecuteStateChange?: (sessionId: string, executing: boolean) => void
@@ -90,7 +100,7 @@ export class BrowserControlSessions {
   private admission: "open" | "draining" | "closed" = "open"
   private pendingWork = 0
   private readonly pendingSessionWork = new Map<string, number>()
-  private readonly identityChanges = new Map<string, Deferred.Deferred<Exit.Exit<void, Error>>>()
+  private readonly identityChanges = new Map<string, Deferred.Deferred<void, Error>>()
   private readonly idle = Latch.makeUnsafe(true)
   private userAttachedPageUrlsProvider: (() => readonly string[]) | undefined
 
@@ -425,22 +435,11 @@ export class BrowserControlSessions {
     readonly code: string
     readonly createIfMissing: boolean
     readonly targetSelection?: ExecuteTargetSelection
-  }): Effect.Effect<{ readonly result: ExecuteResult; readonly session: SessionSummary & { readonly created?: boolean } }, Error> {
+  }): Effect.Effect<ExecutionResponse, Error> {
     const manager = this
     return this.withAdmission(options.sessionId, Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
-      if (options.sessionId === undefined && !options.createIfMissing) {
-        return yield* Effect.fail(sessionError("invalid-request", "sessionId is required when createIfMissing is false"))
-      }
-      const resolved = options.sessionId === undefined
-        ? { session: manager.createAcceptedSession(undefined), created: true }
-        : options.createIfMissing
-        ? manager.getOrCreateAcceptedSession(options.sessionId)
-        : { session: manager.sessions.get(options.sessionId), created: false }
+      const resolved = yield* manager.resolveWorkSession(options.sessionId, options.createIfMissing)
       const session = resolved.session
-      if (!session) {
-        return yield* Effect.fail(sessionError("not-found", `Session not found: ${options.sessionId}`, options.sessionId))
-      }
-      type ExecutionResponse = { readonly result: ExecuteResult; readonly session: SessionSummary & { readonly created?: boolean } }
       const response = yield* Deferred.make<ExecutionResponse, Error>()
       let started = false
       let cancelled = false
@@ -479,8 +478,7 @@ export class BrowserControlSessions {
           })
           manager.schedulePersistence()
           yield* manager.flushPersistence()
-          const summary = manager.sessionSummary(session)
-          return { result: resultWithHint, session: { ...summary, ...(resolved.created ? { created: true } : {}) } }
+          return { result: resultWithHint, session: manager.createdSummary(session, resolved.created) }
         })
       const worker = session.executeSemaphore.withPermit(operation.pipe(Effect.matchEffect({
         onFailure: (error) => (resolved.created
@@ -509,26 +507,11 @@ export class BrowserControlSessions {
     readonly createIfMissing: boolean
     readonly targetId: string
     readonly targetUrl: string
-  }): Effect.Effect<{ readonly adoptedUrl: string; readonly session: SessionSummary & { readonly created?: boolean }; readonly releasedTargetIds: readonly string[] }, Error> {
+  }): Effect.Effect<AdoptionResult, Error> {
     const manager = this
     return this.withAdmission(options.sessionId, Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
-      if (options.sessionId === undefined && !options.createIfMissing) {
-        return yield* Effect.fail(sessionError("invalid-request", "sessionId is required when createIfMissing is false"))
-      }
-      const resolved = options.sessionId === undefined
-        ? { session: manager.createAcceptedSession(undefined), created: true }
-        : options.createIfMissing
-        ? manager.getOrCreateAcceptedSession(options.sessionId)
-        : { session: manager.sessions.get(options.sessionId), created: false }
+      const resolved = yield* manager.resolveWorkSession(options.sessionId, options.createIfMissing)
       const session = resolved.session
-      if (!session) {
-        return yield* Effect.fail(sessionError("not-found", `Session not found: ${options.sessionId}`, options.sessionId))
-      }
-      type AdoptionResult = {
-        readonly adoptedUrl: string
-        readonly session: SessionSummary & { readonly created?: boolean }
-        readonly releasedTargetIds: readonly string[]
-      }
       const result = yield* Deferred.make<AdoptionResult, Error>()
       let state: "pending" | "reserved" | "committed" = "pending"
       let cancelled = false
@@ -561,7 +544,7 @@ export class BrowserControlSessions {
           state = "reserved"
           manager.notifyTargetOwnershipChange({ targetIds: [options.targetId], tabIds: reservation.tabId < 0 ? [] : [reservation.tabId] })
           previousTarget = session.target
-          const adoptedUrl = yield* session.sandbox.adoptPage({ targetId: options.targetId, url: options.targetUrl })
+          yield* session.sandbox.adoptPage(options.targetId)
           if (adoptionCancelled()) {
             return yield* Effect.fail(timeoutError)
           }
@@ -589,9 +572,8 @@ export class BrowserControlSessions {
             },
             catch: (cause) => cause instanceof Error ? cause : new Error("Commit target ownership", { cause }),
           })
-          const summary = manager.sessionSummary(session)
           const releasedTargetIds = previousTargetId && previousTargetId !== options.targetId ? [previousTargetId] : []
-          const value = { adoptedUrl, releasedTargetIds, session: { ...summary, ...(resolved.created ? { created: true } : {}) } }
+          const value = { adoptedUrl: options.targetUrl, releasedTargetIds, session: manager.createdSummary(session, resolved.created) }
           yield* Deferred.succeed(result, value)
           return value
         })
@@ -733,6 +715,24 @@ export class BrowserControlSessions {
       executeSemaphore: Semaphore.makeUnsafe(1),
     }
     return session
+  }
+
+  /** Resolve execute/adopt work before any permit; the caller owns cleanup of a created session. */
+  private resolveWorkSession(id: string | undefined, createIfMissing: boolean): Effect.Effect<{ readonly session: BrowserControlSession; readonly created: boolean }, SessionError> {
+    return Effect.suspend(() => {
+      if (id === undefined) {
+        return createIfMissing
+          ? Effect.succeed({ session: this.createAcceptedSession(undefined), created: true })
+          : Effect.fail(sessionError("invalid-request", "sessionId is required when createIfMissing is false"))
+      }
+      if (createIfMissing) return Effect.succeed(this.getOrCreateAcceptedSession(id))
+      const session = this.sessions.get(id)
+      return session ? Effect.succeed({ session, created: false }) : Effect.fail(sessionError("not-found", `Session not found: ${id}`, id))
+    })
+  }
+
+  private createdSummary(session: BrowserControlSession, created: boolean): CreatedSessionSummary {
+    return { ...this.sessionSummary(session), ...(created ? { created: true } : {}) }
   }
 
   private sessionSummary(session: BrowserControlSession): SessionSummary {
@@ -896,23 +896,24 @@ export class BrowserControlSessions {
   private awaitStableIdentity(id: string | undefined): Effect.Effect<void, Error> {
     return Effect.suspend(() => {
       const pending = id === undefined ? undefined : this.identityChanges.get(id)
-      return pending
-        ? Deferred.await(pending).pipe(Effect.flatten, Effect.andThen(this.awaitStableIdentity(id)))
-        : Effect.void
+      return pending ? Deferred.await(pending).pipe(Effect.andThen(this.awaitStableIdentity(id))) : Effect.void
     })
   }
 
   /** Keep same-ID callers behind the entire commit/rollback, including corrective persistence. */
   private withIdentityChange<A>(id: string, effect: Effect.Effect<A, Error>): Effect.Effect<A, Error> {
-    return this.awaitStableIdentity(id).pipe(Effect.andThen(Effect.suspend(() => {
-      const settled = Deferred.makeUnsafe<Exit.Exit<void, Error>>()
+    return Effect.suspend(() => {
+      // Check and claim synchronously: the run loop may yield between separate effects.
+      const pending = this.identityChanges.get(id)
+      if (pending) return Deferred.await(pending).pipe(Effect.andThen(this.withIdentityChange(id, effect)))
+      const settled = Deferred.makeUnsafe<void, Error>()
       this.identityChanges.set(id, settled)
       return effect.pipe(Effect.onExit((exit) => Effect.suspend(() => {
-        this.identityChanges.delete(id)
-        // Store the exit as a value so interruption cannot interrupt sibling waiters.
-        return Deferred.succeed(settled, Exit.asVoid(exit))
+        if (this.identityChanges.get(id) === settled) this.identityChanges.delete(id)
+        // Waiters observe the change's failure or interruption and do not proceed past it.
+        return Deferred.done(settled, Exit.asVoid(exit))
       })))
-    })))
+    })
   }
 
   private retainWork(sessionId?: string): () => void {

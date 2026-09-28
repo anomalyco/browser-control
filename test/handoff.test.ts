@@ -32,13 +32,11 @@ describe("HandoffRegistry", () => {
     })
     let settled = false
     const result = awaitHandoffAction({
-      outcome: wait.outcome,
-      deferCompletion: wait.deferCompletion,
+      wait,
       start: () => {
         started.resolve()
         return action.promise
       },
-      cancel: () => { registry.cancel(wait.id) },
       cancelStart,
     }).finally(() => { settled = true })
     await started.promise
@@ -61,6 +59,21 @@ describe("HandoffRegistry", () => {
     await Promise.resolve()
   })
 
+  it("lets the start action settle instead of disconnecting it when completion precedes the hold", async () => {
+    const registry = registryWithIds("handoff-1")
+    const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7", message: "m", timeoutMs: 5_000 })
+    registry.complete({ id: wait.id, tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7" })
+    const action = deferred()
+    const cancelStart = vi.fn(async () => {})
+    let settled = false
+    const result = awaitHandoffAction({ wait, start: () => action.promise, cancelStart }).finally(() => { settled = true })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(settled).toBe(false)
+    action.resolve()
+    await expect(result).resolves.toBe("resolved")
+    expect(cancelStart).not.toHaveBeenCalled()
+  })
+
   it("preserves a start failure after the human has completed the handoff", async () => {
     vi.useFakeTimers()
     const registry = registryWithIds("handoff-1")
@@ -68,13 +81,11 @@ describe("HandoffRegistry", () => {
     const action = deferred()
     const started = deferred()
     const result = awaitHandoffAction({
-      outcome: wait.outcome,
-      deferCompletion: wait.deferCompletion,
+      wait,
       start: () => {
         started.resolve()
         return action.promise
       },
-      cancel: () => { registry.cancel(wait.id) },
     })
     await started.promise
     registry.complete({ id: wait.id, tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7" })
@@ -91,10 +102,8 @@ describe("HandoffRegistry", () => {
     const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7", message: "m", timeoutMs: 5_000 })
     let settled = false
     const result = awaitHandoffAction({
-      outcome: wait.outcome,
-      deferCompletion: wait.deferCompletion,
+      wait,
       start: () => undefined,
-      cancel: () => { registry.cancel(wait.id) },
     }).finally(() => { settled = true })
     await vi.advanceTimersByTimeAsync(0)
     expect(settled).toBe(false)
@@ -104,11 +113,11 @@ describe("HandoffRegistry", () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it("keeps deferred completion bound to the rebound target and ignores a late release after replacement", async () => {
+  it("keeps held completion bound to the rebound target and ignores a late release after replacement", async () => {
     vi.useFakeTimers()
     const registry = registryWithIds("handoff-1", "handoff-2")
     const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7", message: "m", timeoutMs: 5_000 })
-    const release = wait.deferCompletion()
+    const release = wait.holdCompletion()
     registry.complete({ id: wait.id, tabId: 7, targetId: "target-7", targetSessionId: "bc-tab-7" })
     expect(registry.rebindTarget({ tabId: 7, previousTargetId: "target-7", previousTargetSessionId: "bc-tab-7", targetId: "new-target", targetSessionId: "new-session" })).toBe(true)
     expect(registry.cancelForTarget({ targetId: "target-7", targetSessionId: "bc-tab-7", reason: "target-detached" })).toEqual([])
@@ -240,12 +249,8 @@ describe("HandoffRegistry", () => {
     const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-1", targetSessionId: "bc-tab-1", message: "m", timeoutMs: 5_000 })
 
     await expect(awaitHandoffAction({
-      outcome: wait.outcome,
-      deferCompletion: wait.deferCompletion,
+      wait,
       start: () => Promise.reject(new Error("prompt action failed")),
-      cancel: () => {
-        registry.cancel(wait.id)
-      },
     })).rejects.toThrow("prompt action failed")
     expect(registry.cancel(wait.id)).toBe(false)
     await expect(wait.outcome).resolves.toBe("timeout")
@@ -265,15 +270,11 @@ describe("HandoffRegistry", () => {
     })
     let started = false
     const result = awaitHandoffAction({
-      outcome: wait.outcome,
-      deferCompletion: wait.deferCompletion,
+      wait,
       present: () => presented,
       start: () => {
         started = true
         markStarted?.()
-      },
-      cancel: () => {
-        registry.cancel(wait.id)
       },
     })
 
@@ -295,14 +296,10 @@ describe("HandoffRegistry", () => {
     })
     let started = false
     const result = awaitHandoffAction({
-      outcome: wait.outcome,
-      deferCompletion: wait.deferCompletion,
+      wait,
       present: () => presented,
       start: () => {
         started = true
-      },
-      cancel: () => {
-        registry.cancel(wait.id)
       },
     })
 
@@ -323,14 +320,10 @@ describe("HandoffRegistry", () => {
     })
     let settled = false
     const result = awaitHandoffAction({
-      outcome: wait.outcome,
-      deferCompletion: wait.deferCompletion,
+      wait,
       start: () => {
         expect(registry.pendingCount).toBe(1)
         return action
-      },
-      cancel: () => {
-        registry.cancel(wait.id)
       },
     }).finally(() => {
       settled = true
@@ -353,12 +346,8 @@ describe("HandoffRegistry", () => {
     const wait = registry.wait({ sessionId: "alpha", tabId: 7, targetId: "target-1", targetSessionId: "bc-tab-1", message: "m", timeoutMs: 5_000 })
     let cancelled = false
     const result = awaitHandoffAction({
-      outcome: wait.outcome,
-      deferCompletion: wait.deferCompletion,
+      wait,
       start: () => new Promise(() => {}),
-      cancel: () => {
-        registry.cancel(wait.id)
-      },
       cancelStart: async () => {
         cancelled = true
       },

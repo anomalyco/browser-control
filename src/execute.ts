@@ -1,6 +1,6 @@
 import { Effect, Schema } from "effect"
 import { installPageReadTimeout } from "./page-read-timeout.ts"
-import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type ElementHandle, type Frame, type Locator, type Page } from "playwright-core"
+import { chromium, errors, type Browser, type BrowserContext, type ConsoleMessage, type ElementHandle, type Frame, type Locator, type Page } from "playwright-core"
 import * as acorn from "acorn"
 import fs from "node:fs"
 import path from "node:path"
@@ -454,11 +454,6 @@ export type ExecuteTargetSelection = {
   readonly index?: number
 }
 
-export type AdoptTarget = {
-  readonly targetId: string
-  readonly url: string
-}
-
 export const defaultPageClosedWarning = "The session default page was closed; created a new page. References to the old page in state are stale."
 const defaultPageRecoveredWarning = "The session default page was unresponsive; created a new page. References to the old page in state are stale."
 const defaultPageCrashedWarning = "The session default page target crashed; checking it before the next execute."
@@ -693,13 +688,7 @@ export class ExecuteSandbox {
       const browser = sandbox.browser
       const ownsOpenPage = page !== undefined && sandbox.ownsPage && !page.isClosed()
       sandbox.browser = undefined
-      sandbox.page = undefined
-      sandbox.clearPageListeners()
-      sandbox.defaultPageTargetId = undefined
-      sandbox.ownsPage = false
-      sandbox.pageHealthCheckRequired = false
-      sandbox.pageCrashed = false
-      sandbox.pendingPageTarget = undefined
+      sandbox.unbindDefaultPage(undefined)
       sandbox.notifyDefaultTargetChange()
       yield* sandbox.networkCapture.cancel()
 
@@ -718,14 +707,14 @@ export class ExecuteSandbox {
     })
   }
 
-  adoptPage(target: AdoptTarget): Effect.Effect<string, Error> {
+  adoptPage(targetId: string): Effect.Effect<void, Error> {
     const sandbox = this
     return Effect.gen(function* () {
       // The manager reserves and validates the exact registry generation. Adoption
       // binds that identity, not renderer readiness: a cold CDP connection waits
       // for every announced page to initialize, which a busy user tab cannot do.
       const currentPage = sandbox.page
-      const sameTarget = sandbox.defaultPageTargetId === target.targetId
+      const sameTarget = sandbox.defaultPageTargetId === targetId
       yield* sandbox.networkCapture.cancel()
       if (shouldCloseCurrentPageOnAdopt({
         hasCurrentPage: currentPage !== undefined,
@@ -740,17 +729,21 @@ export class ExecuteSandbox {
           run: () => currentPage.close(),
         })
       }
-      sandbox.clearPageListeners()
-      sandbox.page = undefined
-      sandbox.defaultPageTargetId = target.targetId
-      sandbox.ownsPage = false
-      sandbox.pageHealthCheckRequired = false
-      sandbox.pageCrashed = false
-      sandbox.pageProtectedUi = false
-      sandbox.pendingPageTarget = { targetId: target.targetId, warnReplaced: false }
+      sandbox.unbindDefaultPage(targetId)
       sandbox.networkCapture.bindPage(undefined)
-      return target.url
     }).pipe(Effect.uninterruptible)
+  }
+
+  /** Forget the bound page; a target id is re-resolved exactly on the next execute. */
+  private unbindDefaultPage(targetId: string | undefined): void {
+    this.clearPageListeners()
+    this.page = undefined
+    this.defaultPageTargetId = targetId
+    this.ownsPage = false
+    this.pageHealthCheckRequired = false
+    this.pageCrashed = false
+    this.pageProtectedUi = false
+    this.pendingPageTarget = targetId ? { targetId, warnReplaced: false } : undefined
   }
 
   private async connectContext(): Promise<{ readonly browser: Browser; readonly context: BrowserContext }> {
@@ -764,16 +757,16 @@ export class ExecuteSandbox {
           run: () => staleBrowser.close(),
         }).pipe(Effect.ignore))
       }
-      const pendingAdoptedTarget = this.defaultPageTargetId !== undefined && !this.ownsPage
+      const adoptedDefaultTarget = this.defaultPageTargetId !== undefined && !this.ownsPage
       try {
         // Let Playwright own timeout/transport cleanup; never race and abandon
         // a connect promise that could bind a page after reporting failure.
         this.browser = await chromium.connectOverCDP(this.options.endpointUrl, {
-          timeout: pendingAdoptedTarget ? adoptedPageConnectTimeoutMs : playwrightConnectTimeoutMs,
+          timeout: adoptedDefaultTarget ? adoptedPageConnectTimeoutMs : playwrightConnectTimeoutMs,
           ...(this.options.sessionId ? { headers: { "Browser-Control-Session-Id": this.options.sessionId, "Browser-Control-Client-Kind": "sandbox" } } : {}),
         })
       } catch (cause) {
-        if (pendingAdoptedTarget && cause instanceof Error && cause.name === "TimeoutError") {
+        if (adoptedDefaultTarget && cause instanceof errors.TimeoutError) {
           throw new SessionPageRecoveryError({
             message: `Automation connection initialization for the adopted tab did not finish within ${adoptedPageConnectTimeoutMs}ms. The tab and exact target were kept; user code did not run. Retry after the browser or page becomes responsive.`,
             reason: "adopted-initialization-timeout",
@@ -956,14 +949,7 @@ export class ExecuteSandbox {
     if (this.defaultPageTargetId !== targetId) {
       return false
     }
-    this.clearPageListeners()
-    this.page = undefined
-    this.defaultPageTargetId = undefined
-    this.ownsPage = false
-    this.pageHealthCheckRequired = false
-    this.pageCrashed = false
-    this.pageProtectedUi = false
-    this.pendingPageTarget = undefined
+    this.unbindDefaultPage(undefined)
     this.networkCapture.bindPage(undefined)
     if (!this.pendingWarnings.includes(defaultPageClosedWarning)) {
       this.pendingWarnings.push(defaultPageClosedWarning)
@@ -1033,10 +1019,7 @@ export class ExecuteSandbox {
   private clearSnapshotRefs(): void {
     this.snapshotRefs.removeNavigationListener?.()
     delete this.snapshotRefs.removeNavigationListener
-    this.snapshotRefs.selectors.clear()
-    delete this.snapshotRefs.page
-    delete this.snapshotRefs.url
-    delete this.snapshotRefs.previousSnapshot
+    invalidateSnapshotDocument(this.snapshotRefs)
   }
 
   private clearPageListeners(): void {
@@ -1398,6 +1381,14 @@ export function createAriaSnapshotHelper(page: Pick<Page, "locator">): AriaSnaps
   }
 }
 
+/** Refs and diff baselines never survive the document they were captured from. */
+function invalidateSnapshotDocument(registry: SnapshotRefRegistry): void {
+  registry.selectors.clear()
+  delete registry.page
+  delete registry.url
+  delete registry.previousSnapshot
+}
+
 export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry): {
   readonly snapshot: SnapshotHelper
   readonly ref: SnapshotRefHelper
@@ -1461,10 +1452,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     const onFrameNavigated = (frame: Frame) => {
       if (frame !== page.mainFrame()) return
       navigatedDuringCapture = true
-      registry.selectors.clear()
-      delete registry.page
-      delete registry.url
-      delete registry.previousSnapshot
+      invalidateSnapshotDocument(registry)
     }
     const removeNavigationListener = () => page.off("framenavigated", onFrameNavigated)
     page.on("framenavigated", onFrameNavigated)

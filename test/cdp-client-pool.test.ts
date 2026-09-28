@@ -40,15 +40,16 @@ const grandchildTarget: ChildTarget = {
 }
 
 function setup() {
-  const pool = new CdpClientPool<{ events: CdpEvent[] }>((client, event) => client.events.push(event))
+  const retired: Array<{ readonly client: { events: CdpEvent[] }; readonly sessionId: string }> = []
+  const pool = new CdpClientPool<{ events: CdpEvent[] }>((client, event) => client.events.push(event), (client, sessionId) => retired.push({ client, sessionId }))
   const client: { events: CdpEvent[] } = { events: [] }
   pool.register(client)
-  return { pool, client, events: client.events }
+  return { pool, client, events: client.events, retired }
 }
 
 describe("CdpClientPool", () => {
   it("treats named external clients as raw unless they identify a sandbox transport", () => {
-    const pool = new CdpClientPool<object>(() => {})
+    const pool = new CdpClientPool<object>(() => {}, () => {})
     const named = {}, sandbox = {}, unnamed = {}
     pool.register(named, "alpha")
     pool.register(sandbox, "alpha", "sandbox")
@@ -60,7 +61,7 @@ describe("CdpClientPool", () => {
     expect(pool.isSandbox(sandbox)).toBe(false)
   })
   it("owns registration and cleanup for all per-client state", () => {
-    const pool = new CdpClientPool<object>(() => {})
+    const pool = new CdpClientPool<object>(() => {}, () => {})
     const client = {}
     pool.register(client, "session-a")
     pool.setAutoAttachParams(client, { autoAttach: true, flatten: true })
@@ -87,7 +88,7 @@ describe("CdpClientPool", () => {
   })
 
   it("keeps conflicting auto-attach settings scoped to their clients", () => {
-    const pool = new CdpClientPool<object>(() => {})
+    const pool = new CdpClientPool<object>(() => {}, () => {})
     const first = {}
     const second = {}
     pool.register(first)
@@ -103,7 +104,7 @@ describe("CdpClientPool", () => {
   })
 
   it("rejects duplicate registration and aliases for unknown clients", () => {
-    const pool = new CdpClientPool<object>(() => {})
+    const pool = new CdpClientPool<object>(() => {}, () => {})
     const client = {}
     pool.register(client)
 
@@ -113,7 +114,7 @@ describe("CdpClientPool", () => {
   })
 
   it("invalidates an idle generation when another client registers", () => {
-    const pool = new CdpClientPool<object>(() => {})
+    const pool = new CdpClientPool<object>(() => {}, () => {})
     const first = {}
     pool.register(first)
     const idleGeneration = pool.unregister(first)
@@ -126,7 +127,7 @@ describe("CdpClientPool", () => {
   })
 
   it("produces an idle generation only when the last client leaves", () => {
-    const pool = new CdpClientPool<object>(() => {})
+    const pool = new CdpClientPool<object>(() => {}, () => {})
     const first = {}
     const second = {}
     pool.register(first)
@@ -139,7 +140,7 @@ describe("CdpClientPool", () => {
   })
 
   it("routes root aliases without a Chrome session and child aliases with one", () => {
-    const pool = new CdpClientPool<object>(() => {})
+    const pool = new CdpClientPool<object>(() => {}, () => {})
     const client = {}
     pool.register(client)
 
@@ -155,7 +156,7 @@ describe("CdpClientPool", () => {
   })
 
   it("detaches alias-only tabs across clients without touching browser aliases or other tabs", () => {
-    const pool = new CdpClientPool<object>(() => {})
+    const pool = new CdpClientPool<object>(() => {}, () => {})
     const first = {}
     const second = {}
     pool.register(first)
@@ -180,7 +181,7 @@ describe("CdpClientPool", () => {
   })
 
   it("prunes hidden alias-only targets for one client without touching another client", () => {
-    const pool = new CdpClientPool<object>(() => {})
+    const pool = new CdpClientPool<object>(() => {}, () => {})
     const first = {}
     const second = {}
     pool.register(first)
@@ -374,7 +375,7 @@ describe("CdpClientPool", () => {
   })
 
   it("silently detaches a client-requested alias without detaching the real session", () => {
-    const { pool, client, events } = setup()
+    const { pool, client, events, retired } = setup()
     pool.announce(client, rootTarget)
     pool.announce(client, childTarget)
     const rootAlias = pool.createTargetAlias(client, rootTarget)
@@ -383,18 +384,19 @@ describe("CdpClientPool", () => {
     events.length = 0
 
     for (const alias of [rootAlias, childAlias, browserAlias]) {
-      expect(pool.detach(client, alias)).toEqual([])
-      expect(pool.detach(client, alias)).toEqual([])
+      pool.detach(client, alias)
+      pool.detach(client, alias)
       expect(pool.alias(client, alias)).toBeUndefined()
     }
 
     expect(pool.hasSession(client, rootTarget.sessionId)).toBe(true)
     expect(pool.hasSession(client, childTarget.sessionId)).toBe(true)
     expect(events).toEqual([])
+    expect(retired).toEqual([])
   })
 
-  it.each(["root", "child"])("silently detaches a client-requested %s subtree only for that client and returns retired canonical sessions", (kind) => {
-    const { pool, client, events } = setup()
+  it.each(["root", "child"])("silently detaches a client-requested %s subtree only for that client and reports retired canonical sessions", (kind) => {
+    const { pool, client, events, retired } = setup()
     const other: { events: CdpEvent[] } = { events: [] }
     pool.register(other)
     const browserAlias = pool.createBrowserAlias(client)
@@ -407,11 +409,12 @@ describe("CdpClientPool", () => {
     other.events.length = 0
 
     const detached = kind === "root" ? rootTarget : childTarget
-    expect(pool.detach(client, detached.sessionId)).toEqual([
+    pool.detach(client, detached.sessionId)
+    pool.detach(client, detached.sessionId)
+    pool.detach(client, "unannounced-session")
+    expect(retired).toEqual([
       grandchildTarget.sessionId, childTarget.sessionId, ...(kind === "root" ? [rootTarget.sessionId] : []),
-    ])
-    expect(pool.detach(client, detached.sessionId)).toEqual([])
-    expect(pool.detach(client, "unannounced-session")).toEqual([])
+    ].map((sessionId) => ({ client, sessionId })))
 
     for (const target of [rootTarget, childTarget, grandchildTarget]) {
       expect(pool.hasSession(client, target.sessionId)).toBe(kind === "child" && target === rootTarget)
@@ -426,7 +429,7 @@ describe("CdpClientPool", () => {
   })
 
   it("delivers events only to announced visible clients and prunes hidden subtrees", () => {
-    const { pool, client, events } = setup()
+    const { pool, client, events, retired } = setup()
     const hidden: { events: CdpEvent[] } = { events: [] }
     const unannounced: { events: CdpEvent[] } = { events: [] }
     pool.register(hidden)
@@ -452,6 +455,8 @@ describe("CdpClientPool", () => {
     ])
     expect(pool.hasSession(hidden, rootTarget.sessionId)).toBe(false)
     expect(pool.hasSession(hidden, childTarget.sessionId)).toBe(false)
+    // Announced retirements report through the same sink as silent ones.
+    expect(retired).toEqual([childTarget.sessionId, rootTarget.sessionId].map((sessionId) => ({ client: hidden, sessionId })))
     expect(pool.alias(hidden, hiddenAlias)).toBeUndefined()
     expect(pool.alias(hidden, browserAlias)).toEqual(ClientCdpSessionAlias.Browser())
     expect(pool.alias(client, visibleAlias)).toBeDefined()

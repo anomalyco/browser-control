@@ -7,10 +7,14 @@ import { defaultPageReplacedWarning, ExecuteSandbox, type RequestHandoff } from 
 import { awaitHandoffAction } from "../src/handoff.ts"
 import { BrowserControlSessions } from "../src/session-manager.ts"
 
-const { connectOverCDP } = vi.hoisted(() => ({ connectOverCDP: vi.fn<() => Promise<unknown>>() }))
+const { connectOverCDP, TimeoutError } = vi.hoisted(() => ({
+  connectOverCDP: vi.fn<() => Promise<unknown>>(),
+  TimeoutError: class TimeoutError extends Error {},
+}))
 
 vi.mock("playwright-core", () => ({
   chromium: { connectOverCDP },
+  errors: { TimeoutError },
   selectors: { register: vi.fn(async () => {}) },
 }))
 
@@ -77,7 +81,7 @@ describe("ExecuteSandbox", () => {
   it("adopts a cold target without connecting and releases it without closing a user tab", async () => {
     connectOverCDP.mockImplementation(() => new Promise(() => {}))
     const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test" })
-    expect(await Effect.runPromise(sandbox.adoptPage({ targetId: "user-target", url: "https://example.test/user" }))).toBe("https://example.test/user")
+    await Effect.runPromise(sandbox.adoptPage("user-target"))
     expect(sandbox.getStatus()).toMatchObject({ connected: false, pageUrl: null })
     await Effect.runPromise(sandbox.disconnectSettled())
     await Effect.runPromise(sandbox.closeSettled())
@@ -112,14 +116,14 @@ describe("ExecuteSandbox", () => {
         previous.closed = true
         previous.emit("close")
       })
-      const adoption = yield* Effect.forkChild(sandbox.adoptPage({ targetId: "next", url: "https://example.test/next" }))
+      const adoption = yield* Effect.forkChild(sandbox.adoptPage("next"))
       yield* closing.await
       yield* TestClock.adjust("3 seconds")
       expect(adoption.pollUnsafe()).toBeUndefined()
       expect(sandbox.networkStatus().active).toBe(false)
       expect(sandbox.getStatus()).toMatchObject({ pageUrl: previous.url(), stateKeys: ["saved"] })
       yield* release.open
-      expect(yield* Fiber.join(adoption)).toBe("https://example.test/next")
+      yield* Fiber.join(adoption)
       expect(sandbox.getStatus()).toMatchObject({ connected: false, pageUrl: null, stateKeys: ["saved"] })
       expect(previous.listenerCount("close")).toBe(0)
       const next = context.addPage("next", "https://example.test/next")
@@ -133,8 +137,8 @@ describe("ExecuteSandbox", () => {
   it("bounds adopted initialization, never runs failed setup code, and recovers the exact same-URL target", async () => {
     const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test", sessionId: "lazy-adopt" })
     const url = "https://example.test/user"
-    await Effect.runPromise(sandbox.adoptPage({ targetId: "user-target", url }))
-    connectOverCDP.mockRejectedValueOnce(Object.assign(new Error("browserType.connectOverCDP: Timeout 8000ms exceeded"), { name: "TimeoutError" }))
+    await Effect.runPromise(sandbox.adoptPage("user-target"))
+    connectOverCDP.mockRejectedValueOnce(new TimeoutError("browserType.connectOverCDP: Timeout 8000ms exceeded"))
     const failed = await Effect.runPromise(sandbox.execute("state.lateMutation = true"))
     expect(failed).toMatchObject({ isError: true, setupFailed: true, diagnostic: "session-page/adopted-initialization-timeout" })
     expect(connectOverCDP).toHaveBeenLastCalledWith("http://relay.test", expect.objectContaining({ timeout: 8_000 }))
@@ -162,7 +166,7 @@ describe("ExecuteSandbox", () => {
     const previous = context.targets[0]
     if (!previous) throw new Error("Expected previous page")
     previous.close.mockRejectedValueOnce(new Error("Close failed"))
-    await expect(Effect.runPromise(sandbox.adoptPage({ targetId: "next", url: "https://example.test/next" }))).rejects.toThrow("Close failed")
+    await expect(Effect.runPromise(sandbox.adoptPage("next"))).rejects.toThrow("Close failed")
     expect(await Effect.runPromise(sandbox.execute("return state.saved"))).toMatchObject({ value: 42, isError: false })
     expect(previous.listenerCount("close")).toBe(1)
     expect(context.newPage).toHaveBeenCalledOnce()
@@ -176,7 +180,7 @@ describe("ExecuteSandbox", () => {
     connect(context)
     const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test" })
     try {
-      await Effect.runPromise(sandbox.adoptPage({ targetId: "absent", url: decoy.url() }))
+      await Effect.runPromise(sandbox.adoptPage("absent"))
       const execute = Effect.runPromise(sandbox.execute("state.wrongPage = true"))
       await vi.advanceTimersByTimeAsync(3_100)
       expect(await execute).toMatchObject({ isError: true, setupFailed: true, diagnostic: "session-page/target-unavailable" })
@@ -192,7 +196,7 @@ describe("ExecuteSandbox", () => {
 
   it("preserves non-timeout connection failures rather than diagnosing an unresponsive page", async () => {
     const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test" })
-    await Effect.runPromise(sandbox.adoptPage({ targetId: "user-target", url: "https://example.test/user" }))
+    await Effect.runPromise(sandbox.adoptPage("user-target"))
     connectOverCDP.mockRejectedValueOnce(new Error("ECONNREFUSED"))
     expect(await Effect.runPromise(sandbox.execute("state.setupRan = true"))).toMatchObject({
       isError: true, setupFailed: true, text: "ECONNREFUSED",
@@ -209,7 +213,7 @@ describe("ExecuteSandbox", () => {
     connect(context)
     const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test" })
     try {
-      await Effect.runPromise(sandbox.adoptPage({ targetId: page.targetId, url: page.url() }))
+      await Effect.runPromise(sandbox.adoptPage(page.targetId))
       const read = Effect.runPromise(sandbox.execute("return await page.title()"))
       await vi.advanceTimersByTimeAsync(5_100)
       expect(await read).toMatchObject({ isError: true, text: expect.stringContaining("page.title() timed out") })
@@ -304,7 +308,7 @@ describe("ExecuteSandbox", () => {
       const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test", onDefaultTargetChange })
       if (owner === "user") {
         const adopted = context.addPage("adopted")
-        yield* sandbox.adoptPage({ targetId: adopted.targetId, url: adopted.url() })
+        yield* sandbox.adoptPage(adopted.targetId)
       }
       expect(yield* sandbox.execute("state.saved = 42; await network.start()")).toMatchObject({ isError: false })
       const page = context.targets[0]
@@ -447,8 +451,7 @@ describe("ExecuteSandbox", () => {
         endpointUrl: "http://relay.test",
         requestHandoff: (request) => awaitHandoffAction({
           ...request,
-          outcome: Promise.resolve("timeout"),
-          cancel: () => {},
+          wait: { id: "handoff-1", outcome: Promise.resolve("timeout"), cancel: () => {}, holdCompletion: () => () => {} },
         }),
       })
       const execute = yield* Effect.forkChild(sandbox.execute('await handoff("Continue", { start: () => new Promise(() => {}) })'))

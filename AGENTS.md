@@ -123,7 +123,9 @@ local Node relay.
 - `CdpClientPool` owns client announcements and aliases as private state. Its
   transitions dedupe attachments, detach descendants before parents, and
   invalidate aliases together. Callers supply visibility policy, never mutate
-  announcement indexes. Keep its event sink browser-free for transition tests.
+  announcement indexes. Its retirement callback is the sole source of per-client
+  session retirement, announced or silent. Keep its event sink and retirement
+  callback browser-free for transition tests.
 - A named CDP client is not necessarily an Execute Sandbox. Only the sandbox's
   internal client-kind header identifies its transport; other clients remain raw
   for restart safety even when they carry a session id. Track accepted CDP work

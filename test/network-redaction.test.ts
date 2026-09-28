@@ -202,20 +202,20 @@ describe("SecretCollector", () => {
 
   it("redacts short exact values from command and execute output", () => {
     expect(redactKnownValues("https://example.com/v1/dark-mode?limit=10", [
-      { ref: "BC_SECRET_1", value: "1", sources: ["cookie.limit"] },
-      { ref: "BC_SECRET_2", value: "dark", sources: ["cookie.theme"] },
+      { ref: "BC_SECRET_1", value: "1" },
+      { ref: "BC_SECRET_2", value: "dark" },
     ])).toBe("https://example.com/v${BC_SECRET_1}/${BC_SECRET_2}-mode?limit=${BC_SECRET_1}0")
   })
 
   it("does not rewrite stable placeholders during exact-value output redaction", () => {
     expect(redactKnownValues("${BC_SECRET_1}", [
-      { ref: "BC_SECRET_2", value: "BC_SECRET_1", sources: ["request.header.authorization"] },
+      { ref: "BC_SECRET_2", value: "BC_SECRET_1" },
     ])).toBe("${BC_SECRET_1}")
   })
 
   it("redacts exact known values from command output", () => {
     expect(redactKnownValues("using secret-value twice secret-value", [
-      { ref: "BC_SECRET_1", value: "secret-value", sources: [] },
+      { ref: "BC_SECRET_1", value: "secret-value" },
     ])).toBe("using ${BC_SECRET_1} twice ${BC_SECRET_1}")
   })
 
