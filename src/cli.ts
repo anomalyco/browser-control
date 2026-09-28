@@ -66,7 +66,11 @@ const ensureCliRelay = Effect.fnUntraced(function* () {
 const ensureCliRelayAndExtension = Effect.fnUntraced(function* () {
   const relay = yield* RelayClient.Service
   const readiness = yield* ensureCliRelay()
-  yield* RelayLifecycle.ensureExtensionConnected({ relay, waitForReconnect: RelayLifecycle.shouldWaitForExtensionReconnect(readiness) })
+  yield* RelayLifecycle.ensureExtensionConnected({
+    relay,
+    waitForReconnect: RelayLifecycle.shouldWaitForExtensionReconnect(readiness),
+    onWait: Console.error(`Waiting up to ${RelayLifecycle.extensionReconnectWaitMs / 1_000}s for the Browser Control extension to reconnect`),
+  })
 })
 
 const resolveExistingSessionId = Effect.fnUntraced(function* (explicitSessionId: string | undefined) {

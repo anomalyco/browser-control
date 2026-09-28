@@ -1,5 +1,7 @@
+import { extensionReconnectAlarmPeriodMs } from "../../src/protocol.ts"
+
 export const reconnectAlarmName = "browser-control-reconnect"
-const reconnectAlarmPeriodMinutes = 0.5
+const reconnectAlarmPeriodMinutes = extensionReconnectAlarmPeriodMs / 60_000
 const socketKeepAliveIntervalMs = 20_000
 
 type AlarmApi = Pick<typeof chrome.alarms, "create" | "get">

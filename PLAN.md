@@ -206,6 +206,12 @@ browser profile wakes its MV3 worker, repairs the reconnect alarm, and opens a
 fresh relay socket. The existing 20-second heartbeat keeps that socket active
 after reconnection.
 
+When the relay is down, Chrome stops the idle worker and only the 30-second
+reconnect alarm wakes it. Relay clients therefore wait one alarm period plus a
+5-second margin for the extension after relay startup. Both values derive from
+`extensionReconnectAlarmPeriodMs` in `src/protocol.ts`, and the CLI prints one
+line when that wait begins.
+
 ### Unpacked extension connectivity survives browser and path differences
 
 The unpacked manifest carries a stable public key, while Store packaging strips

@@ -543,8 +543,9 @@ Common diagnoses:
   `page.url()` read can still work; retry the page read after the page settles.
   Ordinary missing-locator timeouts do not receive this diagnostic.
 - `connected:false`: run a relay-backed command and allow the extension startup
-  or alarm wake-up to reconnect. Reload the unpacked extension only if that loop
-  does not recover.
+  or alarm wake-up to reconnect. A sleeping extension wakes on a 30-second
+  alarm, so the command waits up to 35 seconds. Reload the unpacked extension
+  only if that loop does not recover.
 - Incompatible extension protocol: update either the extension or npm package;
   exact extension and relay release versions do not need to match.
 - Competing browser/profile connections: the active browser is preserved and

@@ -5,6 +5,12 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { readonly [key: string]: 
 export type JsonObject = { readonly [key: string]: JsonValue }
 
 export const extensionProtocolVersion = 2
+
+/**
+ * Chrome's minimum alarm period. A disconnected extension's MV3 worker sleeps
+ * until this alarm fires, so relay clients must wait at least this long.
+ */
+export const extensionReconnectAlarmPeriodMs = 30_000
 const legacyExtensionProtocolVersion = 1
 
 export type ExtensionProtocolCompatibility = {
