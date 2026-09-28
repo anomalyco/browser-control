@@ -47,7 +47,7 @@ function decodeCliOperands(operands: ReadonlyArray<string>): ReadonlyArray<strin
 const readExecuteFile = Effect.fnUntraced(function* (filePath: string) {
   const fs = yield* FileSystem.FileSystem
   return yield* fs.readFileString(path.resolve(filePath)).pipe(
-    Effect.mapError((cause) => new Error(`read execute file ${filePath}`, { cause })),
+    Effect.mapError((cause) => new Error(`read execute file ${filePath}: ${cause.reason.message}`, { cause })),
   )
 })
 

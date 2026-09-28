@@ -593,6 +593,10 @@ export class ExecuteSandbox {
           if (diagnostic === protectedExtensionUiDiagnostic) {
             warnings.push(protectedExtensionUiWarning)
           }
+          const nodeContextWarning = error instanceof ExecuteCodeError ? formatNodeContextWarning(error.originalError) : undefined
+          if (nodeContextWarning) {
+            warnings.push(nodeContextWarning)
+          }
           const logCompactionWarning = formatLogCompactionWarning(logSummary)
           if (logCompactionWarning) {
             warnings.push(logCompactionWarning)
@@ -2607,6 +2611,20 @@ function formatLogCompactionWarning(summary: ExecuteLogSummary): string | undefi
     return undefined
   }
   return `Captured ${summary.totalCount} console/page events: returned ${summary.returnedCount}, folded ${summary.repeatedCount} repeated page entries, and omitted ${summary.omittedCount} after limits (page=${maxCapturedPageLogs}, script=${maxCapturedScriptLogs}). Aftermath error counts include all events.`
+}
+
+const pageOnlyGlobalPattern = /^(window|document|localStorage|sessionStorage|location|navigator|getComputedStyle) is not defined$/
+
+/** Explain failures caused by treating Node-side execute code as page code. */
+export function formatNodeContextWarning(error: Error): string | undefined {
+  const pageGlobal = error.name === "ReferenceError" ? pageOnlyGlobalPattern.exec(error.message)?.[1] : undefined
+  if (pageGlobal) {
+    return `Execute code runs in Node, where \`${pageGlobal}\` is undefined. Read page globals inside page.evaluate(() => ...).`
+  }
+  if (error.name === "TypeError" && error.message.startsWith("Failed to parse URL from ")) {
+    return "Execute code runs in Node, so fetch has no page origin or cookies. Use page.evaluate(() => fetch(...)) for same-origin requests."
+  }
+  return undefined
 }
 
 export async function runUserCode({ code, globals }: { readonly code: string; readonly globals: SandboxGlobals }): Promise<{

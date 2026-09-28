@@ -321,6 +321,8 @@ local Node relay.
   without overwriting a linked installation. The default build still writes
   checkout `dist`; never run it against an installation used by other agents.
 - Run `pnpm build:extension` after extension changes.
+  It builds in a staging directory and replaces `extension/dist` file by file;
+  never delete the directory a browser loads unpacked.
 - Extension shim changes require reloading the unpacked extension once in Brave.
 - Relay-only changes should not require reloading the extension.
 - Use `termctrl` for long-running relay sessions during testing.
