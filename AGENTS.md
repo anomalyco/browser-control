@@ -378,6 +378,9 @@ browser-control skill
   heartbeat traffic every 20 seconds while its relay socket is open. Chrome may
   clear persisted alarms and retires idle extension workers even with an open
   socket.
+- Relay clients wait one reconnect alarm period plus a margin for the extension
+  after relay startup, because only the alarm wakes a sleeping worker. Derive
+  both from `extensionReconnectAlarmPeriodMs` in `src/protocol.ts`.
 - The relay dedupes target announcements per CDP client by targetId: a
   re-announce under a new sessionId emits `Target.detachedFromTarget` for the
   old session first. Never announce the same targetId twice to one client

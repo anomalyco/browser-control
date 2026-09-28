@@ -4,6 +4,7 @@ import crypto from "node:crypto"
 import path from "node:path"
 import process from "node:process"
 import { fileURLToPath } from "node:url"
+import { extensionReconnectAlarmPeriodMs } from "./protocol.ts"
 import * as RelayClient from "./relay-client.ts"
 import { RelayShutdownRequest, type ExtensionStatus, type RelayVersion } from "./relay-schema.ts"
 import { browserControlBuildId } from "./version.ts"
@@ -217,11 +218,17 @@ function isRelayInstanceChanged(error: unknown): boolean {
   return error instanceof RelayClient.RelayRejected && error.status === 409 && error.code === "invalid-request"
 }
 
+// Cover one full reconnect alarm period plus margin for the worker to connect.
+export const extensionReconnectWaitMs = extensionReconnectAlarmPeriodMs + 5_000
+const extensionReconnectProbeMs = 200
+
 export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensionConnected")(function* (options: {
   readonly relay: RelayClient.Interface
   readonly waitForReconnect?: boolean
   readonly retryTimes?: number
   readonly retryDelayMs?: number
+  /** Runs once, when the first probe finds the extension disconnected. */
+  readonly onWait?: Effect.Effect<void>
 }) {
   const check = options.relay.extensionStatus.pipe(Effect.flatMap((status): Effect.Effect<
     ExtensionStatus,
@@ -242,10 +249,16 @@ export const ensureExtensionConnected = Effect.fn("RelayLifecycle.ensureExtensio
   if (!options.waitForReconnect) {
     return yield* check
   }
+  let waitAnnounced = false
   return yield* check.pipe(
+    Effect.tapError((error) => {
+      if (waitAnnounced || !options.onWait || !(error instanceof ExtensionDisconnected)) return Effect.void
+      waitAnnounced = true
+      return options.onWait
+    }),
     Effect.retry({
-      times: options.retryTimes ?? 50,
-      schedule: Schedule.spaced(options.retryDelayMs ?? 200),
+      times: options.retryTimes ?? Math.ceil(extensionReconnectWaitMs / extensionReconnectProbeMs),
+      schedule: Schedule.spaced(options.retryDelayMs ?? extensionReconnectProbeMs),
       while: (error) => error instanceof ExtensionDisconnected || isRelayStartingOrUnreachable(error),
     }),
   )

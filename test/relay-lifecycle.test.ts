@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vitest"
 import { ConfigProvider, Effect } from "effect"
 import { spawn } from "node:child_process"
 import { fileURLToPath } from "node:url"
+import { extensionReconnectAlarmPeriodMs } from "../src/protocol.ts"
 import * as RelayClient from "../src/relay-client.ts"
 import {
   ensureExtensionConnected,
   ensureRelay,
+  extensionReconnectWaitMs,
   managedRelayEntrypoint,
   managedRelayLaunch,
   relayBuildProblem,
@@ -442,6 +444,44 @@ describe("relay lifecycle", () => {
 
     expect(status.connected).toBe(true)
     expect(attempts).toBe(42)
+  })
+
+  it("waits through a full extension reconnect alarm period and announces the wait once", async () => {
+    // At the default 200 ms probe spacing, 160 probes span 32 s, past the 30 s alarm.
+    let attempts = 0
+    let announcements = 0
+    const client = relay({
+      version: Effect.succeed(version),
+      extensionStatus: Effect.sync(() => ({ connected: ++attempts >= 160, version: "0.0.11", activeTargets: 0 })),
+    })
+
+    const status = await Effect.runPromise(ensureExtensionConnected({
+      relay: client,
+      waitForReconnect: true,
+      retryDelayMs: 0,
+      onWait: Effect.sync(() => { announcements++ }),
+    }))
+
+    expect(status.connected).toBe(true)
+    expect(attempts).toBe(160)
+    expect(announcements).toBe(1)
+    expect(extensionReconnectWaitMs).toBeGreaterThan(extensionReconnectAlarmPeriodMs)
+  })
+
+  it("does not announce a wait when the extension is already connected", async () => {
+    let announcements = 0
+    const client = relay({
+      version: Effect.succeed(version),
+      extensionStatus: Effect.succeed({ connected: true, version: "0.0.11", activeTargets: 0 }),
+    })
+
+    await Effect.runPromise(ensureExtensionConnected({
+      relay: client,
+      waitForReconnect: true,
+      onWait: Effect.sync(() => { announcements++ }),
+    }))
+
+    expect(announcements).toBe(0)
   })
 
   it("fails an incompatible extension protocol without retrying", async () => {
