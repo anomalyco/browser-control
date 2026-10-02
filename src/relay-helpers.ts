@@ -12,6 +12,8 @@ export const defaultHost = "127.0.0.1"
 export const defaultPort = 19989
 export const chromeWebStoreExtensionOrigin = "chrome-extension://gmjpoplfomnnjipeiojccjbpjlodkjhn"
 export const stableUnpackedExtensionOrigin = "chrome-extension://eibhgjafffkigblngnhafgbcipofaeon"
+/** opencode Browser (anomalyco/opencode packages/browser-extension), which also speaks the extension protocol. */
+export const opencodeBrowserExtensionOrigin = "chrome-extension://afeafocngkodbmaipcngoamamfmekgfo"
 
 export function chromeExtensionOriginForPath(extensionPath: string, platform: NodeJS.Platform = process.platform): string {
   const normalizedPath = platform === "win32" && /^[a-z]:/.test(extensionPath)
@@ -108,6 +110,7 @@ export function validateWebSocketOrigin(options: {
   if (
     options.origin === chromeWebStoreExtensionOrigin
     || options.origin === stableUnpackedExtensionOrigin
+    || options.origin === opencodeBrowserExtensionOrigin
     || options.additionalChromeExtensionOrigins?.has(options.origin)
   ) {
     return undefined
