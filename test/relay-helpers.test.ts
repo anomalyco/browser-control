@@ -3,6 +3,7 @@ import {
   chromeExtensionOriginForPath,
   chromeWebStoreExtensionOrigin,
   stableUnpackedExtensionOrigin,
+  opencodeBrowserExtensionOrigin,
   generateSessionId,
   getTargetInfo,
   isRestrictedTarget,
@@ -55,6 +56,7 @@ describe("validateWebSocketOrigin", () => {
   it("accepts the Store extension and missing origins for non-extension clients", () => {
     expect(validateWebSocketOrigin({ origin: chromeWebStoreExtensionOrigin })).toBeUndefined()
     expect(validateWebSocketOrigin({ origin: stableUnpackedExtensionOrigin })).toBeUndefined()
+    expect(validateWebSocketOrigin({ origin: opencodeBrowserExtensionOrigin })).toBeUndefined()
     expect(validateWebSocketOrigin({ origin: undefined })).toBeUndefined()
   })
 
