@@ -59,7 +59,7 @@ function renderStatus(): void {
         height: auto !important;
         z-index: 2147483645 !important;
       }
-      #status {
+      #__browser_control_status__ {
         box-sizing: border-box;
         max-width: min(360px, calc(100vw - 20px));
         overflow: hidden;
@@ -76,7 +76,7 @@ function renderStatus(): void {
         backdrop-filter: blur(8px);
         opacity: 0.58;
       }
-      #status::before {
+      #__browser_control_status__::before {
         display: inline-block;
         width: 5px;
         height: 5px;
@@ -86,10 +86,10 @@ function renderStatus(): void {
         content: "";
         vertical-align: 1px;
       }
-      #status[data-tone="running"]::before { background: #f59e0b; }
-      #status[data-tone="waiting"]::before { background: #3b82f6; }
-      #status[data-tone="running"] { opacity: 0.92; }
-      #status[data-tone="waiting"] {
+      #__browser_control_status__[data-tone="running"]::before { background: #f59e0b; }
+      #__browser_control_status__[data-tone="waiting"]::before { background: #3b82f6; }
+      #__browser_control_status__[data-tone="running"] { opacity: 0.92; }
+      #__browser_control_status__[data-tone="waiting"] {
         position: absolute;
         right: 10px;
         bottom: 10px;
@@ -101,14 +101,14 @@ function renderStatus(): void {
         transform-origin: right bottom;
         animation: handoff-enter 420ms cubic-bezier(0.22, 1, 0.36, 1);
       }
-      :host([data-anchor="cursor"]) #status[data-tone="waiting"] {
+      :host([data-anchor="cursor"]) #__browser_control_status__[data-tone="waiting"] {
         right: auto;
         bottom: auto;
         left: var(--bc-prompt-left);
         top: var(--bc-prompt-top);
         transform-origin: 18px 0;
       }
-      #vignette {
+      #__browser_control_vignette__ {
         position: fixed;
         inset: 0;
         pointer-events: none;
@@ -116,7 +116,7 @@ function renderStatus(): void {
         box-shadow: inset 0 0 0 1px rgba(96, 165, 250, 0.1), inset 0 0 64px rgba(37, 99, 235, 0.07);
         animation: handoff-pulse 2600ms ease-in-out infinite;
       }
-      #prompt {
+      #__browser_control_prompt__ {
         margin: 8px 0 10px;
         color: #fff;
         font: 500 13px/1.4 system-ui, -apple-system, sans-serif;
@@ -146,17 +146,17 @@ function renderStatus(): void {
         50% { opacity: 0.68; }
       }
       @media (prefers-reduced-motion: reduce) {
-        #status[data-tone="waiting"], #vignette { animation: none; }
+        #__browser_control_status__[data-tone="waiting"], #__browser_control_vignette__ { animation: none; }
       }
     `
     const status = document.createElement("div")
-    status.id = "status"
+    status.id = "__browser_control_status__"
     status.setAttribute("role", "status")
     status.setAttribute("aria-live", "polite")
     shadow.append(style, status)
   }
 
-  const statusElement = host.shadowRoot?.getElementById("status")
+  const statusElement = host.shadowRoot?.getElementById("__browser_control_status__")
   if (!statusElement) {
     return
   }
@@ -167,11 +167,11 @@ function renderStatus(): void {
   statusElement.dataset.tone = view.tone
   host.dataset.interactive = String(view.completion !== undefined)
   host.dataset.waiting = String(view.completion !== undefined)
-  host.shadowRoot?.getElementById("vignette")?.remove()
+  host.shadowRoot?.getElementById("__browser_control_vignette__")?.remove()
   clearGhostCursorAttention()
   if (view.message) {
     const prompt = document.createElement("div")
-    prompt.id = "prompt"
+    prompt.id = "__browser_control_prompt__"
     prompt.textContent = view.message
     statusElement.append(prompt)
   }
@@ -187,7 +187,7 @@ function renderStatus(): void {
     })
     statusElement.append(button)
     const vignette = document.createElement("div")
-    vignette.id = "vignette"
+    vignette.id = "__browser_control_vignette__"
     host.shadowRoot?.insertBefore(vignette, statusElement)
     positionWaitingStatus(host)
   }

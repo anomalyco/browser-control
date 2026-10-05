@@ -610,6 +610,7 @@ export class ExecuteSandbox {
             diagnostic === protectedExtensionUiDiagnostic ? protectedExtensionUiWarning : undefined,
             error instanceof ExecuteCodeError ? formatNodeContextWarning(error.originalError) : undefined,
             error instanceof ExecuteCodeError ? formatPointerInterceptionWarning(error.originalError) : formatPointerInterceptionWarning(error),
+            formatLocatorFailurePageWarning(error instanceof ExecuteCodeError ? error.originalError : error, aftermath),
           )
           return {
             text: this.networkCapture.redactText(error instanceof ExecuteCodeError ? error.stack ?? error.message : error.message),
@@ -2799,10 +2800,14 @@ export function formatNodeContextWarning(error: Error): string | undefined {
   if (error.name === "TypeError" && error.message.startsWith("Failed to parse URL from ")) {
     return "Execute code runs in Node, so fetch has no page origin or cookies. Use page.evaluate(() => fetch(...)) for same-origin requests."
   }
+  if (error.name === "TypeError" && /The "cb" argument must be of type function/i.test(error.message)) {
+    return "The execute `fs` alias is callback-style `node:fs`; use `await fs.promises.writeFile(...)` / `await fs.promises.readFile(...)` or `fs.writeFileSync(...)`."
+  }
   return undefined
 }
 
 const pointerInterceptionPattern = /(<[a-zA-Z][^>\n]*>[^\n]*?)\s+intercepts pointer events/
+const locatorFailurePattern = /waiting for locator\(|waiting for getBy|strict mode violation:/i
 
 /** Extract the covering element when Playwright times out because another element intercepts pointer events. */
 export function formatPointerInterceptionWarning(error: unknown): string | undefined {
@@ -2810,6 +2815,19 @@ export function formatPointerInterceptionWarning(error: unknown): string | undef
   const blocker = pointerInterceptionPattern.exec(error.message)?.[1]
   if (!blocker) return undefined
   return `Pointer action was blocked because ${blocker} intercepts pointer events. Dismiss the covering dialog/banner or scroll the target clear of sticky chrome instead of retrying the same click.`
+}
+
+function formatLocatorFailurePageWarning(error: unknown, aftermath: ExecuteAftermath | undefined): string | undefined {
+  if (!(error instanceof Error) || !locatorFailurePattern.test(error.message)) return undefined
+  const rawUrl = aftermath?.endUrl ?? aftermath?.startUrl
+  if (!rawUrl) return undefined
+  try {
+    const parsed = new URL(rawUrl)
+    const boundedUrl = parsed.origin === "null" ? rawUrl.slice(0, 96) : `${parsed.origin}${parsed.pathname}`.slice(0, 120)
+    return `Locator failed on page ${boundedUrl}. Run snapshot() to inspect current controls.`
+  } catch {
+    return undefined
+  }
 }
 
 export async function runUserCode({ code, globals }: { readonly code: string; readonly globals: SandboxGlobals }): Promise<{
