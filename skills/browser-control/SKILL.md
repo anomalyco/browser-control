@@ -497,7 +497,7 @@ values fail instead of silently clamping. The start result reports the chosen ra
 
 `--mode auto` uses tab capture for user-owned tabs and CDP for relay-owned tabs.
 Tab capture can include audio; CDP requires `ffmpeg` and has no audio. Use the
-command's `--help` for format and cursor options.
+command's `--help` for format and cursor options. Inside `execute`, `showGhostCursor({ style?, clickStyle? })` keeps the on-page cursor visible across steps, `ghostCursor.caption(title, { step?, subtitle?, tone? })` renders a lower-third step banner, and `ghostCursor.callout(target, label, { detail?, tone? })` highlights a verified element.
 
 CDP recordings preserve the starting CSS viewport (not a fixed 720p canvas),
 use high-quality source frames, and default to 60 fps. Use `--frame-rate 30`
