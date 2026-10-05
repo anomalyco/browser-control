@@ -2,13 +2,15 @@ import { Match, Predicate } from "effect"
 import type { Locator, Page } from "playwright-core"
 import type { JsonObject } from "./protocol.ts"
 
-type GhostCursorStyle = "spring-inertia" | "distance-glide" | "far-airplane" | "minimal-spring"
+type GhostCursorStyle = "distance-glide" | "spring-inertia" | "far-airplane" | "minimal-spring"
+type GhostCursorClickStyle = "tactile-bloom" | "precision-reticle" | "double-wave" | "minimal-press"
 
 export type GhostCursorClientOptions = {
   readonly color?: string
   readonly size?: number
   readonly zIndex?: number
   readonly style?: GhostCursorStyle
+  readonly clickStyle?: GhostCursorClickStyle
 }
 
 type GhostCursorTone = "neutral" | "accent" | "success" | "warn"
@@ -68,7 +70,7 @@ export const ghostCursorClientSource = `(() => {
   if (window !== window.top) {
     return;
   }
-  if (globalThis.__browserControlGhostCursor?.version === 9) {
+  if (globalThis.__browserControlGhostCursor?.version === 10) {
     return;
   }
   globalThis.__browserControlGhostCursor?.hide?.();
@@ -77,7 +79,13 @@ export const ghostCursorClientSource = `(() => {
   const captionId = "__browser_control_ghost_caption__";
   const positionStorageKey = "__browser_control_ghost_cursor_position__";
   const captionStorageKey = "__browser_control_ghost_cursor_caption__";
-  const defaults = { color: "#1c1c1f", size: 23, zIndex: 2147483646, style: "spring-inertia" };
+  const defaults = {
+    color: "#1c1c1f",
+    size: 23,
+    zIndex: 2147483646,
+    style: "distance-glide",
+    clickStyle: "tactile-bloom",
+  };
   const svgNamespace = "http://www.w3.org/2000/svg";
   const cursorPathData =
     "M0.92 2.18C0.61 1.37 1.42 0.58 2.23 0.9L14.39 5.68C15.23 6.01 15.23 7.2 14.39 7.54L9.86 9.37C9.61 9.47 9.41 9.67 9.31 9.92L7.44 14.42C7.09 15.25 5.9 15.23 5.58 14.39L0.92 2.18Z";
@@ -113,7 +121,7 @@ export const ghostCursorClientSource = `(() => {
     arcSign: 1,
     lastMoveDist: 0,
     flight: null,
-    pulses: [],
+    effects: [],
     flightResolvers: [],
     activeUntil: 0,
     actionQueue: Promise.resolve(),
@@ -134,17 +142,22 @@ export const ghostCursorClientSource = `(() => {
     const u = clamp(t, 0, 1);
     return u * u * u * (u * (u * 6 - 15) + 10);
   };
+  const easeOutExpo = (t) => {
+    const u = clamp(t, 0, 1);
+    return u === 1 ? 1 : 1 - Math.pow(2, -10 * u);
+  };
+  const easeOutQuart = (t) => 1 - Math.pow(1 - clamp(t, 0, 1), 4);
   const wrapPi = (x) => {
     let r = (x + PI) % TAU;
     if (r < 0) r += TAU;
     return r - PI;
   };
-  const easeOutCubic = (t) => 1 - Math.pow(1 - clamp(t, 0, 1), 3);
   const mergeOptions = (options) => ({
     color: typeof options?.color === "string" ? options.color : defaults.color,
     size: typeof options?.size === "number" && Number.isFinite(options.size) ? options.size : defaults.size,
     zIndex: typeof options?.zIndex === "number" && Number.isFinite(options.zIndex) ? options.zIndex : defaults.zIndex,
     style: typeof options?.style === "string" ? options.style : state.options.style || defaults.style,
+    clickStyle: typeof options?.clickStyle === "string" ? options.clickStyle : state.options.clickStyle || defaults.clickStyle,
   });
   const formatCoord = (value) => String(Number(value.toFixed(2)));
   const applyPosition = () => {
@@ -153,7 +166,11 @@ export const ghostCursorClientSource = `(() => {
     }
     state.element.style.transform = "translate3d(" + formatCoord(state.renderedX) + "px, " + formatCoord(state.renderedY) + "px, 0)";
     if (state.arrow) {
+      const pressed = state.element.dataset.pressed === "true";
       state.arrow.style.transform = "rotate(" + formatCoord(state.deg) + "deg) scale(" + formatCoord(state.scale) + ")";
+      state.arrow.style.filter = pressed
+        ? "drop-shadow(0 1px 2px rgba(0,0,0,0.52))"
+        : "drop-shadow(0 2.5px 5px rgba(0,0,0,0.34)) drop-shadow(0 0.5px 1.5px rgba(0,0,0,0.22))";
     }
   };
 
@@ -180,71 +197,204 @@ export const ghostCursorClientSource = `(() => {
     state.stage = stage;
     return stage;
   };
-  const spawnClickPulse = (x, y, phase) => {
+  const createSvgOverlay = (x, y, boxSize) => {
     const stage = ensureStage();
+    const svg = document.createElementNS(svgNamespace, "svg");
+    const half = boxSize / 2;
+    svg.setAttribute("viewBox", (-half) + " " + (-half) + " " + boxSize + " " + boxSize);
+    svg.style.cssText = "position:fixed;left:" + formatCoord(x - half) + "px;top:" + formatCoord(y - half) + "px;width:" + boxSize + "px;height:" + boxSize + "px;pointer-events:none;overflow:visible;";
+    stage.appendChild(svg);
+    return svg;
+  };
+  // Razor-sharp SVG variable-stroke click effects (stroke thins from 2.8px -> 0.45px as radius expands)
+  const spawnClickPulse = (x, y, phase) => {
     const now = performance.now();
+    const clickStyle = state.options.clickStyle || "tactile-bloom";
+    const R = 24;
+
     if (phase === "down") {
-      const flash = document.createElement("div");
-      flash.style.cssText = [
-        "position:fixed",
-        "left:" + formatCoord(x - 6) + "px",
-        "top:" + formatCoord(y - 6) + "px",
-        "width:12px",
-        "height:12px",
-        "border-radius:999px",
-        "background:rgba(250,250,249,0.9)",
-        "box-shadow:0 0 0 1.5px rgba(24,24,27,0.45)",
-        "pointer-events:none",
-      ].join(";");
-      stage.appendChild(flash);
-      state.pulses.push({ el: flash, startTime: now, durationMs: 140, startScale: 0.4, endScale: 1.35, startAlpha: 0.9 });
+      const svg = createSvgOverlay(x, y, 64);
+      const halo = document.createElementNS(svgNamespace, "circle");
+      halo.setAttribute("r", "4");
+      halo.setAttribute("fill", "rgba(250, 250, 249, 0.28)");
+      const dot = document.createElementNS(svgNamespace, "circle");
+      dot.setAttribute("r", "3.2");
+      dot.setAttribute("fill", "#fafaf9");
+      dot.setAttribute("stroke", "rgba(24, 24, 27, 0.65)");
+      dot.setAttribute("stroke-width", "1.2");
+      svg.append(halo, dot);
+      state.effects.push({
+        el: svg,
+        startTime: now,
+        durationMs: 130,
+        step: (u) => {
+          const e = easeOutQuart(u);
+          halo.setAttribute("r", formatCoord(3 + 8 * e));
+          halo.setAttribute("opacity", formatCoord(0.55 * (1 - e)));
+          dot.setAttribute("r", formatCoord(2.2 + 2.6 * Math.sin(u * PI)));
+          dot.setAttribute("opacity", formatCoord(1 - u * 0.6));
+        },
+      });
       return;
     }
-    const ring = document.createElement("div");
-    ring.style.cssText = [
-      "position:fixed",
-      "left:" + formatCoord(x - 16) + "px",
-      "top:" + formatCoord(y - 16) + "px",
-      "width:32px",
-      "height:32px",
-      "border-radius:999px",
-      "border:2px solid rgba(250,250,249,0.92)",
-      "box-shadow:0 0 0 1.5px rgba(24,24,27,0.45), 0 2px 10px rgba(0,0,0,0.2)",
-      "box-sizing:border-box",
-      "pointer-events:none",
-    ].join(";");
-    const halo = document.createElement("div");
-    halo.style.cssText = [
-      "position:fixed",
-      "left:" + formatCoord(x - 20) + "px",
-      "top:" + formatCoord(y - 20) + "px",
-      "width:40px",
-      "height:40px",
-      "border-radius:999px",
-      "border:1.25px solid rgba(228,228,231,0.6)",
-      "box-sizing:border-box",
-      "pointer-events:none",
-    ].join(";");
-    stage.append(ring, halo);
-    state.pulses.push(
-      { el: ring, startTime: now, durationMs: 320, startScale: 0.3, endScale: 1.75, startAlpha: 0.92 },
-      { el: halo, startTime: now, durationMs: 400, startScale: 0.35, endScale: 2.3, startAlpha: 0.6 },
-    );
+
+    if (clickStyle === "minimal-press") {
+      const svg = createSvgOverlay(x, y, 64);
+      const outer = document.createElementNS(svgNamespace, "circle");
+      outer.setAttribute("fill", "none");
+      outer.setAttribute("stroke", "rgba(24, 24, 27, 0.45)");
+      const inner = document.createElementNS(svgNamespace, "circle");
+      inner.setAttribute("fill", "none");
+      inner.setAttribute("stroke", "#fafaf9");
+      svg.append(outer, inner);
+      state.effects.push({
+        el: svg,
+        startTime: now,
+        durationMs: 210,
+        step: (u) => {
+          const e = easeOutQuart(u);
+          const r = 3.5 + (R * 0.65 - 3.5) * e;
+          const sw = 2.2 * (1 - 0.78 * e);
+          const alpha = 1 - Math.pow(u, 1.5);
+          outer.setAttribute("r", formatCoord(r));
+          outer.setAttribute("stroke-width", formatCoord(sw + 1.4));
+          outer.setAttribute("opacity", formatCoord(alpha * 0.55));
+          inner.setAttribute("r", formatCoord(r));
+          inner.setAttribute("stroke-width", formatCoord(sw));
+          inner.setAttribute("opacity", formatCoord(alpha));
+        },
+      });
+      return;
+    }
+
+    if (clickStyle === "precision-reticle") {
+      const svg = createSvgOverlay(x, y, 110);
+      const contrastRing = document.createElementNS(svgNamespace, "circle");
+      contrastRing.setAttribute("fill", "none");
+      contrastRing.setAttribute("stroke", "rgba(18, 18, 20, 0.55)");
+      const mainRing = document.createElementNS(svgNamespace, "circle");
+      mainRing.setAttribute("fill", "none");
+      mainRing.setAttribute("stroke", "#fafaf9");
+      svg.append(contrastRing, mainRing);
+      const angles = [45, 135, 225, 315].map((deg) => (deg * PI) / 180);
+      const tickEls = angles.map(() => {
+        const line = document.createElementNS(svgNamespace, "line");
+        line.setAttribute("stroke", "#e0b35a");
+        line.setAttribute("stroke-width", "1.6");
+        line.setAttribute("stroke-linecap", "round");
+        svg.appendChild(line);
+        return line;
+      });
+      state.effects.push({
+        el: svg,
+        startTime: now,
+        durationMs: 320,
+        step: (u) => {
+          const e = easeOutExpo(u);
+          const r = 4.5 + (R - 4.5) * e;
+          const sw = 2.5 * (1 - 0.82 * e);
+          const alpha = 1 - Math.pow(u, 1.6);
+          contrastRing.setAttribute("r", formatCoord(r));
+          contrastRing.setAttribute("stroke-width", formatCoord(sw + 1.5));
+          contrastRing.setAttribute("opacity", formatCoord(alpha * 0.6));
+          mainRing.setAttribute("r", formatCoord(r));
+          mainRing.setAttribute("stroke-width", formatCoord(sw));
+          mainRing.setAttribute("opacity", formatCoord(alpha));
+          const rInner = r + 2.5;
+          const rOuter = rInner + 4.5 * (1 - 0.5 * e);
+          angles.forEach((ang, idx) => {
+            const l = tickEls[idx];
+            l.setAttribute("x1", formatCoord(Math.cos(ang) * rInner));
+            l.setAttribute("y1", formatCoord(Math.sin(ang) * rInner));
+            l.setAttribute("x2", formatCoord(Math.cos(ang) * rOuter));
+            l.setAttribute("y2", formatCoord(Math.sin(ang) * rOuter));
+            l.setAttribute("opacity", formatCoord(alpha * 0.95));
+          });
+        },
+      });
+      return;
+    }
+
+    if (clickStyle === "double-wave") {
+      const svg = createSvgOverlay(x, y, 110);
+      const c1 = document.createElementNS(svgNamespace, "circle");
+      const w1 = document.createElementNS(svgNamespace, "circle");
+      const w2 = document.createElementNS(svgNamespace, "circle");
+      for (const el of [c1, w1, w2]) el.setAttribute("fill", "none");
+      c1.setAttribute("stroke", "rgba(18, 18, 20, 0.5)");
+      w1.setAttribute("stroke", "#fafaf9");
+      w2.setAttribute("stroke", "rgba(224, 179, 90, 0.88)");
+      svg.append(c1, w2, w1);
+      state.effects.push({
+        el: svg,
+        startTime: now,
+        durationMs: 350,
+        step: (u) => {
+          const e1 = easeOutExpo(clamp(u * 1.12, 0, 1));
+          const r1 = 4 + (R - 4) * e1;
+          const sw1 = 2.6 * (1 - 0.84 * e1);
+          const a1 = 1 - clamp(u * 1.12, 0, 1);
+          c1.setAttribute("r", formatCoord(r1));
+          c1.setAttribute("stroke-width", formatCoord(sw1 + 1.5));
+          c1.setAttribute("opacity", formatCoord(a1 * 0.6));
+          w1.setAttribute("r", formatCoord(r1));
+          w1.setAttribute("stroke-width", formatCoord(sw1));
+          w1.setAttribute("opacity", formatCoord(a1));
+
+          const u2 = clamp((u - 0.14) / 0.86, 0, 1);
+          const e2 = easeOutQuart(u2);
+          const r2 = 3 + (R * 0.72 - 3) * e2;
+          const sw2 = 1.8 * (1 - 0.78 * e2);
+          const a2 = u < 0.14 ? 0 : (1 - u2) * 0.85;
+          w2.setAttribute("r", formatCoord(r2));
+          w2.setAttribute("stroke-width", formatCoord(sw2));
+          w2.setAttribute("opacity", formatCoord(a2));
+        },
+      });
+      return;
+    }
+
+    // Default: "tactile-bloom" (soft specular bloom + dark contrast backing + razor-thinning white ring)
+    const svg = createSvgOverlay(x, y, 100);
+    const bloom = document.createElementNS(svgNamespace, "circle");
+    bloom.setAttribute("fill", "rgba(250, 250, 249, 0.16)");
+    const contrastRing = document.createElementNS(svgNamespace, "circle");
+    contrastRing.setAttribute("fill", "none");
+    contrastRing.setAttribute("stroke", "rgba(18, 18, 20, 0.55)");
+    const mainRing = document.createElementNS(svgNamespace, "circle");
+    mainRing.setAttribute("fill", "none");
+    mainRing.setAttribute("stroke", "#fafaf9");
+    svg.append(bloom, contrastRing, mainRing);
+    state.effects.push({
+      el: svg,
+      startTime: now,
+      durationMs: 300,
+      step: (u) => {
+        const e = easeOutExpo(u);
+        const r = 4 + (R - 4) * e;
+        const sw = 2.8 * (1 - 0.84 * e);
+        const alpha = (1 - u) * (1 - u * 0.35);
+        bloom.setAttribute("r", formatCoord(r * 0.82));
+        bloom.setAttribute("opacity", formatCoord(Math.pow(1 - u, 2.2) * 0.85));
+        contrastRing.setAttribute("r", formatCoord(r));
+        contrastRing.setAttribute("stroke-width", formatCoord(sw + 1.6));
+        contrastRing.setAttribute("opacity", formatCoord(alpha * 0.65));
+        mainRing.setAttribute("r", formatCoord(r));
+        mainRing.setAttribute("stroke-width", formatCoord(sw));
+        mainRing.setAttribute("opacity", formatCoord(alpha));
+      },
+    });
   };
-  const stepPulses = (timestamp) => {
-    for (let i = state.pulses.length - 1; i >= 0; i--) {
-      const p = state.pulses[i];
-      const u = (timestamp - p.startTime) / p.durationMs;
+  const stepEffects = (timestamp) => {
+    for (let i = state.effects.length - 1; i >= 0; i--) {
+      const fx = state.effects[i];
+      const u = (timestamp - fx.startTime) / fx.durationMs;
       if (u >= 1) {
-        p.el.remove();
-        state.pulses.splice(i, 1);
+        fx.el.remove();
+        state.effects.splice(i, 1);
         continue;
       }
-      const eased = easeOutCubic(u);
-      const scale = p.startScale + (p.endScale - p.startScale) * eased;
-      const alpha = p.startAlpha * (1 - eased);
-      p.el.style.transform = "scale(" + formatCoord(scale) + ")";
-      p.el.style.opacity = formatCoord(alpha);
+      fx.step(u);
     }
   };
   const flushFlightResolvers = () => {
@@ -255,10 +405,10 @@ export const ghostCursorClientSource = `(() => {
   };
 
   const stepMotion = (timestamp, dt) => {
-    stepPulses(timestamp);
-    const style = state.options.style || "spring-inertia";
+    stepEffects(timestamp);
+    const style = state.options.style || "distance-glide";
     const pressed = state.element?.dataset.pressed === "true";
-    const pressDip = pressed ? -5 : 0;
+    const pressDip = pressed ? -4.5 : 0;
 
     if (state.flight) {
       const f = state.flight;
@@ -277,26 +427,25 @@ export const ghostCursorClientSource = `(() => {
       let targetDeg = 0;
       if (style === "distance-glide") {
         const bankDir = clamp((f.bezier.x1 - f.bezier.x0) / Math.max(40, f.dist), -1, 1) * 0.72 + state.arcSign * 0.28;
-        targetDeg = bankDir * 30 * f.farFactor * bell;
+        targetDeg = bankDir * 28 * f.farFactor * bell;
       } else if (style === "far-airplane") {
         const rawDeltaDeg = (wrapPi(sample.heading - NOSE_HEADING) * 180) / PI;
         const clampedDelta = clamp(rawDeltaDeg, -55, 55);
         targetDeg = clampedDelta * f.farFactor * bell;
       }
-      state.deg += (targetDeg + pressDip - state.deg) * Math.min(1, dt * 28);
+      state.deg += (targetDeg + pressDip - state.deg) * Math.min(1, dt * 30);
 
       if (u >= 1) {
         const endSample = sampleBezier(f.bezier, 1);
-        const overshootSpeed = clamp(f.dist * 0.16, 0, 95);
+        const overshootSpeed = clamp(f.dist * 0.14, 0, 85);
         state.vx = Math.cos(endSample.heading) * overshootSpeed;
         state.vy = Math.sin(endSample.heading) * overshootSpeed;
         state.flight = null;
         flushFlightResolvers();
       }
     } else {
-      // 2D spring-damper with substeps
-      const omega = style === "minimal-spring" ? 30 : 25.5;
-      const zeta = style === "minimal-spring" ? 0.95 : 0.87;
+      const omega = style === "minimal-spring" ? 30 : 26;
+      const zeta = style === "minimal-spring" ? 0.95 : 0.88;
       const k = omega * omega;
       const c = 2 * zeta * omega;
       const substeps = 4;
@@ -320,10 +469,8 @@ export const ghostCursorClientSource = `(() => {
         flushFlightResolvers();
       }
 
-      // Subtle velocity-driven inertial wrist tilt: ~0 deg on tiny hops,
-      // leans gently on medium/long moves, and settles cleanly to 0 deg on arrival.
       const maxTilt = style === "minimal-spring" ? 7 : 16;
-      const distScale = smoothstep(32, 180, state.lastMoveDist);
+      const distScale = smoothstep(35, 190, state.lastMoveDist);
       const velTilt = clamp((state.vx * 0.015 - state.vy * 0.005) * (0.3 + 0.7 * distScale), -maxTilt, maxTilt);
       const targetDeg = velTilt + pressDip;
       const rotAcc = -380 * (state.deg - targetDeg) - 35 * state.vDeg;
@@ -335,8 +482,9 @@ export const ghostCursorClientSource = `(() => {
       }
     }
 
-    const targetScale = pressed ? 0.84 : 1;
-    const scAcc = -520 * (state.scale - targetScale) - 38 * state.vScale;
+    // Underdamped scale spring for tactile click squish (0.80) + elastic release rebound (1.08 -> 1.0)
+    const targetScale = pressed ? 0.80 : 1;
+    const scAcc = -680 * (state.scale - targetScale) - 32 * state.vScale;
     state.vScale += scAcc * dt;
     state.scale += state.vScale * dt;
     if (Math.abs(state.scale - targetScale) < 0.005 && Math.abs(state.vScale) < 0.05) {
@@ -349,7 +497,7 @@ export const ghostCursorClientSource = `(() => {
       || Math.hypot(state.vx, state.vy) > 2
       || Math.abs(state.deg - pressDip) > 0.2
       || Math.abs(state.scale - targetScale) > 0.01;
-    return moving || state.pulses.length > 0 || timestamp < state.activeUntil;
+    return moving || state.effects.length > 0 || timestamp < state.activeUntil;
   };
 
   const onTick = () => {
@@ -472,7 +620,7 @@ export const ghostCursorClientSource = `(() => {
     state.previousFrameTime = undefined;
     flushFlightResolvers();
     state.flight = null;
-    state.pulses.splice(0);
+    state.effects.splice(0);
     state.mode = "disabled";
     state.element?.remove();
     state.element = null;
@@ -530,7 +678,9 @@ export const ghostCursorClientSource = `(() => {
     }
     if (action.type === "up") {
       element.dataset.pressed = "false";
-      state.activeUntil = performance.now() + 380;
+      // Elastic release pop impulse (0.80 -> 1.08 -> 1.0)
+      state.vScale = 2.6;
+      state.activeUntil = performance.now() + 360;
       applyPosition();
       spawnClickPulse(action.x, action.y, "up");
       startLoop();
@@ -553,7 +703,7 @@ export const ghostCursorClientSource = `(() => {
       return Promise.resolve();
     }
 
-    const style = state.options.style || "spring-inertia";
+    const style = state.options.style || "distance-glide";
     state.arcSign *= -1;
     const nx = -dy / dist;
     const ny = dx / dist;
@@ -566,7 +716,7 @@ export const ghostCursorClientSource = `(() => {
       state.vx += nx * kick;
       state.vy += ny * kick;
       state.flight = null;
-      const expectedMs = clamp(120 + Math.sqrt(dist) * 6.4, 120, 320);
+      const expectedMs = clamp(120 + Math.sqrt(dist) * 6.2, 120, 310);
       state.activeUntil = performance.now() + expectedMs + 140;
       startLoop();
       scheduleIdleFade();
@@ -587,12 +737,12 @@ export const ghostCursorClientSource = `(() => {
       });
     }
 
-    // Distance-gated Bezier modes ("distance-glide" and "far-airplane")
+    // Distance-gated Bezier modes ("distance-glide" default and "far-airplane")
     const farGateStart = style === "far-airplane" ? 110 : 50;
     const farGateEnd = style === "far-airplane" ? 280 : 220;
     const farFactor = smoothstep(farGateStart, farGateEnd, dist);
     const arcOffset = dist * (style === "far-airplane" ? 0.2 : 0.16) * farFactor * state.arcSign;
-    const durationMs = clamp(140 + Math.sqrt(dist) * 6.8, 140, 340);
+    const durationMs = clamp(125 + Math.sqrt(dist) * 6.2, 125, 315);
     state.flight = {
       startTime: performance.now(),
       durationMs,
@@ -609,7 +759,7 @@ export const ghostCursorClientSource = `(() => {
         y1: action.y,
       },
     };
-    state.activeUntil = performance.now() + durationMs + 160;
+    state.activeUntil = performance.now() + durationMs + 150;
     startLoop();
     scheduleIdleFade();
 
@@ -621,7 +771,7 @@ export const ghostCursorClientSource = `(() => {
         state.deg = 0;
         applyPosition();
         resolve();
-      }, durationMs + 180);
+      }, durationMs + 160);
       state.flightResolvers.push(() => {
         window.clearTimeout(safetyTimer);
         resolve();
@@ -758,7 +908,7 @@ export const ghostCursorClientSource = `(() => {
     stage.appendChild(container);
   };
   globalThis.__browserControlGhostCursor = {
-    version: 9,
+    version: 10,
     show,
     hide,
     restore,

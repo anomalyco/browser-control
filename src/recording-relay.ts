@@ -474,9 +474,13 @@ export class RecordingRelay {
     if (deviceHeight !== undefined) recording.sourceHeight = deviceHeight
     const buffer = Buffer.from(frameData, "base64")
     const receivedAt = this.monotonicNow()
-    const frameNumber = recording.sourceFrameCount === 1
+    const rawFramePosition = ((receivedAt - recording.startedMonotonicAt) / 1_000) * recording.frameRate
+    let frameNumber = recording.sourceFrameCount === 1
       ? 0
-      : Math.max(0, Math.floor(((receivedAt - recording.startedMonotonicAt) / 1_000) * recording.frameRate))
+      : Math.max(0, Math.floor(rawFramePosition))
+    if (recording.lastFrame && frameNumber === recording.lastFrame.frameNumber && rawFramePosition - frameNumber >= 0.5) {
+      frameNumber = recording.lastFrame.frameNumber + 1
+    }
     recording.pendingFrameCount += 1
     recording.writePromise = recording.writePromise.then(async () => {
       if (recording.lastFrame && frameNumber !== recording.lastFrame.frameNumber) {
