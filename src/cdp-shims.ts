@@ -10,6 +10,22 @@ export function removeDefaultLightColorSchemeEmulation(message: CdpRequest): Cdp
     return message
   }
   const features = Array.isArray(message.params?.features) ? message.params.features : []
+  const isExplicit = features.some((feature) => {
+    const object = getObject(feature)
+    return object?.name === "__bc_explicit__"
+  })
+  if (isExplicit) {
+    return {
+      ...message,
+      params: {
+        ...message.params,
+        features: features.filter((feature) => {
+          const object = getObject(feature)
+          return object?.name !== "__bc_explicit__"
+        }),
+      },
+    }
+  }
   const hasDefaultLightColorScheme = features.some((feature) => {
     const object = getObject(feature)
     return object?.name === "prefers-color-scheme" && object.value === "light"

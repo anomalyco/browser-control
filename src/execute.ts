@@ -551,6 +551,7 @@ export class ExecuteSandbox {
   private pendingTargetRebind: "replaced" | "repaired" | undefined
   private lastKnownNonBlankUrl: string | undefined
   private recreatedFromClosedUrl: string | undefined
+  private explicitLightColorScheme = false
   private readonly state: Record<string, unknown> = {}
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private readonly networkCapture = new NetworkCapture.Recorder()
@@ -1085,6 +1086,9 @@ export class ExecuteSandbox {
         this.pageCrashed = false
         this.recordNonBlankUrl(frame.url())
         page.setDefaultTimeout(30_000)
+        if (this.explicitLightColorScheme) {
+          void this.applyExplicitLightColorScheme(page)
+        }
       }
     }
     this.boundPageListeners = { page, close, navigate }
@@ -1256,8 +1260,37 @@ export class ExecuteSandbox {
     })
   }
 
+  private async applyExplicitLightColorScheme(page: Page): Promise<void> {
+    try {
+      const cdp = await page.context().newCDPSession(page)
+      try {
+        await cdp.send("Emulation.setEmulatedMedia", {
+          features: [
+            { name: "prefers-color-scheme", value: "light" },
+            { name: "__bc_explicit__", value: "1" },
+          ],
+        })
+      } finally {
+        await cdp.detach().catch(() => {})
+      }
+    } catch {}
+  }
+
   private installViewportZoomGuard(page: Page): void {
     if (viewportZoomGuardedPages.has(page)) return
+    const originalEmulateMedia = page.emulateMedia.bind(page)
+    Object.defineProperty(page, "emulateMedia", {
+      configurable: true,
+      value: async (options?: Parameters<Page["emulateMedia"]>[0]) => {
+        if (options && "colorScheme" in options) {
+          this.explicitLightColorScheme = options.colorScheme === "light"
+        }
+        await originalEmulateMedia(options)
+        if (this.explicitLightColorScheme) {
+          await this.applyExplicitLightColorScheme(page)
+        }
+      },
+    })
     const originalSetViewportSize = page.setViewportSize.bind(page)
     Object.defineProperty(page, "setViewportSize", {
       configurable: true,

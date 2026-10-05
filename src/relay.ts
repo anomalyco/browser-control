@@ -1077,8 +1077,16 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (method === "Page.navigatedWithinDocument") {
       const frameId = getString(params, "frameId")
       const url = getString(params, "url")
-      if (frameId && frameId === mainFrameIdsByTab.get(tabId)) {
+      if (
+        url !== undefined
+        && (sourceSessionId === undefined || sourceSessionId === target.sessionId)
+        && (frameId === mainFrameIdsByTab.get(tabId) || frameId === target.targetInfo.targetId || !mainFrameIdsByTab.has(tabId))
+      ) {
+        if (frameId !== undefined) {
+          mainFrameIdsByTab.set(tabId, frameId)
+        }
         contextDebugLog?.(`main-frame-same-document frame=${boundedToken(frameId)} ${targetDiagnosticIdentity(target)} ${summarizeDiagnosticUrl(url)}`)
+        registry.updateTargetUrl(tabId, url)
       }
     }
     if (method === "Page.lifecycleEvent") {
