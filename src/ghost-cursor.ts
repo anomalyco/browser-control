@@ -2,10 +2,13 @@ import { Match, Predicate } from "effect"
 import type { Locator, Page } from "playwright-core"
 import type { JsonObject } from "./protocol.ts"
 
+type GhostCursorStyle = "spring-inertia" | "distance-glide" | "far-airplane" | "minimal-spring"
+
 export type GhostCursorClientOptions = {
   readonly color?: string
   readonly size?: number
   readonly zIndex?: number
+  readonly style?: GhostCursorStyle
 }
 
 type GhostCursorTone = "neutral" | "accent" | "success" | "warn"
@@ -65,7 +68,7 @@ export const ghostCursorClientSource = `(() => {
   if (window !== window.top) {
     return;
   }
-  if (globalThis.__browserControlGhostCursor?.version === 8) {
+  if (globalThis.__browserControlGhostCursor?.version === 9) {
     return;
   }
   globalThis.__browserControlGhostCursor?.hide?.();
@@ -74,33 +77,15 @@ export const ghostCursorClientSource = `(() => {
   const captionId = "__browser_control_ghost_caption__";
   const positionStorageKey = "__browser_control_ghost_cursor_position__";
   const captionStorageKey = "__browser_control_ghost_cursor_caption__";
-  const defaults = { color: "#1c1c1f", size: 23, zIndex: 2147483646 };
+  const defaults = { color: "#1c1c1f", size: 23, zIndex: 2147483646, style: "spring-inertia" };
   const svgNamespace = "http://www.w3.org/2000/svg";
   const cursorPathData =
     "M0.92 2.18C0.61 1.37 1.42 0.58 2.23 0.9L14.39 5.68C15.23 6.01 15.23 7.2 14.39 7.54L9.86 9.37C9.61 9.47 9.41 9.67 9.31 9.92L7.44 14.42C7.09 15.25 5.9 15.23 5.58 14.39L0.92 2.18Z";
 
-  // ── Exact 1:1 Cua Driver / AgentCursorRenderer constants ──
   const PI = Math.PI;
   const TAU = Math.PI * 2;
-  const REST_HEADING = Math.PI / 4; // 45 deg anchor heading -> nose points upper-left (-135 deg)
-  const POINTER_ANCHOR_OFFSET = 16.0;
-  const TURN_RADIUS = 64.0;
-  const PEAK_SPEED = 1150.0;
-  const MIN_START_SPEED = 420.0;
-  const MIN_END_SPEED = 280.0;
-  const SPRING_K = 400.0;
-  const SPRING_C = 17.0;
-  const SPRING_OVERSHOOT = 0.75;
+  const NOSE_HEADING = -3 * Math.PI / 4; // -135 deg
   const FRAME_MS = 1000 / 60;
-
-  const anchorForPointer = (x, y, heading) => ({
-    x: x + Math.cos(heading) * POINTER_ANCHOR_OFFSET,
-    y: y + Math.sin(heading) * POINTER_ANCHOR_OFFSET,
-  });
-  const pointerForAnchor = (ax, ay, heading) => ({
-    x: ax - Math.cos(heading) * POINTER_ANCHOR_OFFSET,
-    y: ay - Math.sin(heading) * POINTER_ANCHOR_OFFSET,
-  });
 
   const tones = {
     neutral: "#e0b35a",
@@ -108,24 +93,26 @@ export const ghostCursorClientSource = `(() => {
     success: "#a8ba96",
     warn: "#f59e0b",
   };
-  const initialTipX = Math.round(window.innerWidth / 2);
-  const initialTipY = Math.round(window.innerHeight / 2);
-  const initialAnchor = anchorForPointer(initialTipX, initialTipY, REST_HEADING);
+  const initialX = Math.round(window.innerWidth / 2);
+  const initialY = Math.round(window.innerHeight / 2);
 
   const state = {
     element: null,
     arrow: null,
     stage: null,
-    targetX: initialTipX,
-    targetY: initialTipY,
-    renderedX: initialTipX,
-    renderedY: initialTipY,
-    pos: { x: initialAnchor.x, y: initialAnchor.y },
-    heading: REST_HEADING,
-    path: null,
-    dist: 0,
-    spring: null,
-    springTarget: null,
+    targetX: initialX,
+    targetY: initialY,
+    renderedX: initialX,
+    renderedY: initialY,
+    vx: 0,
+    vy: 0,
+    deg: 0,
+    vDeg: 0,
+    scale: 1,
+    vScale: 0,
+    arcSign: 1,
+    lastMoveDist: 0,
+    flight: null,
     pulses: [],
     flightResolvers: [],
     activeUntil: 0,
@@ -139,9 +126,13 @@ export const ghostCursorClientSource = `(() => {
     removeTimer: undefined,
   };
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
-  const mod2pi = (x) => {
-    const r = x - TAU * Math.floor(x / TAU);
-    return r < 0 ? r + TAU : r;
+  const smoothstep = (e0, e1, x) => {
+    const t = clamp((x - e0) / Math.max(1e-5, e1 - e0), 0, 1);
+    return t * t * (3 - 2 * t);
+  };
+  const smootherstep = (t) => {
+    const u = clamp(t, 0, 1);
+    return u * u * u * (u * (u * 6 - 15) + 10);
   };
   const wrapPi = (x) => {
     let r = (x + PI) % TAU;
@@ -153,158 +144,26 @@ export const ghostCursorClientSource = `(() => {
     color: typeof options?.color === "string" ? options.color : defaults.color,
     size: typeof options?.size === "number" && Number.isFinite(options.size) ? options.size : defaults.size,
     zIndex: typeof options?.zIndex === "number" && Number.isFinite(options.zIndex) ? options.zIndex : defaults.zIndex,
+    style: typeof options?.style === "string" ? options.style : state.options.style || defaults.style,
   });
   const formatCoord = (value) => String(Number(value.toFixed(2)));
-  const syncTipFromAnchor = () => {
-    const tip = pointerForAnchor(state.pos.x, state.pos.y, state.heading);
-    state.renderedX = tip.x;
-    state.renderedY = tip.y;
-  };
   const applyPosition = () => {
     if (!state.element) {
       return;
     }
     state.element.style.transform = "translate3d(" + formatCoord(state.renderedX) + "px, " + formatCoord(state.renderedY) + "px, 0)";
     if (state.arrow) {
-      const pressed = state.element.dataset.pressed === "true";
-      const scale = pressed ? 0.85 : 1;
-      const deg = ((state.heading - REST_HEADING) * 180) / PI;
-      state.arrow.style.transform = "rotate(" + formatCoord(deg) + "deg) scale(" + scale + ")";
+      state.arrow.style.transform = "rotate(" + formatCoord(state.deg) + "deg) scale(" + formatCoord(state.scale) + ")";
     }
   };
 
-  // ── 1:1 Dubins PathPlanner (all 6 solvers: LSL, RSR, LSR, RSL, RLR, LRL) ──
-  const dubinsLSL = (d, a, b) => {
-    const tmp0 = d + Math.sin(a) - Math.sin(b);
-    const p2 = 2 + d * d - 2 * Math.cos(a - b) + 2 * d * (Math.sin(a) - Math.sin(b));
-    if (p2 < 0) return null;
-    const tmp1 = Math.atan2(Math.cos(b) - Math.cos(a), tmp0);
-    return { t: mod2pi(-a + tmp1), p: Math.sqrt(p2), q: mod2pi(b - tmp1), types: ["L", "S", "L"] };
-  };
-  const dubinsRSR = (d, a, b) => {
-    const tmp0 = d - Math.sin(a) + Math.sin(b);
-    const p2 = 2 + d * d - 2 * Math.cos(a - b) + 2 * d * (Math.sin(b) - Math.sin(a));
-    if (p2 < 0) return null;
-    const tmp1 = Math.atan2(Math.cos(a) - Math.cos(b), tmp0);
-    return { t: mod2pi(a - tmp1), p: Math.sqrt(p2), q: mod2pi(-b + tmp1), types: ["R", "S", "R"] };
-  };
-  const dubinsLSR = (d, a, b) => {
-    const p2 = -2 + d * d + 2 * Math.cos(a - b) + 2 * d * (Math.sin(a) + Math.sin(b));
-    if (p2 < 0) return null;
-    const p = Math.sqrt(p2);
-    const tmp1 = Math.atan2(-(Math.cos(a) + Math.cos(b)), d + Math.sin(a) + Math.sin(b)) - Math.atan2(-2, p);
-    return { t: mod2pi(-a + tmp1), p, q: mod2pi(-mod2pi(b) + tmp1), types: ["L", "S", "R"] };
-  };
-  const dubinsRSL = (d, a, b) => {
-    const p2 = d * d - 2 + 2 * Math.cos(a - b) - 2 * d * (Math.sin(a) + Math.sin(b));
-    if (p2 < 0) return null;
-    const p = Math.sqrt(p2);
-    const tmp1 = Math.atan2(Math.cos(a) + Math.cos(b), d - Math.sin(a) - Math.sin(b)) - Math.atan2(2, p);
-    return { t: mod2pi(a - tmp1), p, q: mod2pi(b - tmp1), types: ["R", "S", "L"] };
-  };
-  const dubinsRLR = (d, a, b) => {
-    const tmp = (6 - d * d + 2 * Math.cos(a - b) + 2 * d * (Math.sin(a) - Math.sin(b))) / 8;
-    if (Math.abs(tmp) > 1) return null;
-    const p = mod2pi(TAU - Math.acos(tmp));
-    const t = mod2pi(a - Math.atan2(Math.cos(a) - Math.cos(b), d - Math.sin(a) + Math.sin(b)) + p / 2);
-    return { t, p, q: mod2pi(a - b - t + p), types: ["R", "L", "R"] };
-  };
-  const dubinsLRL = (d, a, b) => {
-    const tmp = (6 - d * d + 2 * Math.cos(a - b) + 2 * d * (Math.sin(b) - Math.sin(a))) / 8;
-    if (Math.abs(tmp) > 1) return null;
-    const p = mod2pi(TAU - Math.acos(tmp));
-    const t = mod2pi(-a + Math.atan2(-Math.cos(a) + Math.cos(b), d + Math.sin(a) - Math.sin(b)) + p / 2);
-    return { t, p, q: mod2pi(mod2pi(b) - a - t + p), types: ["L", "R", "L"] };
-  };
-  const planDubinsPath = (x0, y0, th0, x1, y1, th1, endVisualHeading, turnRadius) => {
-    const r = Math.max(1, turnRadius);
-    const dx = x1 - x0;
-    const dy = y1 - y0;
-    const dDist = Math.hypot(dx, dy);
-    if (dDist >= 0.5) {
-      const d = dDist / r;
-      const theta = mod2pi(Math.atan2(dy, dx));
-      const a = mod2pi(th0 - theta);
-      const b = mod2pi(th1 - theta);
-      let best = null;
-      let bestLen = Infinity;
-      for (const solver of [dubinsLSL, dubinsRSR, dubinsLSR, dubinsRSL, dubinsRLR, dubinsLRL]) {
-        const sol = solver(d, a, b);
-        if (!sol) continue;
-        const len = sol.t + sol.p + sol.q;
-        if (Number.isFinite(len) && len >= 0 && len < bestLen) {
-          bestLen = len;
-          best = sol;
-        }
-      }
-      if (best) {
-        return {
-          kind: "dubins",
-          length: Math.max(1, bestLen * r),
-          endVisualHeading,
-          x0, y0, th0, x1, y1, th1,
-          r,
-          seg1: best.t,
-          seg2: best.p,
-          seg3: best.q,
-          types: best.types,
-        };
-      }
-    }
-    return {
-      kind: "linear",
-      length: Math.max(1, dDist),
-      endVisualHeading,
-      x0, y0, th0, x1, y1, th1,
-    };
-  };
-  const samplePlannedPath = (plan, sIn) => {
-    if (plan.kind === "linear") {
-      const u = clamp(sIn / plan.length, 0, 1);
-      const diff = wrapPi(plan.th1 - plan.th0);
-      return {
-        x: plan.x0 + (plan.x1 - plan.x0) * u,
-        y: plan.y0 + (plan.y1 - plan.y0) * u,
-        heading: plan.th0 + diff * u,
-      };
-    }
-    if (sIn <= 0) return { x: plan.x0, y: plan.y0, heading: plan.th0 };
-    const r = plan.r;
-    const l1 = plan.seg1 * r;
-    const l2 = plan.seg2 * r;
-    const l3 = plan.seg3 * r;
-    const s = Math.min(sIn, l1 + l2 + l3);
-    let x = plan.x0;
-    let y = plan.y0;
-    let th = plan.th0;
-    const advance = (len, seg) => {
-      if (seg === "S") {
-        x += Math.cos(th) * len;
-        y += Math.sin(th) * len;
-      } else {
-        const dir = seg === "L" ? 1 : -1;
-        const dth = (len / r) * dir;
-        const perp = dir * (PI / 2);
-        const cx = x + Math.cos(th + perp) * r;
-        const cy = y + Math.sin(th + perp) * r;
-        const ang = Math.atan2(y - cy, x - cx);
-        x = cx + Math.cos(ang + dth) * r;
-        y = cy + Math.sin(ang + dth) * r;
-        th += dth;
-      }
-    };
-    if (s <= l1) {
-      advance(s, plan.types[0]);
-      return { x, y, heading: th };
-    }
-    advance(l1, plan.types[0]);
-    if (s <= l1 + l2) {
-      advance(s - l1, plan.types[1]);
-      return { x, y, heading: th };
-    }
-    advance(l2, plan.types[1]);
-    advance(s - l1 - l2, plan.types[2]);
-    return { x, y, heading: th };
+  const sampleBezier = (b, u) => {
+    const inv = 1 - u;
+    const x = inv * inv * inv * b.x0 + 3 * inv * inv * u * b.cx1 + 3 * inv * u * u * b.cx2 + u * u * u * b.x1;
+    const y = inv * inv * inv * b.y0 + 3 * inv * inv * u * b.cy1 + 3 * inv * u * u * b.cy2 + u * u * u * b.y1;
+    const tx = 3 * inv * inv * (b.cx1 - b.x0) + 6 * inv * u * (b.cx2 - b.cx1) + 3 * u * u * (b.x1 - b.cx2);
+    const ty = 3 * inv * inv * (b.cy1 - b.y0) + 6 * inv * u * (b.cy2 - b.cy1) + 3 * u * u * (b.y1 - b.cy2);
+    return { x, y, heading: Math.atan2(ty, tx) };
   };
 
   const ensureStage = () => {
@@ -395,78 +254,110 @@ export const ghostCursorClientSource = `(() => {
     }
   };
 
-  // ── 1:1 port of RenderStateCore::tick_swift_constants ──
   const stepMotion = (timestamp, dt) => {
     stepPulses(timestamp);
-    if (state.path) {
-      const p = state.path;
-      const pathLen = Math.max(1, p.length);
-      const u = Math.min(1, state.dist / pathLen);
-      const profile = (30 * u * u * (1 - u) * (1 - u)) / 1.875;
-      const floorSpeed = u < 0.5 ? MIN_START_SPEED : MIN_END_SPEED;
-      const currentSpeed = floorSpeed + (PEAK_SPEED - floorSpeed) * profile;
-      state.dist += currentSpeed * dt;
+    const style = state.options.style || "spring-inertia";
+    const pressed = state.element?.dataset.pressed === "true";
+    const pressDip = pressed ? -5 : 0;
 
-      if (state.dist >= pathLen) {
-        const end = samplePlannedPath(p, pathLen);
-        const endHeading = p.endVisualHeading;
-        const vh = end.heading;
-        state.spring = {
-          ox: 0,
-          oy: 0,
-          vx: currentSpeed * SPRING_OVERSHOOT * Math.cos(vh),
-          vy: currentSpeed * SPRING_OVERSHOOT * Math.sin(vh),
-        };
-        state.springTarget = { x: end.x, y: end.y, heading: endHeading };
-        state.pos = { x: end.x, y: end.y };
-        state.heading = endHeading;
-        state.path = null;
-        state.dist = 0;
-        syncTipFromAnchor();
-        flushFlightResolvers();
-      } else {
-        const s = samplePlannedPath(p, state.dist);
-        state.pos = { x: s.x, y: s.y };
-        state.heading = s.heading + PI;
-        syncTipFromAnchor();
+    if (state.flight) {
+      const f = state.flight;
+      const u = clamp((timestamp - f.startTime) / f.durationMs, 0, 1);
+      const s = smootherstep(u);
+      const sample = sampleBezier(f.bezier, s);
+      const prevX = state.renderedX;
+      const prevY = state.renderedY;
+      state.renderedX = sample.x;
+      state.renderedY = sample.y;
+      state.vx = (state.renderedX - prevX) / dt;
+      state.vy = (state.renderedY - prevY) / dt;
+
+      // Bell envelope peaks mid-flight and smoothly returns to 0 deg before landing.
+      const bell = Math.pow(Math.sin(PI * Math.pow(u, 0.82)), 1.15);
+      let targetDeg = 0;
+      if (style === "distance-glide") {
+        const bankDir = clamp((f.bezier.x1 - f.bezier.x0) / Math.max(40, f.dist), -1, 1) * 0.72 + state.arcSign * 0.28;
+        targetDeg = bankDir * 30 * f.farFactor * bell;
+      } else if (style === "far-airplane") {
+        const rawDeltaDeg = (wrapPi(sample.heading - NOSE_HEADING) * 180) / PI;
+        const clampedDelta = clamp(rawDeltaDeg, -55, 55);
+        targetDeg = clampedDelta * f.farFactor * bell;
       }
-      return true;
-    }
+      state.deg += (targetDeg + pressDip - state.deg) * Math.min(1, dt * 28);
 
-    if (state.spring && state.springTarget) {
-      const s = state.spring;
-      const tgt = state.springTarget;
+      if (u >= 1) {
+        const endSample = sampleBezier(f.bezier, 1);
+        const overshootSpeed = clamp(f.dist * 0.16, 0, 95);
+        state.vx = Math.cos(endSample.heading) * overshootSpeed;
+        state.vy = Math.sin(endSample.heading) * overshootSpeed;
+        state.flight = null;
+        flushFlightResolvers();
+      }
+    } else {
+      // 2D spring-damper with substeps
+      const omega = style === "minimal-spring" ? 30 : 25.5;
+      const zeta = style === "minimal-spring" ? 0.95 : 0.87;
+      const k = omega * omega;
+      const c = 2 * zeta * omega;
       const substeps = 4;
       const sdt = dt / substeps;
       for (let i = 0; i < substeps; i++) {
-        s.vx += (-SPRING_K * s.ox - SPRING_C * s.vx) * sdt;
-        s.vy += (-SPRING_K * s.oy - SPRING_C * s.vy) * sdt;
-        s.ox += s.vx * sdt;
-        s.oy += s.vy * sdt;
+        const ax = -k * (state.renderedX - state.targetX) - c * state.vx;
+        const ay = -k * (state.renderedY - state.targetY) - c * state.vy;
+        state.vx += ax * sdt;
+        state.vy += ay * sdt;
+        state.renderedX += state.vx * sdt;
+        state.renderedY += state.vy * sdt;
       }
-      state.pos = { x: tgt.x + s.ox, y: tgt.y + s.oy };
-      state.heading = tgt.heading;
-      syncTipFromAnchor();
-      if (Math.hypot(s.ox, s.oy) < 0.3 && Math.hypot(s.vx, s.vy) < 2.0) {
-        state.pos = { x: tgt.x, y: tgt.y };
-        state.heading = tgt.heading;
-        syncTipFromAnchor();
-        state.spring = null;
-        state.springTarget = null;
+
+      const distToTarget = Math.hypot(state.targetX - state.renderedX, state.targetY - state.renderedY);
+      const speed = Math.hypot(state.vx, state.vy);
+      if (distToTarget < 1.2 && speed < 18) {
+        state.renderedX = state.targetX;
+        state.renderedY = state.targetY;
+        state.vx = 0;
+        state.vy = 0;
+        flushFlightResolvers();
       }
-      return true;
+
+      // Subtle velocity-driven inertial wrist tilt: ~0 deg on tiny hops,
+      // leans gently on medium/long moves, and settles cleanly to 0 deg on arrival.
+      const maxTilt = style === "minimal-spring" ? 7 : 16;
+      const distScale = smoothstep(32, 180, state.lastMoveDist);
+      const velTilt = clamp((state.vx * 0.015 - state.vy * 0.005) * (0.3 + 0.7 * distScale), -maxTilt, maxTilt);
+      const targetDeg = velTilt + pressDip;
+      const rotAcc = -380 * (state.deg - targetDeg) - 35 * state.vDeg;
+      state.vDeg += rotAcc * dt;
+      state.deg += state.vDeg * dt;
+      if (Math.abs(state.deg - pressDip) < 0.15 && Math.abs(state.vDeg) < 1) {
+        state.deg = pressDip;
+        state.vDeg = 0;
+      }
     }
 
-    return state.pulses.length > 0 || timestamp < state.activeUntil;
+    const targetScale = pressed ? 0.84 : 1;
+    const scAcc = -520 * (state.scale - targetScale) - 38 * state.vScale;
+    state.vScale += scAcc * dt;
+    state.scale += state.vScale * dt;
+    if (Math.abs(state.scale - targetScale) < 0.005 && Math.abs(state.vScale) < 0.05) {
+      state.scale = targetScale;
+      state.vScale = 0;
+    }
+
+    const moving = Boolean(state.flight)
+      || Math.hypot(state.targetX - state.renderedX, state.targetY - state.renderedY) > 0.25
+      || Math.hypot(state.vx, state.vy) > 2
+      || Math.abs(state.deg - pressDip) > 0.2
+      || Math.abs(state.scale - targetScale) > 0.01;
+    return moving || state.pulses.length > 0 || timestamp < state.activeUntil;
   };
 
-  // Drift-compensated 60Hz loop (works both in foreground and when occluded on macOS).
   const onTick = () => {
     state.tickTimer = undefined;
     if (!state.element) {
       state.previousFrameTime = undefined;
       flushFlightResolvers();
-      state.path = null;
+      state.flight = null;
       return;
     }
     const timestamp = performance.now();
@@ -517,7 +408,7 @@ export const ghostCursorClientSource = `(() => {
     element.style.top = "0";
     element.style.pointerEvents = "none";
     element.style.boxSizing = "border-box";
-    element.style.transition = "opacity 180ms ease-out";
+    element.style.transition = "opacity 160ms ease-out";
     element.style.transformOrigin = "0 0";
     element.style.willChange = "transform, opacity";
     element.style.opacity = "0";
@@ -528,7 +419,6 @@ export const ghostCursorClientSource = `(() => {
     arrow.style.width = "100%";
     arrow.style.height = "100%";
     arrow.style.overflow = "visible";
-    // Pivot around the dart's nose hotspot at (1.4, 1.4) in 16x16 viewBox.
     arrow.style.transformOrigin = "8.75% 8.75%";
     arrow.style.filter = "drop-shadow(0 2.5px 5px rgba(0,0,0,0.34)) drop-shadow(0 0.5px 1.5px rgba(0,0,0,0.22))";
     const arrowPath = document.createElementNS(svgNamespace, "path");
@@ -561,9 +451,9 @@ export const ghostCursorClientSource = `(() => {
         state.element = null;
         state.arrow = null;
         state.removeTimer = undefined;
-      }, 180);
+      }, 160);
       state.fadeTimer = undefined;
-    }, 650);
+    }, 620);
   };
   const show = (options) => {
     clearIdleTimers();
@@ -571,7 +461,6 @@ export const ghostCursorClientSource = `(() => {
     state.mode = "persistent";
     const element = ensureElement();
     applyVisualOptions();
-    syncTipFromAnchor();
     applyPosition();
     element.style.opacity = "1";
     element.dataset.pressed = "false";
@@ -582,9 +471,7 @@ export const ghostCursorClientSource = `(() => {
     state.tickTimer = undefined;
     state.previousFrameTime = undefined;
     flushFlightResolvers();
-    state.path = null;
-    state.spring = null;
-    state.springTarget = null;
+    state.flight = null;
     state.pulses.splice(0);
     state.mode = "disabled";
     state.element?.remove();
@@ -599,12 +486,15 @@ export const ghostCursorClientSource = `(() => {
     state.mode = "persistent";
     state.targetX = position.x;
     state.targetY = position.y;
-    state.heading = REST_HEADING;
-    state.pos = anchorForPointer(position.x, position.y, REST_HEADING);
-    syncTipFromAnchor();
-    state.path = null;
-    state.spring = null;
-    state.springTarget = null;
+    state.renderedX = position.x;
+    state.renderedY = position.y;
+    state.vx = 0;
+    state.vy = 0;
+    state.deg = 0;
+    state.vDeg = 0;
+    state.scale = 1;
+    state.vScale = 0;
+    state.flight = null;
     const element = ensureElement();
     applyVisualOptions();
     element.dataset.targetX = String(position.x);
@@ -640,54 +530,98 @@ export const ghostCursorClientSource = `(() => {
     }
     if (action.type === "up") {
       element.dataset.pressed = "false";
-      state.activeUntil = performance.now() + 420;
+      state.activeUntil = performance.now() + 380;
       applyPosition();
       spawnClickPulse(action.x, action.y, "up");
       startLoop();
       scheduleIdleFade();
-      return waitMs(55);
+      return waitMs(45);
     }
 
-    const dist = Math.hypot(action.x - state.renderedX, action.y - state.renderedY);
+    const dx = action.x - state.renderedX;
+    const dy = action.y - state.renderedY;
+    const dist = Math.hypot(dx, dy);
+    state.lastMoveDist = dist;
     if (dist < 4) {
-      state.heading = REST_HEADING;
-      state.pos = anchorForPointer(action.x, action.y, REST_HEADING);
-      syncTipFromAnchor();
+      state.renderedX = action.x;
+      state.renderedY = action.y;
+      state.vx = 0;
+      state.vy = 0;
+      state.deg = 0;
       applyPosition();
       scheduleIdleFade();
       return Promise.resolve();
     }
 
-    // 1:1 port of RenderStateCore::apply_command_base(OverlayCommand::MoveTo)
-    const endHeading = REST_HEADING;
-    const tgtAnchor = anchorForPointer(action.x, action.y, endHeading);
-    const x0 = state.pos.x;
-    const y0 = state.pos.y;
-    const th0 = state.heading + PI;
-    const th1 = endHeading + PI;
-    const turnRadius = clamp(dist * 0.28, 18, TURN_RADIUS);
-    const plan = planDubinsPath(x0, y0, th0, tgtAnchor.x, tgtAnchor.y, th1, endHeading, turnRadius);
+    const style = state.options.style || "spring-inertia";
+    state.arcSign *= -1;
+    const nx = -dy / dist;
+    const ny = dx / dist;
     flushFlightResolvers();
-    state.path = plan;
-    state.dist = 0;
-    state.spring = null;
-    state.springTarget = null;
-    state.activeUntil = performance.now() + 1500;
+
+    if (style === "spring-inertia" || style === "minimal-spring") {
+      const arcFactor = style === "minimal-spring" ? 0.04 : 0.13;
+      const distGate = smoothstep(38, 190, dist);
+      const kick = dist * arcFactor * distGate * state.arcSign * 5.2;
+      state.vx += nx * kick;
+      state.vy += ny * kick;
+      state.flight = null;
+      const expectedMs = clamp(120 + Math.sqrt(dist) * 6.4, 120, 320);
+      state.activeUntil = performance.now() + expectedMs + 140;
+      startLoop();
+      scheduleIdleFade();
+      return new Promise((resolve) => {
+        const safetyTimer = window.setTimeout(() => {
+          state.renderedX = action.x;
+          state.renderedY = action.y;
+          state.vx = 0;
+          state.vy = 0;
+          state.deg = 0;
+          applyPosition();
+          resolve();
+        }, expectedMs + 140);
+        state.flightResolvers.push(() => {
+          window.clearTimeout(safetyTimer);
+          resolve();
+        });
+      });
+    }
+
+    // Distance-gated Bezier modes ("distance-glide" and "far-airplane")
+    const farGateStart = style === "far-airplane" ? 110 : 50;
+    const farGateEnd = style === "far-airplane" ? 280 : 220;
+    const farFactor = smoothstep(farGateStart, farGateEnd, dist);
+    const arcOffset = dist * (style === "far-airplane" ? 0.2 : 0.16) * farFactor * state.arcSign;
+    const durationMs = clamp(140 + Math.sqrt(dist) * 6.8, 140, 340);
+    state.flight = {
+      startTime: performance.now(),
+      durationMs,
+      dist,
+      farFactor,
+      bezier: {
+        x0: state.renderedX,
+        y0: state.renderedY,
+        cx1: state.renderedX + dx * 0.3 + nx * arcOffset,
+        cy1: state.renderedY + dy * 0.3 + ny * arcOffset,
+        cx2: state.renderedX + dx * 0.72 + nx * arcOffset * 0.55,
+        cy2: state.renderedY + dy * 0.72 + ny * arcOffset * 0.55,
+        x1: action.x,
+        y1: action.y,
+      },
+    };
+    state.activeUntil = performance.now() + durationMs + 160;
     startLoop();
     scheduleIdleFade();
 
     return new Promise((resolve) => {
       const safetyTimer = window.setTimeout(() => {
-        if (state.path === plan) {
-          state.pos = tgtAnchor;
-          state.heading = endHeading;
-          state.path = null;
-          state.dist = 0;
-          syncTipFromAnchor();
-          applyPosition();
-        }
+        state.flight = null;
+        state.renderedX = action.x;
+        state.renderedY = action.y;
+        state.deg = 0;
+        applyPosition();
         resolve();
-      }, 1400);
+      }, durationMs + 180);
       state.flightResolvers.push(() => {
         window.clearTimeout(safetyTimer);
         resolve();
@@ -824,7 +758,7 @@ export const ghostCursorClientSource = `(() => {
     stage.appendChild(container);
   };
   globalThis.__browserControlGhostCursor = {
-    version: 8,
+    version: 9,
     show,
     hide,
     restore,
