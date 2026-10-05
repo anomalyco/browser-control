@@ -1,5 +1,5 @@
 import http from "node:http"
-import { Effect, Schema } from "effect"
+import { Effect, Match, Predicate, Schema } from "effect"
 import * as AuthProfile from "./auth-profile.ts"
 import { AuthenticatedOriginError } from "./authenticated-origin.ts"
 import { NetworkCaptureError } from "./network-capture.ts"
@@ -29,6 +29,7 @@ import {
   NetworkStopRequest,
   RecordingStartRequest,
   RecordingTargetRequest,
+  type RelayErrorCode,
   RelayShutdownRequest,
   SessionAdoptRequest,
   SessionIdRequest,
@@ -298,10 +299,7 @@ function handleRecordingRequest(options: {
         ...(target.sessionId ? { sessionId: target.sessionId } : {}),
         owner: target.owner,
       }
-      const result = yield* Effect.tryPromise({
-        try: () => options.recordingRelay.startRecording(startOptions),
-        catch: (cause) => new Error(formatCauseMessage({ label: "start recording", cause }), { cause }),
-      })
+      const result = yield* tryRecordingPromise("start recording", () => options.recordingRelay.startRecording(startOptions))
       sendJson(options.response, result, result.success ? 200 : 500)
       return
     }
@@ -309,19 +307,13 @@ function handleRecordingRequest(options: {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(RecordingTargetRequest, body, "recording stop")
       const target = recordingTargetFromValues({ registry: options.registry, tabId: request.tabId, sessionId: request.sessionId })
-      const result = yield* Effect.tryPromise({
-        try: () => options.recordingRelay.stopRecording(target),
-        catch: (cause) => new Error(formatCauseMessage({ label: "stop recording", cause }), { cause }),
-      })
+      const result = yield* tryRecordingPromise("stop recording", () => options.recordingRelay.stopRecording(target))
       sendJson(options.response, result, result.success ? 200 : 500)
       return
     }
     if (options.pathname === "/recording/status" && options.request.method === "GET") {
       const target = recordingTargetFromQuery({ registry: options.registry, searchParams: options.requestUrl.searchParams })
-      const result = yield* Effect.tryPromise({
-        try: () => options.recordingRelay.statusRecording(target),
-        catch: (cause) => new Error(formatCauseMessage({ label: "recording status", cause }), { cause }),
-      })
+      const result = yield* tryRecordingPromise("recording status", () => options.recordingRelay.statusRecording(target))
       sendJson(options.response, result)
       return
     }
@@ -329,10 +321,7 @@ function handleRecordingRequest(options: {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(RecordingTargetRequest, body, "recording cancel")
       const target = recordingTargetFromValues({ registry: options.registry, tabId: request.tabId, sessionId: request.sessionId })
-      const result = yield* Effect.tryPromise({
-        try: () => options.recordingRelay.cancelRecording(target),
-        catch: (cause) => new Error(formatCauseMessage({ label: "cancel recording", cause }), { cause }),
-      })
+      const result = yield* tryRecordingPromise("cancel recording", () => options.recordingRelay.cancelRecording(target))
       sendJson(options.response, result, result.success ? 200 : 500)
       return
     }
@@ -353,15 +342,12 @@ function handleFlightRecorderRequest(options: {
     if (options.pathname === "/flight-recorder/start" && options.request.method === "POST") {
       const request = yield* decodeRequest(FlightRecorderStartRequest, yield* readJsonBody(options.request), "flight recorder start")
       const target = resolveAttachedRecordingTarget({ registry: options.registry, tabId: request.tabId, sessionId: request.sessionId })
-      const result = yield* Effect.tryPromise({
-        try: () => options.flightRecorder.start({
-          tabId: target.tabId,
-          ...(target.sessionId ? { sessionId: target.sessionId } : {}),
-          ...(request.retentionMs === undefined ? {} : { retentionMs: request.retentionMs }),
-          ...(request.frameRate === undefined ? {} : { frameRate: request.frameRate }),
-        }),
-        catch: (cause) => new Error(formatCauseMessage({ label: "start flight recorder", cause }), { cause }),
-      })
+      const result = yield* tryRecordingPromise("start flight recorder", () => options.flightRecorder.start({
+        tabId: target.tabId,
+        ...(target.sessionId ? { sessionId: target.sessionId } : {}),
+        ...(request.retentionMs === undefined ? {} : { retentionMs: request.retentionMs }),
+        ...(request.frameRate === undefined ? {} : { frameRate: request.frameRate }),
+      }))
       sendJson(options.response, result)
       return
     }
@@ -372,14 +358,11 @@ function handleFlightRecorderRequest(options: {
     if (options.pathname === "/flight-recorder/save-last" && options.request.method === "POST") {
       const request = yield* decodeRequest(FlightRecorderSaveRequest, yield* readJsonBody(options.request), "flight recorder save-last")
       const target = recordingTargetFromValues({ registry: options.registry, tabId: request.tabId, sessionId: request.sessionId })
-      const result = yield* Effect.tryPromise({
-        try: () => options.flightRecorder.saveLast({
-          ...target,
-          outputPath: request.outputPath,
-          ...(request.durationMs === undefined ? {} : { durationMs: request.durationMs }),
-        }),
-        catch: (cause) => new Error(formatCauseMessage({ label: "save flight recorder", cause }), { cause }),
-      })
+      const result = yield* tryRecordingPromise("save flight recorder", () => options.flightRecorder.saveLast({
+        ...target,
+        outputPath: request.outputPath,
+        ...(request.durationMs === undefined ? {} : { durationMs: request.durationMs }),
+      }))
       sendJson(options.response, result)
       return
     }
@@ -394,11 +377,18 @@ function handleFlightRecorderRequest(options: {
   })
 }
 
+function tryRecordingPromise<A>(label: string, tryFn: () => Promise<A>): Effect.Effect<A, Error> {
+  return Effect.tryPromise({
+    try: tryFn,
+    catch: (cause) => new Error(formatCauseMessage({ label, cause }), { cause }),
+  })
+}
+
 function formatCauseMessage(options: { readonly label: string; readonly cause: unknown }): string {
   if (options.cause instanceof Error && options.cause.message) {
     return `${options.label}: ${options.cause.message}`
   }
-  if (typeof options.cause === "string" && options.cause) {
+  if (Predicate.isString(options.cause) && options.cause) {
     return `${options.label}: ${options.cause}`
   }
   return options.label
@@ -524,7 +514,7 @@ function resolveAttachedRecordingTarget(options: {
     }
     return { tabId, sessionId: target.sessionId, owner: target.owner }
   }
-  const sessionId = typeof options.sessionId === "string" && options.sessionId ? options.sessionId : undefined
+  const sessionId = Predicate.isString(options.sessionId) && options.sessionId ? options.sessionId : undefined
   if (sessionId) {
     const target = options.registry.getRootTargetBySessionId(sessionId)
     if (!target) {
@@ -548,7 +538,7 @@ function resolveAttachedRecordingTarget(options: {
 
 function recordingTargetFromValues(options: { readonly registry: TargetRegistry; readonly tabId: unknown; readonly sessionId: unknown }): RecordingTargetOptions {
   const tabId = optionalInteger(options.tabId, "tabId")
-  const sessionId = typeof options.sessionId === "string" && options.sessionId ? options.sessionId : undefined
+  const sessionId = Predicate.isString(options.sessionId) && options.sessionId ? options.sessionId : undefined
   const target = sessionId ? options.registry.getRootTargetBySessionId(sessionId) : undefined
   return {
     ...(tabId === undefined ? {} : { tabId }),
@@ -569,75 +559,75 @@ function optionalInteger(value: unknown, field: string): number | undefined {
   if (value === undefined) {
     return undefined
   }
-  if (typeof value !== "number" || !Number.isInteger(value)) {
+  if (!Predicate.isNumber(value) || !Number.isInteger(value)) {
     throw new HttpRouteError({ message: `${field} must be an integer`, status: 400, code: "invalid-request" })
   }
   return value
 }
 
 function relayHttpError(error: unknown): HttpRouteError {
+  const routeError = (message: string, status: number, code: RelayErrorCode) =>
+    new HttpRouteError({ message, status, code })
   if (error instanceof RelayShutdownError) {
-    return new HttpRouteError({ message: error.message, status: 409, code: error.reason === "busy" ? "relay-busy" : "invalid-request" })
+    return routeError(error.message, 409, error.reason === "busy" ? "relay-busy" : "invalid-request")
   }
   if (error instanceof HttpRouteError) {
     return error
   }
   if (error instanceof SessionError) {
-    switch (error.reason) {
-      case "already-exists":
-        return new HttpRouteError({ message: error.message, status: 409, code: "session-already-exists" })
-      case "inactive":
-        return new HttpRouteError({ message: error.message, status: 409, code: "session-inactive" })
-      case "invalid-request":
-        return new HttpRouteError({ message: error.message, status: 400, code: "invalid-request" })
-      case "not-found":
-        return new HttpRouteError({ message: error.message, status: 404, code: "session-not-found" })
-      case "target-owned":
-        return new HttpRouteError({ message: error.message, status: 409, code: "target-owned" })
-      case "timeout":
-        return new HttpRouteError({ message: error.message, status: 409, code: "session-timeout" })
-      case "setup-failed":
-        return new HttpRouteError({ message: error.message, status: 500, code: "setup-failed" })
-    }
+    const [status, code] = Match.value(error.reason).pipe(
+      Match.when("already-exists", () => [409, "session-already-exists"] as const),
+      Match.when("inactive", () => [409, "session-inactive"] as const),
+      Match.when("invalid-request", () => [400, "invalid-request"] as const),
+      Match.when("not-found", () => [404, "session-not-found"] as const),
+      Match.when("target-owned", () => [409, "target-owned"] as const),
+      Match.when("timeout", () => [409, "session-timeout"] as const),
+      Match.when("setup-failed", () => [500, "setup-failed"] as const),
+      Match.exhaustive,
+    )
+    return routeError(error.message, status, code)
   }
   if (error instanceof NetworkCaptureError) {
-    return new HttpRouteError({
-      message: error.message,
-      status: error.reason === "invalid-options" ? 400 : error.reason === "already-active" || error.reason === "inactive" ? 409 : 500,
-      code: error.reason === "invalid-options" ? "invalid-request" : error.reason === "already-active" || error.reason === "inactive" ? "capture-conflict" : "internal",
-    })
+    const [status, code] = Match.value(error.reason).pipe(
+      Match.when("invalid-options", () => [400, "invalid-request"] as const),
+      Match.when("already-active", () => [409, "capture-conflict"] as const),
+      Match.when("inactive", () => [409, "capture-conflict"] as const),
+      Match.orElse(() => [500, "internal"] as const),
+    )
+    return routeError(error.message, status, code)
   }
   if (error instanceof AuthProfile.AuthProfileError) {
-    return new HttpRouteError({
-      message: error.message,
-      status: error.reason === "invalid-name" ? 400 : error.reason === "not-found" ? 404 : 500,
-      code: error.reason === "invalid-name" ? "invalid-request" : error.reason === "not-found" ? "auth-profile-not-found" : "internal",
-    })
+    const [status, code] = Match.value(error.reason).pipe(
+      Match.when("invalid-name", () => [400, "invalid-request"] as const),
+      Match.when("not-found", () => [404, "auth-profile-not-found"] as const),
+      Match.orElse(() => [500, "internal"] as const),
+    )
+    return routeError(error.message, status, code)
   }
   if (error instanceof AuthenticatedOriginError) {
-    return new HttpRouteError({
-      message: error.message,
-      status: error.reason === "invalid-request" ? 400 : 500,
-      code: error.reason === "invalid-request" ? "invalid-request" : "setup-failed",
-    })
+    return routeError(
+      error.message,
+      error.reason === "invalid-request" ? 400 : 500,
+      error.reason === "invalid-request" ? "invalid-request" : "setup-failed",
+    )
   }
   if (error instanceof TargetSelectionError) {
-    return new HttpRouteError({
-      message: error.message,
-      status: error.reason === "invalid" ? 400 : error.reason === "not-found" ? 404 : 409,
-      code: error.reason === "invalid" ? "invalid-request" : error.reason === "not-found" ? "target-not-found" : "target-ambiguous",
-    })
+    const [status, code] = Match.value(error.reason).pipe(
+      Match.when("invalid", () => [400, "invalid-request"] as const),
+      Match.when("not-found", () => [404, "target-not-found"] as const),
+      Match.when("ambiguous", () => [409, "target-ambiguous"] as const),
+      Match.exhaustive,
+    )
+    return routeError(error.message, status, code)
   }
   if (error instanceof TargetOwnershipError) {
-    return new HttpRouteError({
-      message: error.message,
-      status: error.reason === "not-found" ? 404 : 409,
-      code: error.reason === "not-found" ? "target-not-found" : error.reason === "owned" ? "target-owned" : "target-changed",
-    })
+    const [status, code] = Match.value(error.reason).pipe(
+      Match.when("not-found", () => [404, "target-not-found"] as const),
+      Match.when("owned", () => [409, "target-owned"] as const),
+      Match.when("generation-changed", () => [409, "target-changed"] as const),
+      Match.exhaustive,
+    )
+    return routeError(error.message, status, code)
   }
-  return new HttpRouteError({
-    message: error instanceof Error ? error.message : String(error),
-    status: 500,
-    code: "internal",
-  })
+  return routeError(error instanceof Error ? error.message : String(error), 500, "internal")
 }

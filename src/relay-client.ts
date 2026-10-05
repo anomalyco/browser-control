@@ -36,7 +36,6 @@ import {
   SessionAdoptResponse,
   SessionContainer,
   SessionDeleted,
-  SessionEnsureResponse,
   SessionsContainer,
   TargetSummaries,
   type SessionAdoptRequest,
@@ -142,7 +141,7 @@ export interface Interface {
   readonly flightRecorderCancel: (target: RecordingTargetRequest) => Effect.Effect<FlightRecorderCancelResponse, RelayClientError>
 }
 
-export class Service extends Context.Service<Service, Interface>()("browser-control/RelayClient") {}
+export class Service extends Context.Service<Service, Interface>()("@opencode-ai/browser-control/RelayClient") {}
 
 const decodeErrorEnvelope = Schema.decodeUnknownOption(ErrorEnvelope)
 const decodeErrorMessage = Schema.decodeUnknownOption(Schema.Struct({ error: Schema.String }))
@@ -233,7 +232,7 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
     )),
   )
 
-  const recordingTargetBody = (target: RecordingTargetRequest): Record<string, unknown> => ({
+  const recordingTargetBody = (target: { readonly sessionId?: string | undefined; readonly tabId?: number | undefined }): Record<string, unknown> => ({
     ...(target.sessionId ? { sessionId: target.sessionId } : {}),
     ...(target.tabId === undefined ? {} : { tabId: target.tabId }),
   })
@@ -266,22 +265,19 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
       postJson("/v1/sessions/ensure", {
         id,
         ...(options?.readOnly === undefined ? {} : { readOnly: options.readOnly }),
-      }, SessionEnsureResponse).pipe(Effect.map((container) => container.session)),
+      }, SessionContainer).pipe(Effect.map((container) => container.session)),
     sessionReset: (id) =>
       postJson("/cli/session/reset", { id }, SessionContainer).pipe(Effect.map((container) => container.session)),
-    sessionAdopt: (request) =>
+    sessionAdopt: ({ sessionId, ...request }) =>
       postJson("/cli/session/adopt", {
-        ...(request.sessionId ? { sessionId: request.sessionId } : {}),
-        createIfMissing: request.createIfMissing,
-        targetSelection: request.targetSelection,
+        ...request,
+        ...(sessionId ? { sessionId } : {}),
       }, SessionAdoptResponse),
     sessionDelete: (id) => postJson("/cli/session/delete", { id }, SessionDeleted),
-    execute: (request) =>
+    execute: ({ sessionId, ...request }) =>
       postJson("/cli/execute", {
-        ...(request.sessionId ? { sessionId: request.sessionId } : {}),
-        code: request.code,
-        createIfMissing: request.createIfMissing,
-        ...(request.targetSelection === undefined ? {} : { targetSelection: request.targetSelection }),
+        ...request,
+        ...(sessionId ? { sessionId } : {}),
       }, ExecuteResponse),
     authenticatedJson: (request) => postJson("/v1/authenticated-origin/json", { ...request }, AuthenticatedJsonOutcome),
     networkStart: (request) => postJson("/network/start", { ...request }, NetworkStatusResponse),
@@ -291,31 +287,16 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
     authStatus: (request) => postJson("/auth/status", { ...request }, AuthProfileSummary),
     authRefresh: (request) => postJson("/auth/refresh", { ...request }, NetworkStopResponse),
     authRun: (request) => postJson("/auth/run", { ...request }, AuthRunResponse),
-    recordingStart: (request) =>
-      postJson("/recording/start", {
-        ...recordingTargetBody(request),
-        outputPath: request.outputPath,
-        ...(request.mode === undefined ? {} : { mode: request.mode }),
-        ...(request.audio === undefined ? {} : { audio: request.audio }),
-        ...(request.frameRate === undefined ? {} : { frameRate: request.frameRate }),
-        ...(request.videoBitsPerSecond === undefined ? {} : { videoBitsPerSecond: request.videoBitsPerSecond }),
-        ...(request.audioBitsPerSecond === undefined ? {} : { audioBitsPerSecond: request.audioBitsPerSecond }),
-        ...(request.maxDurationMs === undefined ? {} : { maxDurationMs: request.maxDurationMs }),
-      }, RecordingStartResponse),
+    recordingStart: ({ sessionId, tabId, ...request }) =>
+      postJson("/recording/start", { ...recordingTargetBody({ sessionId, tabId }), ...request }, RecordingStartResponse),
     recordingStop: (target) => postJson("/recording/stop", recordingTargetBody(target), RecordingStopResponse),
     recordingStatus: (target) => getJson(`/recording/status${recordingTargetQuery(target)}`, RecordingStatusResponse),
     recordingCancel: (target) => postJson("/recording/cancel", recordingTargetBody(target), RecordingCancelResponse),
-    flightRecorderStart: (request) => postJson("/flight-recorder/start", {
-      ...recordingTargetBody(request),
-      ...(request.retentionMs === undefined ? {} : { retentionMs: request.retentionMs }),
-      ...(request.frameRate === undefined ? {} : { frameRate: request.frameRate }),
-    }, FlightRecorderStatusResponse),
+    flightRecorderStart: ({ sessionId, tabId, ...request }) =>
+      postJson("/flight-recorder/start", { ...recordingTargetBody({ sessionId, tabId }), ...request }, FlightRecorderStatusResponse),
     flightRecorderStatus: (target) => getJson(`/flight-recorder/status${recordingTargetQuery(target)}`, FlightRecorderStatusResponse),
-    flightRecorderSaveLast: (request) => postJson("/flight-recorder/save-last", {
-      ...recordingTargetBody(request),
-      outputPath: request.outputPath,
-      ...(request.durationMs === undefined ? {} : { durationMs: request.durationMs }),
-    }, FlightRecorderSaveResponse),
+    flightRecorderSaveLast: ({ sessionId, tabId, ...request }) =>
+      postJson("/flight-recorder/save-last", { ...recordingTargetBody({ sessionId, tabId }), ...request }, FlightRecorderSaveResponse),
     flightRecorderCancel: (target) => postJson("/flight-recorder/cancel", recordingTargetBody(target), FlightRecorderCancelResponse),
   })
 })

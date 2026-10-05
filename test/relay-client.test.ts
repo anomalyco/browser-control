@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
-import { Effect } from "effect"
+import { Effect, Predicate } from "effect"
 import { FetchHttpClient } from "effect/http"
 import http from "node:http"
 import * as RelayClient from "../src/relay-client.ts"
-import type { RelayShutdownRequest } from "../src/relay-schema.ts"
+import { AuthenticatedJsonOutcome, type RelayShutdownRequest } from "../src/relay-schema.ts"
 
 type CannedResponse = {
   readonly status: number
@@ -100,7 +100,7 @@ describe("RelayClient", () => {
     const error = await withClient((client) => client.sessionReset("ghost").pipe(Effect.flip))
     expect(error._tag).toBe("RelayClient.RelayRejected")
     expect(error.message).toBe("Session not found: ghost")
-    expect(error._tag === "RelayClient.RelayRejected" ? error.code : undefined).toBe("session-not-found")
+    expect(Predicate.isTagged(error, "RelayClient.RelayRejected") ? error.code : undefined).toBe("session-not-found")
   })
 
   it("decodes an idempotent delete for an absent session", async () => {
@@ -119,7 +119,7 @@ describe("RelayClient", () => {
     routes.set("POST /cli/session/delete", { status: 409, body: { error: "specific future conflict", code: "future-code" } })
     const error = await withClient((client) => client.sessionDelete("ghost").pipe(Effect.flip))
     expect(error.message).toBe("specific future conflict")
-    expect(error._tag === "RelayClient.RelayRejected" ? error.code : undefined).toBeUndefined()
+    expect(Predicate.isTagged(error, "RelayClient.RelayRejected") ? error.code : undefined).toBeUndefined()
   })
 
   it("fails with RelayDecodeFailed for shape drift", async () => {
@@ -160,9 +160,10 @@ describe("RelayClient", () => {
     expect(ensured.id).toBe(session.id)
     expect(lastRequestBody).toEqual({ id: session.id })
 
+    const successOutcome = AuthenticatedJsonOutcome.cases.Success.make({ status: 200, value: { ok: true } })
     routes.set("POST /v1/authenticated-origin/json", {
       status: 200,
-      body: { _tag: "Success", status: 200, value: { ok: true } },
+      body: successOutcome,
     })
     const result = await withClient((client) => client.authenticatedJson({
       sessionId: session.id,
@@ -172,7 +173,7 @@ describe("RelayClient", () => {
       body: { value: 1 },
       sensitive: true,
     }))
-    expect(result).toEqual({ _tag: "Success", status: 200, value: { ok: true } })
+    expect(result).toEqual(successOutcome)
     expect(lastRequestBody).toEqual({
       sessionId: session.id,
       origin: "https://example.com",

@@ -162,7 +162,7 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
 
   const fileExists = (relativePath: string): Effect.Effect<boolean> =>
     fs.exists(path.join(options.packageRoot, relativePath)).pipe(
-      Effect.catch(() => Effect.succeed(false)),
+      Effect.orElseSucceed(() => false),
     )
 
   const [packageResult, bundledManifestVersion, distCliExists, distMcpExists, extensionDistManifestExists, currentResult] = yield* Effect.all([
@@ -287,9 +287,7 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
       artifacts,
       staleCurrent,
       current,
-      relayOwnedTargets,
       unhealthyTargets,
-      possibleLeakedSessions,
     }),
   }
   return report
@@ -411,68 +409,53 @@ function buildDoctorChecks(options: {
   ]
 }
 
+const makeDoctorCheck = (id: string, label: string) => (status: DoctorCheckStatus, message: string): DoctorCheck => ({
+  id,
+  label,
+  status,
+  message,
+})
+
 export function unhealthyTargetsCheck(options: {
   readonly targetsResult: ProbeResult<readonly TargetSummary[]>
   readonly unhealthyTargets: readonly TargetSummary[]
 }): DoctorCheck {
+  const check = makeDoctorCheck("unhealthy-targets", "crashed or browser-error targets")
   if (!options.targetsResult.ok) {
-    return {
-      id: "unhealthy-targets",
-      label: "crashed or browser-error targets",
-      status: "warn",
-      message: `target health unknown: ${options.targetsResult.error}`,
-    }
+    return check("warn", `target health unknown: ${options.targetsResult.error}`)
   }
-  return {
-    id: "unhealthy-targets",
-    label: "crashed or browser-error targets",
-    status: options.unhealthyTargets.length ? "warn" : "ok",
-    message: options.unhealthyTargets.length ? `${options.unhealthyTargets.length} unhealthy target(s)` : "none",
-  }
+  return check(
+    options.unhealthyTargets.length ? "warn" : "ok",
+    options.unhealthyTargets.length ? `${options.unhealthyTargets.length} unhealthy target(s)` : "none",
+  )
 }
 
 export function relayBuildCheck(options: {
   readonly relayResult: ProbeResult<RelayVersion>
   readonly cliBuildId: string
 }): DoctorCheck {
+  const check = makeDoctorCheck("relay-build", "relay build")
   if (!options.relayResult.ok) {
-    return {
-      id: "relay-build",
-      label: "relay build",
-      status: "warn",
-      message: "relay unreachable; cannot compare builds",
-    }
+    return check("warn", "relay unreachable; cannot compare builds")
   }
   const relayBuildId = options.relayResult.value.buildId
   if (!relayBuildId) {
-    return {
-      id: "relay-build",
-      label: "relay build",
-      status: "warn",
-      message: "running relay does not report a build id",
-    }
+    return check("warn", "running relay does not report a build id")
   }
   const matches = relayBuildId === options.cliBuildId
-  return {
-    id: "relay-build",
-    label: "relay build",
-    status: matches ? "ok" : "warn",
-    message: matches
+  return check(
+    matches ? "ok" : "warn",
+    matches
       ? `matches CLI build (${options.cliBuildId})`
       : `runtime ${relayBuildId} does not match CLI ${options.cliBuildId}`,
-  }
+  )
 }
 
 function extensionVersionCheck(options: {
   readonly extensionResult: ProbeResult<ExtensionStatus>
   readonly bundledManifestVersion: ProbeResult<string>
 }): DoctorCheck {
-  const check = (status: DoctorCheckStatus, message: string): DoctorCheck => ({
-    id: "extension-version",
-    label: "extension version",
-    status,
-    message,
-  })
+  const check = makeDoctorCheck("extension-version", "extension version")
   if (!options.extensionResult.ok) {
     return check("warn", options.extensionResult.error)
   }
@@ -495,46 +478,22 @@ function extensionVersionCheck(options: {
 }
 
 export function extensionProtocolCheck(extensionResult: ProbeResult<ExtensionStatus>): DoctorCheck {
+  const check = makeDoctorCheck("extension-protocol", "extension protocol")
   if (!extensionResult.ok) {
-    return {
-      id: "extension-protocol",
-      label: "extension protocol",
-      status: "warn",
-      message: extensionResult.error,
-    }
+    return check("warn", extensionResult.error)
   }
   const protocolVersion = extensionResult.value.protocolVersion
   const protocolCompatible = extensionResult.value.protocolCompatible
   if (protocolCompatible === false) {
-    return {
-      id: "extension-protocol",
-      label: "extension protocol",
-      status: "fail",
-      message: `runtime ${protocolVersion ?? "unknown"} is incompatible with relay ${extensionProtocolVersion}`,
-    }
+    return check("fail", `runtime ${protocolVersion ?? "unknown"} is incompatible with relay ${extensionProtocolVersion}`)
   }
   if (extensionResult.value.protocolLegacy === true) {
-    return {
-      id: "extension-protocol",
-      label: "extension protocol",
-      status: "warn",
-      message: `legacy extension does not report its protocol; relay infers ${protocolVersion ?? "unknown"}`,
-    }
+    return check("warn", `legacy extension does not report its protocol; relay infers ${protocolVersion ?? "unknown"}`)
   }
   if (protocolVersion === undefined || protocolVersion === null) {
-    return {
-      id: "extension-protocol",
-      label: "extension protocol",
-      status: "warn",
-      message: "extension protocol is unknown",
-    }
+    return check("warn", "extension protocol is unknown")
   }
-  return {
-    id: "extension-protocol",
-    label: "extension protocol",
-    status: "ok",
-    message: `runtime ${protocolVersion} is compatible with relay ${extensionProtocolVersion}`,
-  }
+  return check("ok", `runtime ${protocolVersion} is compatible with relay ${extensionProtocolVersion}`)
 }
 
 function buildDoctorRecommendations(options: {
@@ -543,9 +502,7 @@ function buildDoctorRecommendations(options: {
   readonly artifacts: readonly DoctorArtifact[]
   readonly staleCurrent: boolean
   readonly current: string | null
-  readonly relayOwnedTargets: readonly TargetSummary[]
   readonly unhealthyTargets: readonly TargetSummary[]
-  readonly possibleLeakedSessions: readonly SessionSummary[]
 }): readonly string[] {
   const relayRecommendations = options.relayResult.ok ? [] : [
     "Run a relay-backed command to start the detached relay automatically; use `browser-control serve` only for foreground debugging.",
@@ -650,9 +607,10 @@ function formatNullableNumber(value: number | null): string {
   return value === null ? "unknown" : String(value)
 }
 
-export function formatTargetSummary(target: TargetSummary): string {
+export function formatTargetSummary(target: TargetSummary, options: { readonly includeSession?: boolean } = {}): string {
   const tab = target.tabId === undefined ? "" : ` tab=${target.tabId}`
+  const session = options.includeSession && target.browserControlSessionId ? ` session=${target.browserControlSessionId}` : ""
   const owner = target.owner ? ` owner=${target.owner}` : ""
   const health = `${target.crashed ? " crashed=true" : ""}${target.protectedUi ? " protected-ui=true" : ""}`
-  return `${target.type} ${target.id}${tab}${owner}${health} ${target.url || "about:blank"}`
+  return `${target.type} ${target.id}${tab}${session}${owner}${health} ${target.url || "about:blank"}`
 }

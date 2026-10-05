@@ -1,6 +1,6 @@
 import http from "node:http"
 import crypto from "node:crypto"
-import { Effect, Schema } from "effect"
+import { Effect, Option, Predicate, Schema } from "effect"
 import { WebSocket, WebSocketServer } from "ws"
 import type { ExecuteTargetSelection } from "./execute.ts"
 import type { CdpEvent, CdpResponse, JsonObject, TargetInfo } from "./protocol.ts"
@@ -326,8 +326,26 @@ export function readJsonBody(request: http.IncomingMessage): Effect.Effect<JsonO
   })
 }
 
+const RawTargetSelection = Schema.Struct({
+  urlIncludes: Schema.optionalKey(Schema.String),
+  index: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+})
+const decodeRawTargetSelection = Schema.decodeUnknownOption(RawTargetSelection)
+
+const RawTargetInfo = Schema.Struct({
+  targetId: Schema.String,
+  type: Schema.Literals(["page", "iframe", "worker"]),
+  title: Schema.optionalKey(Schema.String),
+  url: Schema.String,
+  canAccessOpener: Schema.optionalKey(Schema.Boolean),
+  browserContextId: Schema.optionalKey(Schema.String),
+  openerId: Schema.optionalKey(Schema.String),
+  parentFrameId: Schema.optionalKey(Schema.String),
+})
+const decodeRawTargetInfo = Schema.decodeUnknownOption(RawTargetInfo)
+
 export function optionalSessionId(value: JsonObject[string] | undefined): string | undefined {
-  if (typeof value !== "string" || !value.trim()) {
+  if (!Predicate.isString(value) || !value.trim()) {
     return undefined
   }
   const id = value.trim()
@@ -357,18 +375,15 @@ export function parseTargetSelection(value: JsonObject[string] | undefined): Exe
   if (value === undefined) {
     return undefined
   }
-  const object = getObject(value)
-  if (!object) {
+  if (!getObject(value)) {
     throw new HttpRouteError({ message: "targetSelection must be an object", status: 400, code: "invalid-request" })
   }
-  const urlIncludes = typeof object.urlIncludes === "string" && object.urlIncludes ? object.urlIncludes : undefined
-  if (object.index !== undefined && (typeof object.index !== "number" || !Number.isInteger(object.index))) {
+  const decoded = decodeRawTargetSelection(value)
+  if (Option.isNone(decoded)) {
     throw new HttpRouteError({ message: "targetSelection.index must be a non-negative integer", status: 400, code: "invalid-request" })
   }
-  const index = typeof object.index === "number" ? object.index : undefined
-  if (index !== undefined && index < 0) {
-    throw new HttpRouteError({ message: "targetSelection.index must be a non-negative integer", status: 400, code: "invalid-request" })
-  }
+  const urlIncludes = decoded.value.urlIncludes ? decoded.value.urlIncludes : undefined
+  const index = decoded.value.index
   if (urlIncludes && index !== undefined) {
     throw new HttpRouteError({ message: "Use only one target selector", status: 400, code: "invalid-request" })
   }
@@ -402,42 +417,43 @@ export function sendCdpEvent(socket: Pick<WebSocket, "send">, event: CdpEvent): 
 }
 
 export function getObject(value: unknown): JsonObject | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined
-  }
-  return value as JsonObject
+  return Predicate.isObject(value) ? (value as JsonObject) : undefined
+}
+
+export function getString(object: JsonObject | undefined, key: string): string | undefined {
+  const value = object?.[key]
+  return Predicate.isString(value) ? value : undefined
+}
+
+export function getNumber(object: JsonObject | undefined, key: string): number | undefined {
+  const value = object?.[key]
+  return Predicate.isNumber(value) ? value : undefined
+}
+
+export function getIdText(object: JsonObject | undefined, key: string): string | undefined {
+  const value = object?.[key]
+  return Predicate.isNumber(value) || Predicate.isString(value) ? String(value) : undefined
 }
 
 export function headerValue(value: string | string[] | undefined): string | undefined {
-  if (typeof value === "string" && value) {
-    return value
-  }
-  return undefined
+  return Predicate.isString(value) && value ? value : undefined
 }
 
 export function getTargetInfo(value: unknown): TargetInfo | undefined {
-  const object = getObject(value)
-  if (!object) {
-    return undefined
-  }
-  if (typeof object.targetId !== "string" || typeof object.url !== "string") {
-    return undefined
-  }
-  if (object.type !== "page" && object.type !== "iframe" && object.type !== "worker") {
-    return undefined
-  }
-  const type = object.type
-  return {
-    targetId: object.targetId,
-    type,
-    title: typeof object.title === "string" ? object.title : object.url,
-    url: object.url,
-    attached: true,
-    canAccessOpener: typeof object.canAccessOpener === "boolean" ? object.canAccessOpener : false,
-    ...(typeof object.browserContextId === "string" ? { browserContextId: object.browserContextId } : {}),
-    ...(typeof object.openerId === "string" ? { openerId: object.openerId } : {}),
-    ...(typeof object.parentFrameId === "string" ? { parentFrameId: object.parentFrameId } : {}),
-  }
+  return Option.match(decodeRawTargetInfo(value), {
+    onNone: () => undefined,
+    onSome: (info) => ({
+      targetId: info.targetId,
+      type: info.type,
+      title: info.title ?? info.url,
+      url: info.url,
+      attached: true,
+      canAccessOpener: info.canAccessOpener ?? false,
+      ...(info.browserContextId === undefined ? {} : { browserContextId: info.browserContextId }),
+      ...(info.openerId === undefined ? {} : { openerId: info.openerId }),
+      ...(info.parentFrameId === undefined ? {} : { parentFrameId: info.parentFrameId }),
+    }),
+  })
 }
 
 export function isRestrictedTarget(targetInfo: TargetInfo): boolean {

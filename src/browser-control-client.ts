@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url"
-import { Context, Effect, Layer, Redacted, Schema } from "effect"
+import { Context, Effect, Layer, Match, Redacted, Schema } from "effect"
 import { FetchHttpClient } from "effect/http"
 import * as AuthenticatedOriginInternal from "./authenticated-origin.ts"
 import * as RelayClient from "./relay-client.ts"
@@ -162,10 +162,10 @@ export const make = Effect.fn("BrowserControlClient.make")(function* (options: M
     start: RelayLifecycle.startManagedRelay(fileURLToPath(import.meta.url), "node", []),
   }).pipe(Effect.mapError((error) => clientError("connect", error)))
   if (readiness.buildProblem) {
-    return yield* Effect.fail(new ClientError({
+    return yield* new ClientError({
       message: readiness.buildProblem,
       reason: "connect",
-    }))
+    })
   }
   yield* RelayLifecycle.ensureExtensionConnected({
     relay,
@@ -216,13 +216,7 @@ function makeAuthenticatedOrigin(
   options: AuthenticatedOriginOptions,
 ): AuthenticatedOrigin {
   const origin = AuthenticatedOriginInternal.normalizeOrigin(options.origin)
-  const startUrl = options.startUrl === undefined ? undefined : new URL(options.startUrl, origin)
-  if (startUrl && startUrl.origin !== origin) {
-    throw new ClientError({
-      message: `Authenticated origin startUrl must stay on ${origin}`,
-      reason: "invalid-request",
-    })
-  }
+  const startUrl = options.startUrl === undefined ? undefined : AuthenticatedOriginInternal.resolveStartUrl(origin, options.startUrl)
 
   function json<S extends Schema.Top>(
     request: JsonOptions<S> & { readonly sensitive: true },
@@ -244,7 +238,7 @@ function makeAuthenticatedOrigin(
     return relay.authenticatedJson({
       sessionId,
       origin,
-      ...(startUrl ? { startUrl: startUrl.toString() } : {}),
+      ...(startUrl ? { startUrl } : {}),
       method,
       path: request.path,
       ...(request.body === undefined ? {} : { body: request.body }),
@@ -270,8 +264,8 @@ function decodeOutcome<S extends Schema.Top>(
   mutation: boolean,
   request: JsonOptions<S>,
 ): Effect.Effect<S["Type"] | Redacted.Redacted<S["Type"]>, Error, S["DecodingServices"]> {
-  switch (outcome._tag) {
-    case "Success": {
+  return Match.valueTags(outcome, {
+    Success: (outcome) => {
       if (request.sensitive === true) {
         return Schema.decodeUnknownEffect(Schema.RedactedFromValue(request.response, {
           label: "Browser Control authenticated response",
@@ -287,45 +281,45 @@ function decodeOutcome<S extends Schema.Top>(
           ? unknownOutcome(method)
           : new ResponseDecodeFailed({ message: `Authenticated response did not match the expected schema: ${cause.message}` })),
       )
-    }
-    case "OriginMismatch":
-      return Effect.fail(new OriginMismatch({
+    },
+    OriginMismatch: (outcome) =>
+      Effect.fail(new OriginMismatch({
         expectedOrigin: outcome.expectedOrigin,
         actualOrigin: outcome.actualOrigin,
         message: `Session page origin ${outcome.actualOrigin} does not match ${outcome.expectedOrigin}`,
-      }))
-    case "HttpError":
-      return Effect.fail(new HttpError({
+      })),
+    HttpError: (outcome) =>
+      Effect.fail(new HttpError({
         status: outcome.status,
         method,
         message: `Authenticated ${method} request was rejected with HTTP ${outcome.status}`,
-      }))
-    case "RequestFailed":
-      return Effect.fail(mutation || outcome.outcome === "unknown"
+      })),
+    RequestFailed: (outcome) =>
+      Effect.fail(mutation || outcome.outcome === "unknown"
         ? unknownOutcome(method)
-        : new RequestFailed({ method, message: `Authenticated ${method} request failed before it was sent` }))
-    case "InvalidJson":
-      return Effect.fail(mutation
+        : new RequestFailed({ method, message: `Authenticated ${method} request failed before it was sent` })),
+    InvalidJson: (outcome) =>
+      Effect.fail(mutation
         ? unknownOutcome(method)
         : new InvalidResponse({
             reason: "invalid-json",
             status: outcome.status,
             message: "Authenticated response was not valid JSON",
-          }))
-    case "ResponseTooLarge":
-      return Effect.fail(mutation
+          })),
+    ResponseTooLarge: (outcome) =>
+      Effect.fail(mutation
         ? unknownOutcome(method)
         : new InvalidResponse({
             reason: "too-large",
             status: outcome.status,
             maxResponseBytes: outcome.maxResponseBytes,
             message: `Authenticated response exceeded ${outcome.maxResponseBytes} bytes`,
-          }))
-    case "SensitiveCaptureActive":
-      return Effect.fail(new SensitiveCaptureActive({
+          })),
+    SensitiveCaptureActive: () =>
+      Effect.fail(new SensitiveCaptureActive({
         message: "Sensitive authenticated requests are blocked while session network capture is active",
-      }))
-  }
+      })),
+  })
 }
 
 function unknownOutcome(method: AuthenticatedJsonMethod): RequestOutcomeUnknown {

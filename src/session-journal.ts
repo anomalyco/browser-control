@@ -1,7 +1,8 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { Schema } from "effect"
+import { Option, Schema } from "effect"
+import { isNodeError } from "./fs-durability.ts"
 
 /**
  * Session journal: an auditable per-session record of what agents did to the
@@ -105,7 +106,7 @@ export async function readJournalEntries(options: {
   try {
     raw = await fs.promises.readFile(filePath, "utf8")
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+    if (isNodeError(error) && error.code === "ENOENT") {
       return []
     }
     throw error
@@ -127,7 +128,7 @@ export function parseJournalLines(raw: string): JournalEntry[] {
       continue
     }
     const decoded = decodeJournalEntry(parsed)
-    if (decoded._tag === "Some") {
+    if (Option.isSome(decoded)) {
       entries.push(decoded.value)
     }
   }

@@ -1,4 +1,4 @@
-import { Effect, Exit, Fiber, Latch } from "effect"
+import { Effect, Exit, Fiber, Latch, Match, Predicate } from "effect"
 import { TestClock } from "effect/testing"
 import { describe, expect, it, vi } from "vitest"
 import { RelayLifecycleEvent } from "../src/relay-lifecycle-log.ts"
@@ -41,7 +41,7 @@ describe("RelayShutdown", () => {
       let connected = true
       const { shutdown, stop } = fixture({
         busy: () => connected ? "raw-clients" : undefined,
-        audit: (event) => event._tag === "Requested" ? requested.open : Effect.void,
+        audit: (event) => Predicate.isTagged(event, "Requested") ? requested.open : Effect.void,
       })
       const rpc = yield* Effect.forkChild(shutdown.trackTransport(entered.open.pipe(Effect.andThen(release.await))))
       yield* entered.await
@@ -91,7 +91,7 @@ describe("RelayShutdown", () => {
     const { shutdown, stop, resume } = fixture({
       quiescent: () => quiet,
       audit: (event) => Effect.sync(() => {
-        if (event._tag === "Stopping") quiet = false
+        if (Predicate.isTagged(event, "Stopping")) quiet = false
       }),
     })
     await expect(Effect.runPromise(shutdown.request(request))).rejects.toThrow("changed while preparing restart")
@@ -117,10 +117,10 @@ describe("RelayShutdown", () => {
         drain: drainStarted.open.pipe(Effect.andThen(releaseSessions.await)),
         settle: settleStarted.open.pipe(Effect.andThen(releaseRoots.await)),
         audit: (event) => Effect.gen(function* () {
-          if (event._tag === "Requested") {
+          if (Predicate.isTagged(event, "Requested")) {
             yield* requested.open
             yield* releaseRequested.await
-          } else if (event._tag === "Stopping") {
+          } else if (Predicate.isTagged(event, "Stopping")) {
             yield* stopping.open
             yield* releaseStopping.await
           }
@@ -195,7 +195,12 @@ describe("RelayShutdown", () => {
     await Effect.runPromise(Effect.gen(function* () {
       const { shutdown, stop } = fixture()
       const started = yield* Latch.make()
-      const work = outcome === "success" ? Effect.void : outcome === "failure" ? Effect.fail(new Error("request failed")) : Effect.never
+      const work = Match.value(outcome).pipe(
+        Match.when("success", () => Effect.void),
+        Match.when("failure", () => Effect.fail(new Error("request failed"))),
+        Match.when("interrupt", () => Effect.never),
+        Match.exhaustive,
+      )
       const accepted = yield* Effect.forkChild(shutdown.track(started.open.pipe(Effect.andThen(work))))
       yield* started.await
       if (outcome === "interrupt") yield* Fiber.interrupt(accepted)
@@ -259,7 +264,7 @@ describe("RelayShutdown", () => {
         busy: () => busy ? "recordings" : undefined,
         drain: draining.open.pipe(Effect.andThen(releaseDrain.await)),
         audit: (event) => Effect.gen(function* () {
-          if (event._tag === "Cancelled") {
+          if (Predicate.isTagged(event, "Cancelled")) {
             yield* cancelling.open
             yield* releaseCancellation.await
           }
@@ -294,10 +299,10 @@ describe("RelayShutdown", () => {
       }
       expect(shutdown.stopping).toBe(true)
       expect(stop).toHaveBeenCalledOnce()
-      expect(events.filter((event) => event._tag === "Cancelled")).toEqual([
+      expect(events.filter(Predicate.isTagged("Cancelled"))).toEqual([
         RelayLifecycleEvent.cases.Cancelled.make({ instanceId: request.instanceId, requestId: request.requestId, client: request.client }),
       ])
-      expect(events.filter((event) => event._tag === "Stopping")).toEqual([
+      expect(events.filter(Predicate.isTagged("Stopping"))).toEqual([
         RelayLifecycleEvent.cases.Stopping.make({ instanceId: nextRequest.instanceId, requestId: nextRequest.requestId, client: nextRequest.client }),
       ])
     }))
@@ -323,7 +328,7 @@ describe("RelayShutdown", () => {
     try {
       const { shutdown, resume, stop } = fixture({
         busy: () => "recordings",
-        audit: (event) => event._tag === "Cancelled"
+        audit: (event) => Predicate.isTagged(event, "Cancelled")
           ? Effect.fail(new Error("fsync failed: https://private.example/ Bearer fixture-secret page.title()"))
           : Effect.void,
       })

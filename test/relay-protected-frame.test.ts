@@ -116,9 +116,10 @@ describe("relay protected frames", () => {
           emit("Runtime.consoleAPICalled", { type: "log", args: [], executionContextId: 1, timestamp })
           await delivered
         }
-        const pageEvents = () => events
-          .filter((event) => event.method.startsWith("Page."))
-          .map((event) => [event.method, event.params?.frameId ?? (event.params?.frame as JsonObject | undefined)?.id, event.params?.reason ?? event.params?.url ?? event.params?.name])
+        const pageEvents = () => events.flatMap((event) =>
+          event.method.startsWith("Page.")
+            ? [[event.method, event.params?.frameId ?? (event.params?.frame as JsonObject | undefined)?.id, event.params?.reason ?? event.params?.url ?? event.params?.name]]
+            : [])
         try {
           expect((await send(owner, { method: "Target.createTarget", params: { url: "about:blank" } })).result).toEqual({ targetId: "root-target" })
           const rootSession = events.find((event) => event.method === "Target.attachedToTarget")?.params?.sessionId
@@ -145,7 +146,7 @@ describe("relay protected frames", () => {
             ["Page.lifecycleEvent", "menu-frame", "init"],
             ["Page.frameDetached", "menu-frame", "remove"],
           ])
-          expect(events.filter((event) => event.method === "Page.frameDetached").map((event) => event.sessionId)).toEqual([rootSession])
+          expect(events.flatMap((event) => event.method === "Page.frameDetached" ? [event.sessionId] : [])).toEqual([rootSession])
 
           // Chrome now refuses every debugger command for the tab; the relay records the block on the root target.
           rejectDebuggerCommands = true
@@ -230,7 +231,7 @@ describe("relay protected frames", () => {
           emit("Page.lifecycleEvent", { frameId: "menu-frame", loaderId: "menu-loader", name: "load", timestamp: 1 })
           emit("Runtime.consoleAPICalled", { type: "log", args: [], executionContextId: 1, timestamp: 2 })
           await delivered
-          expect(events.filter((event) => event.method === "Page.lifecycleEvent").map((event) => event.params?.frameId)).toEqual(["menu-frame"])
+          expect(events.flatMap((event) => event.method === "Page.lifecycleEvent" ? [event.params?.frameId] : [])).toEqual(["menu-frame"])
         } finally {
           client.close()
           extension.close()

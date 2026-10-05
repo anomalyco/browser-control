@@ -1,5 +1,7 @@
 import crypto from "node:crypto"
+import { Predicate } from "effect"
 import { PageReadTimeoutError } from "./page-read-timeout.ts"
+import { getIdText, getString } from "./relay-helpers.ts"
 import type { ExecuteAftermath } from "./relay-schema.ts"
 import type { JsonObject } from "./protocol.ts"
 
@@ -64,15 +66,10 @@ export function summarizeDiagnosticUrl(value: string | undefined): string {
 }
 
 export function summarizeRuntimeEvaluate(params: JsonObject | undefined): string {
-  const sourceLength = typeof params?.expression === "string"
-    ? params.expression.length
-    : typeof params?.functionDeclaration === "string"
-    ? params.functionDeclaration.length
-    : 0
-  const rawContextId = params?.contextId ?? params?.executionContextId
-  const contextId = typeof rawContextId === "number" || typeof rawContextId === "string"
-    ? boundedToken(String(rawContextId))
-    : "default"
+  const source = getString(params, "expression") ?? getString(params, "functionDeclaration")
+  const sourceLength = source?.length ?? 0
+  const rawContextId = getIdText(params, "contextId") ?? getIdText(params, "executionContextId")
+  const contextId = rawContextId !== undefined ? boundedToken(rawContextId) : "default"
   return [
     `sourceChars=${sourceLength}`,
     `argumentCount=${Array.isArray(params?.arguments) ? params.arguments.length : 0}`,
@@ -95,7 +92,7 @@ export function boundedToken(value: string | undefined): string {
 }
 
 function errorMessages(cause: unknown): string[] {
-  return errorCauses(cause).flatMap((error) => error instanceof Error ? [error.message] : typeof error === "string" ? [error] : [])
+  return errorCauses(cause).flatMap((error) => error instanceof Error ? [error.message] : Predicate.isString(error) ? [error] : [])
 }
 
 function errorCauses(cause: unknown): unknown[] {

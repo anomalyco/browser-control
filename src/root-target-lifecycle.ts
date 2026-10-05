@@ -136,7 +136,7 @@ export class RootTargetLifecycle {
       const mayAttach = worker.attachIfMissing
       worker.attachIfMissing = false
       yield* Effect.suspend(() => {
-        if (revision !== work.revision) return Effect.fail(new GenerationChanged({ message: "Tab detached during root reconciliation" }))
+        if (revision !== work.revision) return new GenerationChanged({ message: "Tab detached during root reconciliation" })
         return lifecycle.withPermit(options.tabId, generation, (transition) => {
           if (lifecycle.options.registry.routingRootTarget(options.tabId)) return lifecycle.reconcileUnlocked(transition)
           return mayAttach
@@ -236,7 +236,7 @@ export class RootTargetLifecycle {
       transition.generation !== extension.generation() || transition.revision !== transition.work.revision ||
       transition.root?.sessionId !== root?.sessionId || transition.root?.targetInfo.targetId !== root?.targetInfo.targetId ||
       transition.staged?.sessionId !== staged?.sessionId || transition.staged?.targetInfo.targetId !== staged?.targetInfo.targetId
-    ) return yield* Effect.fail(new GenerationChanged({ message: "Root target generation changed during reconciliation" }))
+    ) return yield* new GenerationChanged({ message: "Root target generation changed during reconciliation" })
   })
 
   private step<A>(transition: Transition, effect: Effect.Effect<A, Error>): Effect.Effect<A, Error> {

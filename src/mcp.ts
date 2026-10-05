@@ -1,11 +1,11 @@
 import { NodeStdio } from "@effect/platform-node"
-import { Config, Context, Effect, Layer, Option } from "effect"
+import { Config, Context, Effect, Layer, Option, Predicate } from "effect"
 import { McpProtocol, McpSchema, McpServer } from "effect/ai"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
 import type { JsonObject } from "./protocol.ts"
-import { getObject, parseTargetSelection } from "./relay-helpers.ts"
+import { getObject, getString, parseTargetSelection } from "./relay-helpers.ts"
 import * as RelayClient from "./relay-client.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"
 import type { TargetSelection } from "./relay-schema.ts"
@@ -36,8 +36,20 @@ type AdoptArguments = {
 }
 
 const emptyInputSchema = objectSchema({})
+const sessionSchemaProperty = {
+  type: "string",
+  description: "Optional session id. Defaults to this MCP server's current session.",
+} as const
+const sessionOnlyInputSchema = objectSchema({
+  session: sessionSchemaProperty,
+})
 
 function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSession): readonly ToolSpec[] {
+  const resolveSessionId = (input: unknown, field = "session") => optionalStringField(input, field) ?? currentSession.id
+  const establishCurrentSession = (id: string) => {
+    currentSession.id = id
+    currentSession.established = true
+  }
   return [
     {
       name: "execute",
@@ -62,8 +74,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
           ...(args.targetSelection ? { targetSelection: args.targetSelection } : {}),
         })
         const recreated = !args.session && currentSession.established && result.session.created === true
-        currentSession.id = sessionId
-        currentSession.established = true
+        establishCurrentSession(sessionId)
         return {
           ...result,
           ...(recreated ? { notice: `Recreated session '${sessionId}' — relay had no such session; page and state were reset.` } : {}),
@@ -97,8 +108,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         const requestedId = optionalStringField(input, "id")
         const readOnly = optionalBooleanField(input, "readOnly")
         const session = yield* relay.sessionNew(requestedId, readOnly ? { readOnly: true } : {})
-        currentSession.id = session.id
-        currentSession.established = true
+        establishCurrentSession(session.id)
         return { session }
       }),
     },
@@ -132,8 +142,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       handle: (input) => Effect.gen(function* () {
         const id = yield* Effect.try(() => requiredStringField(input, "id"))
         yield* ensureSessionExists(relay, id)
-        currentSession.id = id
-        currentSession.established = true
+        establishCurrentSession(id)
         return { currentSession: currentSession.id }
       }),
     },
@@ -141,16 +150,15 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       name: "session_reset",
       description: "Reset a Browser Control session's state and page.",
       inputSchema: objectSchema({
-        id: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." },
+        id: sessionSchemaProperty,
       }),
       readOnly: false,
       destructive: true,
       idempotent: false,
       handle: (input) => Effect.gen(function* () {
-        const id = optionalStringField(input, "id") ?? currentSession.id
+        const id = resolveSessionId(input, "id")
         const session = yield* relay.sessionReset(id)
-        currentSession.id = id
-        currentSession.established = true
+        establishCurrentSession(id)
         return { session }
       }),
     },
@@ -158,13 +166,13 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       name: "session_delete",
       description: "Delete a Browser Control session.",
       inputSchema: objectSchema({
-        id: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." },
+        id: sessionSchemaProperty,
       }),
       readOnly: false,
       destructive: true,
       idempotent: true,
       handle: (input) => Effect.gen(function* () {
-        const id = optionalStringField(input, "id") ?? currentSession.id
+        const id = resolveSessionId(input, "id")
         const result = yield* relay.sessionDelete(id)
         if (currentSession.id === id) {
           currentSession.id = `mcp-${crypto.randomUUID().slice(0, 8)}`
@@ -192,8 +200,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
           createIfMissing: !args.session,
           targetSelection: args.targetSelection,
         })
-        currentSession.id = sessionId
-        currentSession.established = true
+        establishCurrentSession(sessionId)
         return { ...result, confirmation: `Adopted session '${result.session.id}' default page: ${result.adoptedUrl}` }
       }),
     },
@@ -247,12 +254,12 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     {
       name: "network_status",
       description: "Return bounded metadata for a session's active network capture. Captured values are never included.",
-      inputSchema: objectSchema({ session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." } }),
+      inputSchema: sessionOnlyInputSchema,
       readOnly: true,
       destructive: false,
       idempotent: true,
       handle: (input) => {
-        const sessionId = optionalStringField(input, "session") ?? currentSession.id
+        const sessionId = resolveSessionId(input)
         return relay.networkStatus({ sessionId }).pipe(Effect.map((result) => ({ session: sessionId, ...result })))
       },
     },
@@ -260,7 +267,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       name: "network_stop",
       description: "Stop network capture. Optionally write a credential-redacted HAR and store lossless credential values in a reusable secret profile. At least one of outputPath or secrets is required.",
       inputSchema: objectSchema({
-        session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." },
+        session: sessionSchemaProperty,
         outputPath: { type: "string", description: "Optional artifact path, resolved against the MCP process working directory. The HAR contains stable ${BC_SECRET_N} references, not captured values." },
         secrets: { type: "string", description: "Optional reusable profile name for captured credential values." },
       }),
@@ -268,7 +275,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       destructive: false,
       idempotent: false,
       handle: (input) => Effect.gen(function* () {
-        const sessionId = optionalStringField(input, "session") ?? currentSession.id
+        const sessionId = resolveSessionId(input)
         const outputPath = optionalStringField(input, "outputPath")
         const secrets = optionalStringField(input, "secrets")
         if (!outputPath && !secrets) {
@@ -284,17 +291,17 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     {
       name: "network_cancel",
       description: "Cancel a session's network capture and discard its in-memory exchanges.",
-      inputSchema: objectSchema({ session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." } }),
+      inputSchema: sessionOnlyInputSchema,
       readOnly: false,
       destructive: true,
       idempotent: true,
-      handle: (input) => relay.networkCancel({ sessionId: optionalStringField(input, "session") ?? currentSession.id }),
+      handle: (input) => relay.networkCancel({ sessionId: resolveSessionId(input) }),
     },
     {
       name: "recording_start",
       description: "Start recording the current session tab. CDP mode records video to WebM or MP4; tab-capture mode supports WebM and optional audio.",
       inputSchema: objectSchema({
-        session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." },
+        session: sessionSchemaProperty,
         outputPath: { type: "string", description: "Recording artifact path, resolved against the MCP process working directory." },
         mode: { type: "string", enum: ["auto", "tab-capture", "cdp"], description: "Recording backend. Defaults to auto." },
         audio: { type: "boolean", description: "Capture tab audio in tab-capture mode." },
@@ -315,7 +322,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         const maxDurationMs = optionalPositiveIntegerField(object, "maxDurationMs")
         const audio = optionalBooleanField(object, "audio")
         return relay.recordingStart({
-          sessionId: optionalStringField(object, "session") ?? currentSession.id,
+          sessionId: resolveSessionId(object),
           outputPath: path.resolve(requiredStringField(object, "outputPath")),
           ...(mode ? { mode } : {}),
           ...(audio === undefined ? {} : { audio }),
@@ -327,35 +334,35 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     {
       name: "recording_stop",
       description: "Stop the active recording for a session and finalize its artifact.",
-      inputSchema: objectSchema({ session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." } }),
+      inputSchema: sessionOnlyInputSchema,
       readOnly: false,
       destructive: false,
       idempotent: false,
-      handle: (input) => relay.recordingStop({ sessionId: optionalStringField(input, "session") ?? currentSession.id }),
+      handle: (input) => relay.recordingStop({ sessionId: resolveSessionId(input) }),
     },
     {
       name: "recording_status",
       description: "Return bounded status and quality counters for a session recording.",
-      inputSchema: objectSchema({ session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." } }),
+      inputSchema: sessionOnlyInputSchema,
       readOnly: true,
       destructive: false,
       idempotent: true,
-      handle: (input) => relay.recordingStatus({ sessionId: optionalStringField(input, "session") ?? currentSession.id }),
+      handle: (input) => relay.recordingStatus({ sessionId: resolveSessionId(input) }),
     },
     {
       name: "recording_cancel",
       description: "Cancel a session recording and discard its unfinished artifact.",
-      inputSchema: objectSchema({ session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." } }),
+      inputSchema: sessionOnlyInputSchema,
       readOnly: false,
       destructive: true,
       idempotent: true,
-      handle: (input) => relay.recordingCancel({ sessionId: optionalStringField(input, "session") ?? currentSession.id }),
+      handle: (input) => relay.recordingCancel({ sessionId: resolveSessionId(input) }),
     },
     {
       name: "flight_recorder_start",
       description: "Start a rolling in-memory video buffer for the current session tab. Saving a clip does not stop buffering.",
       inputSchema: objectSchema({
-        session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." },
+        session: sessionSchemaProperty,
         retentionMs: { type: "integer", minimum: 1000, maximum: 120000, description: "Rolling retention window. Defaults to 60000." },
         frameRate: { type: "integer", minimum: 1, maximum: 60, description: "Saved clip frame rate. Defaults to 60." },
       }),
@@ -367,7 +374,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         const retentionMs = optionalPositiveIntegerField(object, "retentionMs")
         const frameRate = optionalPositiveIntegerField(object, "frameRate")
         return relay.flightRecorderStart({
-          sessionId: optionalStringField(object, "session") ?? currentSession.id,
+          sessionId: resolveSessionId(object),
           ...(retentionMs === undefined ? {} : { retentionMs }),
           ...(frameRate === undefined ? {} : { frameRate }),
         })
@@ -376,17 +383,17 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     {
       name: "flight_recorder_status",
       description: "Return bounded rolling-buffer duration, frame, byte, and drop counters.",
-      inputSchema: objectSchema({ session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." } }),
+      inputSchema: sessionOnlyInputSchema,
       readOnly: true,
       destructive: false,
       idempotent: true,
-      handle: (input) => relay.flightRecorderStatus({ sessionId: optionalStringField(input, "session") ?? currentSession.id }),
+      handle: (input) => relay.flightRecorderStatus({ sessionId: resolveSessionId(input) }),
     },
     {
       name: "flight_recorder_save_last",
       description: "Encode and save the most recent buffered browser video without stopping the flight recorder.",
       inputSchema: objectSchema({
-        session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." },
+        session: sessionSchemaProperty,
         outputPath: { type: "string", description: "Fresh .webm or .mp4 path, resolved against the MCP process working directory." },
         durationMs: { type: "integer", minimum: 1, description: "Recent duration to save. Defaults to 30000 and cannot exceed retention." },
       }, ["outputPath"]),
@@ -397,7 +404,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         const object = requireObject(input)
         const durationMs = optionalPositiveIntegerField(object, "durationMs")
         return relay.flightRecorderSaveLast({
-          sessionId: optionalStringField(object, "session") ?? currentSession.id,
+          sessionId: resolveSessionId(object),
           outputPath: path.resolve(requiredStringField(object, "outputPath")),
           ...(durationMs === undefined ? {} : { durationMs }),
         })
@@ -406,11 +413,11 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     {
       name: "flight_recorder_cancel",
       description: "Stop and discard a session's rolling video buffer.",
-      inputSchema: objectSchema({ session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." } }),
+      inputSchema: sessionOnlyInputSchema,
       readOnly: false,
       destructive: true,
       idempotent: true,
-      handle: (input) => relay.flightRecorderCancel({ sessionId: optionalStringField(input, "session") ?? currentSession.id }),
+      handle: (input) => relay.flightRecorderCancel({ sessionId: resolveSessionId(input) }),
     },
     {
       name: "secrets_status",
@@ -426,7 +433,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
       description: "Reload a session page, observe fresh credentials, and update a secret profile while preserving stable BC_SECRET_N references.",
       inputSchema: objectSchema({
         name: { type: "string", description: "Existing secret profile name." },
-        session: { type: "string", description: "Optional session id. Defaults to this MCP server's current session." },
+        session: sessionSchemaProperty,
         urlFilter: { type: "string", description: "Observe credentials only on matching request URLs." },
         timeoutMs: { type: "integer", minimum: 1, description: "Reload timeout. Defaults to 30000." },
       }, ["name"]),
@@ -438,7 +445,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         const timeoutMs = optionalPositiveIntegerField(object, "timeoutMs")
         const urlFilter = optionalStringField(object, "urlFilter")
         return relay.authRefresh({
-          sessionId: optionalStringField(object, "session") ?? currentSession.id,
+          sessionId: resolveSessionId(object),
           name: requiredStringField(object, "name"),
           ...(urlFilter ? { urlFilter } : {}),
           ...(timeoutMs === undefined ? {} : { timeoutMs }),
@@ -593,51 +600,39 @@ function parseMcpTargetSelection(input: JsonObject): TargetSelection | undefined
 }
 
 function requiredStringField(input: unknown, field: string): string {
-  const object = requireObject(input)
-  const value = object[field]
-  if (typeof value !== "string" || !value) {
+  const value = optionalStringField(input, field)
+  if (!value) {
     throw new Error(`${field} is required`)
   }
   return value
 }
 
 function optionalStringField(input: unknown, field: string): string | undefined {
-  const object = requireObject(input)
-  const value = object[field]
-  return typeof value === "string" && value ? value : undefined
+  const value = getString(requireObject(input), field)
+  return value ? value : undefined
 }
 
 function optionalBooleanField(input: unknown, field: string): boolean | undefined {
-  const object = requireObject(input)
-  const value = object[field]
-  return typeof value === "boolean" ? value : undefined
+  const value = requireObject(input)[field]
+  return Predicate.isBoolean(value) ? value : undefined
 }
 
 function optionalPositiveIntegerField(input: unknown, field: string): number | undefined {
-  const object = requireObject(input)
-  const value = object[field]
+  const value = requireObject(input)[field]
   if (value === undefined) return undefined
-  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+  if (!Predicate.isNumber(value) || !Number.isInteger(value) || value <= 0) {
     throw new Error(`${field} must be a positive integer`)
   }
   return value
 }
 
 function optionalStringArrayField(input: unknown, field: string): readonly string[] | undefined {
-  const object = requireObject(input)
-  const value = object[field]
+  const value = requireObject(input)[field]
   if (value === undefined) return undefined
-  if (!Array.isArray(value)) {
+  if (!Array.isArray(value) || !value.every((item): item is string => Predicate.isString(item) && item.length > 0)) {
     throw new Error(`${field} must be an array of non-empty strings`)
   }
-  const strings: string[] = []
-  for (const item of value) {
-    if (typeof item !== "string" || item.length === 0) {
-      throw new Error(`${field} must be an array of non-empty strings`)
-    }
-    strings.push(item)
-  }
-  return strings
+  return value
 }
 
 function requireObject(input: unknown): JsonObject {
@@ -649,7 +644,7 @@ function requireObject(input: unknown): JsonObject {
 }
 
 function stringifyResult(value: unknown): string {
-  if (typeof value === "string") {
+  if (Predicate.isString(value)) {
     return value
   }
   return JSON.stringify(value, null, 2)
@@ -661,14 +656,17 @@ export function toolResultForValue(value: unknown): McpSchema.CallToolResult {
   const media = Array.isArray(object?.media)
     ? object.media.flatMap((item) => {
       const image = getObject(item)
-      return image?.type === "image" && typeof image.mimeType === "string" && typeof image.data === "string"
-        ? [{ data: image.data, mimeType: image.mimeType }]
+      const mimeType = getString(image, "mimeType")
+      const data = getString(image, "data")
+      return image?.type === "image" && mimeType !== undefined && data !== undefined
+        ? [{ data, mimeType }]
         : []
     })
     : []
+  const errorText = isError ? getString(object, "text") : undefined
   if (media.length > 0) {
     const { media: _media, ...structuredContent } = object ?? {}
-    const text = isError && typeof object?.text === "string" ? object.text : stringifyResult(structuredContent)
+    const text = errorText ?? stringifyResult(structuredContent)
     return new McpSchema.CallToolResult({
       content: [
         McpSchema.TextContent.make({ text }),
@@ -681,7 +679,7 @@ export function toolResultForValue(value: unknown): McpSchema.CallToolResult {
       isError,
     })
   }
-  const text = isError && typeof object?.text === "string" ? object.text : stringifyResult(value)
+  const text = errorText ?? stringifyResult(value)
   return toolResult({ text, ...(object ? { structuredContent: object } : {}), isError })
 }
 

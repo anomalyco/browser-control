@@ -1,22 +1,20 @@
 #!/usr/bin/env node
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
-import { Config, Console, Effect, FileSystem, Layer, Option } from "effect"
+import { Config, Console, Effect, FileSystem, Layer, Option, Predicate, Result, Schema } from "effect"
 import { Argument, Command, Flag } from "effect/cli"
 import path from "node:path"
-import { formatRecordingQuality } from "./recording-presentation.ts"
 import process from "node:process"
 import { fileURLToPath } from "node:url"
-import { createDoctorReport, formatDoctorReport } from "./doctor.ts"
+import { createDoctorReport, formatDoctorReport, formatTargetSummary } from "./doctor.ts"
 import { runMcpServer } from "./mcp.ts"
 import * as RelayClient from "./relay-client.ts"
 import { parseAdditionalExtensionOrigins } from "./relay-helpers.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"
-import type { ExecuteAftermath, ExecuteLogEntry, ExecuteResponse, NetworkStatusResponse, NetworkStopResponse } from "./relay-schema.ts"
+import type { ExecuteAftermath, ExecuteLogEntry, ExecuteResponse, NetworkStatusResponse, NetworkStopResponse, RecordingQuality } from "./relay-schema.ts"
 import { startRelay } from "./relay.ts"
 import { defaultJournalBaseDir, formatJournalEntry, readJournalEntries } from "./session-journal.ts"
 import * as SessionStore from "./session-store.ts"
 import { browserControlVersion } from "./version.ts"
-import { resolveExplicitSessionSelector } from "./cli-session-selector.ts"
 
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const sessionIdConfig = Config.option(Config.String("BROWSER_CONTROL_SESSION"))
@@ -24,6 +22,40 @@ const targetUrlConfig = Config.option(Config.String("BROWSER_CONTROL_TARGET_URL"
 const targetIndexConfig = Config.option(Config.Int("BROWSER_CONTROL_TARGET_INDEX"))
 const encodedCliOperandsMarker = "bc-cli-operands:v1"
 const encodedCliOperandPrefix = "bc-cli-operand:"
+const jsonFlag = Flag.Boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Print machine-readable JSON"))
+const sessionFlag = (description?: string) => {
+  const flag = Flag.String("session").pipe(Flag.optional, Flag.withAlias("s"))
+  return description ? flag.pipe(Flag.withDescription(description)) : flag
+}
+const tabIdFlag = (description?: string) => {
+  const flag = Flag.Int("tab-id").pipe(Flag.optional)
+  return description ? flag.pipe(Flag.withDescription(description)) : flag
+}
+const failExit = Effect.sync(() => {
+  process.exitCode = 1
+})
+
+export function resolveExplicitSessionSelector(options: {
+  readonly positional: string | undefined
+  readonly flag: string | undefined
+  readonly environment: string | undefined
+}): string | undefined {
+  if (options.positional && options.flag) {
+    throw new Error("Use either a positional session id or --session, not both")
+  }
+  return options.flag ?? options.positional ?? options.environment
+}
+
+export function formatRecordingQuality(quality: RecordingQuality | undefined): string {
+  if (!quality) return "Capture quality: unavailable (tab capture or older relay)."
+  return [
+    `Capture: ${quality.width}×${quality.height}, output ${quality.frameRate} fps; source surface ${quality.sourceWidth ?? "?"}×${quality.sourceHeight ?? "?"} CSS px`,
+    `Source frames: ${quality.sourceFrameCount} received (${quality.achievedSourceFrameRate.toFixed(1)}/s), ${quality.encodedSourceFrameCount} retained (${quality.achievedEncodedSourceFrameRate.toFixed(1)}/s), ${quality.coalescedFrameCount} coalesced, ${quality.droppedFrameCount} dropped`,
+    quality.screenshotFallback
+      ? "WARNING: no compositor frames arrived; this video holds a single stop-time screenshot."
+      : "Source counts are compositor events, not a measurement of distinct motion. Inspect the video before sharing.",
+  ].join("\n")
+}
 
 export function normalizeCliArguments(args: ReadonlyArray<string>): ReadonlyArray<string> {
   const delimiter = args.indexOf("--")
@@ -69,14 +101,24 @@ const ensureCliRelayAndExtension = Effect.fnUntraced(function* () {
   yield* RelayLifecycle.ensureExtensionConnected({ relay, waitForReconnect: RelayLifecycle.shouldWaitForExtensionReconnect(readiness) })
 })
 
-const resolveExistingSessionId = Effect.fnUntraced(function* (explicitSessionId: string | undefined) {
+const resolveSelectedSessionId = Effect.fnUntraced(function* (explicitSessionId: string | undefined) {
   const store = yield* SessionStore.Service
   const sessionId = explicitSessionId ?? (yield* store.read)
   if (!sessionId) {
     return yield* Effect.fail(new Error("No session provided and no current Browser Control session exists"))
   }
-  yield* ensureSessionExists(sessionId)
   return sessionId
+})
+
+const resolvePositionalOrFlagSessionId = Effect.fnUntraced(function* (
+  id: Option.Option<string>,
+  session: Option.Option<string>,
+) {
+  return yield* resolveSelectedSessionId(resolveExplicitSessionSelector({
+    positional: Option.getOrUndefined(id),
+    flag: Option.getOrUndefined(session),
+    environment: Option.getOrUndefined(yield* sessionIdConfig),
+  }))
 })
 
 const ensureSessionExists = Effect.fnUntraced(function* (id: string) {
@@ -158,6 +200,10 @@ type ExecuteJsonEnvelope = {
   readonly session?: ExecuteResponse["session"]
 }
 
+const ScriptErrorEnvelope = Schema.TaggedStruct("ScriptError", {
+  message: Schema.String,
+})
+
 export function executeJsonEnvelope(result: ExecuteResponse): ExecuteJsonEnvelope {
   const hasStructuredValue = Object.hasOwn(result, "value") && result.value !== undefined
   return {
@@ -166,7 +212,7 @@ export function executeJsonEnvelope(result: ExecuteResponse): ExecuteJsonEnvelop
     text: result.text,
     value: hasStructuredValue ? result.value : null,
     valueUnavailable: !hasStructuredValue,
-    ...(result.isError ? { error: { _tag: "ScriptError", message: result.text } } : {}),
+    ...(result.isError ? { error: ScriptErrorEnvelope.make({ message: result.text }) } : {}),
     logs: result.logs,
     warnings: result.warnings ?? [],
     ...(result.diagnostic ? { diagnostic: result.diagnostic } : {}),
@@ -180,9 +226,10 @@ export function formatSessionContinuation(sessionId: string): string {
 }
 
 function errorJsonEnvelope(error: unknown): ExecuteJsonEnvelope {
-  const tag = typeof error === "object" && error !== null && "_tag" in error && typeof error._tag === "string" ? error._tag : "Error"
+  const tag = Predicate.isObject(error) && Predicate.hasProperty(error, "_tag") && Predicate.isString(error._tag) ? error._tag : "Error"
   const message = error instanceof Error ? error.message : String(error)
-  return { ok: false, isError: true, text: message, value: null, valueUnavailable: true, error: { _tag: tag, message }, logs: [], warnings: [] }
+  const errorValue: { readonly _tag: string; readonly message: string } = Object.assign({ message }, { _tag: tag })
+  return { ok: false, isError: true, text: message, value: null, valueUnavailable: true, error: errorValue, logs: [], warnings: [] }
 }
 
 const serve = Command.make(
@@ -223,7 +270,7 @@ const execute = Command.make(
   {
     code: Argument.String("code").pipe(Argument.variadic({ min: 0 })),
     file: Flag.String("file").pipe(Flag.optional, Flag.withDescription("Read execute code from a file")),
-    session: Flag.String("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Continue an existing Browser Control session; omit to create a fresh one")),
+    session: sessionFlag("Continue an existing Browser Control session; omit to create a fresh one"),
     targetUrl: Flag.String("target-url").pipe(Flag.optional, Flag.withDescription("Use the attached page whose URL contains this text")),
     targetIndex: Flag.Int("target-index").pipe(Flag.optional, Flag.withDescription("Use the attached page at this zero-based index")),
     json: Flag.Boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Print a machine-readable result envelope: { ok, isError, text, value, valueUnavailable, error?, logs, warnings, diagnostic?, aftermath, session }")),
@@ -274,18 +321,14 @@ const execute = Command.make(
       )
       yield* Console.log(JSON.stringify(envelope, null, 2))
       if (!envelope.ok) {
-        yield* Effect.sync(() => {
-          process.exitCode = 1
-        })
+        yield* failExit
       }
       return
     }
     const outcome = yield* Effect.result(run)
-    if (outcome._tag === "Failure") {
+    if (Result.isFailure(outcome)) {
       yield* Console.error(outcome.failure.message)
-      yield* Effect.sync(() => {
-        process.exitCode = 1
-      })
+      yield* failExit
       return
     }
     const result = outcome.success
@@ -303,9 +346,7 @@ const execute = Command.make(
       yield* print(aftermath)
     }
     if (result.isError) {
-      yield* Effect.sync(() => {
-        process.exitCode = 1
-      })
+      yield* failExit
     }
   }),
 ).pipe(Command.withDescription("Execute Playwright code against the attached browser"))
@@ -329,7 +370,7 @@ const sessionNew = Command.make(
 const sessionList = Command.make(
   "list",
   {
-    json: Flag.Boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Print machine-readable JSON")),
+    json: jsonFlag,
   },
   Effect.fn("Cli.sessionList")(function* ({ json }) {
     const relay = yield* RelayClient.Service
@@ -382,15 +423,12 @@ const sessionReset = Command.make(
   "reset",
   {
     id: Argument.String("id").pipe(Argument.optional),
-    session: Flag.String("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Reset this Browser Control session id")),
+    session: sessionFlag("Reset this Browser Control session id"),
   },
   Effect.fn("Cli.sessionReset")(function* ({ id, session }) {
     const relay = yield* RelayClient.Service
-    const sessionId = yield* resolveExistingSessionId(resolveExplicitSessionSelector({
-      positional: Option.getOrUndefined(id),
-      flag: Option.getOrUndefined(session),
-      environment: Option.getOrUndefined(yield* sessionIdConfig),
-    }))
+    const sessionId = yield* resolvePositionalOrFlagSessionId(id, session)
+    yield* ensureCliRelay()
     const resetSession = yield* relay.sessionReset(sessionId)
     yield* Console.log(resetSession.id)
   }),
@@ -399,7 +437,7 @@ const sessionReset = Command.make(
 const sessionAdopt = Command.make(
   "adopt",
   {
-    session: Flag.String("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Adopt into this Browser Control session, creating it when it does not exist yet; omit to create a fresh readable id")),
+    session: sessionFlag("Adopt into this Browser Control session, creating it when it does not exist yet; omit to create a fresh readable id"),
     targetUrl: Flag.String("target-url").pipe(Flag.optional, Flag.withDescription("Adopt the attached page whose URL contains this text")),
     targetIndex: Flag.Int("target-index").pipe(Flag.optional, Flag.withDescription("Adopt the attached page at this zero-based target index")),
   },
@@ -439,20 +477,12 @@ const sessionDelete = Command.make(
   "delete",
   {
     id: Argument.String("id").pipe(Argument.optional),
-    session: Flag.String("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Delete this Browser Control session id")),
+    session: sessionFlag("Delete this Browser Control session id"),
   },
   Effect.fn("Cli.sessionDelete")(function* ({ id, session }) {
     const relay = yield* RelayClient.Service
     const store = yield* SessionStore.Service
-    const selectedSessionId = resolveExplicitSessionSelector({
-      positional: Option.getOrUndefined(id),
-      flag: Option.getOrUndefined(session),
-      environment: Option.getOrUndefined(yield* sessionIdConfig),
-    })
-    const sessionId = selectedSessionId ?? (yield* store.read)
-    if (!sessionId) {
-      return yield* Effect.fail(new Error("No session provided and no current Browser Control session exists"))
-    }
+    const sessionId = yield* resolvePositionalOrFlagSessionId(id, session)
     yield* ensureCliRelay()
     yield* relay.sessionDelete(sessionId)
     const current = yield* store.read
@@ -471,13 +501,13 @@ const session = Command.make("session").pipe(
 const status = Command.make(
   "status",
   {
-    json: Flag.Boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Print machine-readable JSON")),
+    json: jsonFlag,
   },
   Effect.fn("Cli.status")(function* ({ json }) {
     const relay = yield* RelayClient.Service
     const store = yield* SessionStore.Service
     const relayResult = yield* Effect.result(relay.version)
-    if (relayResult._tag === "Failure") {
+    if (Result.isFailure(relayResult)) {
       if (!(relayResult.failure instanceof RelayClient.RelayUnreachable)) {
         if (json) {
           yield* Console.log(JSON.stringify({
@@ -490,9 +520,7 @@ const status = Command.make(
         } else {
           yield* Console.error(`Relay status failed: ${relayResult.failure.message}`)
         }
-        yield* Effect.sync(() => {
-          process.exitCode = 1
-        })
+        yield* failExit
         return
       }
       const stopped = RelayLifecycle.stoppedRelayStatus(relay.endpoint)
@@ -502,9 +530,7 @@ const status = Command.make(
         yield* Console.log(`Relay: stopped (${relay.endpoint})`)
         yield* Console.log("Run browser-control execute to start it automatically.")
       }
-      yield* Effect.sync(() => {
-        process.exitCode = 1
-      })
+      yield* failExit
       return
     }
     const version = relayResult.success
@@ -524,9 +550,7 @@ const status = Command.make(
         targets,
       }, null, 2))
       if (buildProblem) {
-        yield* Effect.sync(() => {
-          process.exitCode = 1
-        })
+        yield* failExit
       }
       return
     }
@@ -565,17 +589,11 @@ const status = Command.make(
     } else {
       yield* Console.log("Targets:")
       yield* Effect.forEach(targets, (target, index) => {
-        const tab = target.tabId === undefined ? "" : ` tab=${target.tabId}`
-        const browserControlSession = target.browserControlSessionId ? ` session=${target.browserControlSessionId}` : ""
-        const owner = target.owner ? ` owner=${target.owner}` : ""
-        const health = `${target.crashed ? " crashed=true" : ""}${target.protectedUi ? " protected-ui=true" : ""}`
-        return Console.log(`- [${index}] ${target.type} ${target.id}${tab}${browserControlSession}${owner}${health} ${target.url || "about:blank"}`)
+        return Console.log(`- [${index}] ${formatTargetSummary(target, { includeSession: true })}`)
       })
     }
     if (buildProblem) {
-      yield* Effect.sync(() => {
-        process.exitCode = 1
-      })
+      yield* failExit
     }
   }),
 ).pipe(Command.withDescription("Show relay, extension, and target status"))
@@ -584,32 +602,30 @@ const recordingStart = Command.make(
   "start",
   {
     outputPath: Argument.String("output-path").pipe(Argument.withDescription("Path to write the recording artifact; tabCapture requires .webm, CDP accepts .webm or .mp4")),
-    session: Flag.String("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Record the page for this Browser Control or CDP session id")),
-    tabId: Flag.Int("tab-id").pipe(Flag.optional, Flag.withDescription("Record this attached Chrome tab id")),
+    session: sessionFlag("Record the page for this Browser Control or CDP session id"),
+    tabId: tabIdFlag("Record this attached Chrome tab id"),
     mode: Flag.String("mode").pipe(Flag.optional, Flag.withDescription("Recording mode: auto, tab-capture, or cdp. auto uses CDP for relay-owned tabs and tabCapture for user-owned tabs")),
     audio: Flag.Boolean("audio").pipe(Flag.withDefault(false), Flag.withDescription("Include tab audio")),
     frameRate: Flag.Int("frame-rate").pipe(Flag.optional, Flag.withDescription("Output frame rate, integer 1..60; defaults to 30 for tab-capture and 60 for CDP")),
     maxDurationMs: Flag.Int("max-duration-ms").pipe(Flag.optional, Flag.withDescription("Auto-stop guard in milliseconds, defaults to 900000")),
-    json: Flag.Boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Print machine-readable JSON")),
+    json: jsonFlag,
   },
   Effect.fn("Cli.recordingStart")(function* ({ outputPath, session, tabId, mode, audio, frameRate, maxDurationMs, json }) {
-    const frameRateValue = Option.getOrUndefined(frameRate)
-    if (frameRateValue !== undefined && (frameRateValue < 1 || frameRateValue > 60)) {
+    if (Option.isSome(frameRate) && (frameRate.value < 1 || frameRate.value > 60)) {
       return yield* Effect.fail(new Error("Recording frameRate must be an integer from 1 to 60"))
     }
     const relay = yield* RelayClient.Service
     yield* ensureCliRelayAndExtension()
     const target = yield* recordingTarget({ session, tabId })
     const modeValue = yield* parseRecordingModeOption(Option.getOrUndefined(mode))
-    const maxDurationMsValue = Option.getOrUndefined(maxDurationMs)
     const resolvedOutputPath = path.resolve(outputPath)
     const result = yield* relay.recordingStart({
       ...target,
       outputPath: resolvedOutputPath,
       ...(modeValue === undefined ? {} : { mode: modeValue }),
       audio,
-      ...(frameRateValue === undefined ? {} : { frameRate: frameRateValue }),
-      ...(maxDurationMsValue === undefined ? {} : { maxDurationMs: maxDurationMsValue }),
+      ...(Option.isSome(frameRate) ? { frameRate: frameRate.value } : {}),
+      ...(Option.isSome(maxDurationMs) ? { maxDurationMs: maxDurationMs.value } : {}),
     })
     if (!result.success) {
       return yield* Effect.fail(new Error(result.error ?? "Failed to start recording"))
@@ -621,9 +637,9 @@ const recordingStart = Command.make(
 const recordingStop = Command.make(
   "stop",
   {
-    session: Flag.String("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Stop recording for this CDP session id")),
-    tabId: Flag.Int("tab-id").pipe(Flag.optional, Flag.withDescription("Stop recording for this Chrome tab id")),
-    json: Flag.Boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Print machine-readable JSON")),
+    session: sessionFlag("Stop recording for this CDP session id"),
+    tabId: tabIdFlag("Stop recording for this Chrome tab id"),
+    json: jsonFlag,
   },
   Effect.fn("Cli.recordingStop")(function* ({ session, tabId, json }) {
     const relay = yield* RelayClient.Service
@@ -643,9 +659,9 @@ const recordingStop = Command.make(
 const recordingStatus = Command.make(
   "status",
   {
-    session: Flag.String("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Check recording for this CDP session id")),
-    tabId: Flag.Int("tab-id").pipe(Flag.optional, Flag.withDescription("Check recording for this Chrome tab id")),
-    json: Flag.Boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Print machine-readable JSON")),
+    session: sessionFlag("Check recording for this CDP session id"),
+    tabId: tabIdFlag("Check recording for this Chrome tab id"),
+    json: jsonFlag,
   },
   Effect.fn("Cli.recordingStatus")(function* ({ session, tabId, json }) {
     const relay = yield* RelayClient.Service
@@ -669,8 +685,8 @@ const recordingStatus = Command.make(
 const recordingCancel = Command.make(
   "cancel",
   {
-    session: Flag.String("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Cancel recording for this CDP session id")),
-    tabId: Flag.Int("tab-id").pipe(Flag.optional, Flag.withDescription("Cancel recording for this Chrome tab id")),
+    session: sessionFlag("Cancel recording for this CDP session id"),
+    tabId: tabIdFlag("Cancel recording for this Chrome tab id"),
   },
   Effect.fn("Cli.recordingCancel")(function* ({ session, tabId }) {
     const relay = yield* RelayClient.Service
@@ -692,11 +708,11 @@ const recording = Command.make("recording").pipe(
 const flightRecorderStart = Command.make(
   "start",
   {
-    session: Flag.String("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Buffer the tab owned by this session")),
-    tabId: Flag.Int("tab-id").pipe(Flag.optional, Flag.withDescription("Buffer this attached Chrome tab id")),
+    session: sessionFlag("Buffer the tab owned by this session"),
+    tabId: tabIdFlag("Buffer this attached Chrome tab id"),
     retentionMs: Flag.Int("retention-ms").pipe(Flag.optional, Flag.withDescription("Ring-buffer duration in milliseconds (1000..120000; default 60000)")),
     frameRate: Flag.Int("frame-rate").pipe(Flag.optional, Flag.withDescription("Output frame rate from 1 to 60")),
-    json: Flag.Boolean("json"),
+    json: jsonFlag,
   },
   Effect.fn("Cli.flightRecorderStart")(function* ({ session, tabId, retentionMs, frameRate, json }) {
     const relay = yield* RelayClient.Service
@@ -714,9 +730,9 @@ const flightRecorderStart = Command.make(
 const flightRecorderStatus = Command.make(
   "status",
   {
-    session: Flag.String("session").pipe(Flag.optional, Flag.withAlias("s")),
-    tabId: Flag.Int("tab-id").pipe(Flag.optional),
-    json: Flag.Boolean("json"),
+    session: sessionFlag(),
+    tabId: tabIdFlag(),
+    json: jsonFlag,
   },
   Effect.fn("Cli.flightRecorderStatus")(function* ({ session, tabId, json }) {
     const relay = yield* RelayClient.Service
@@ -732,10 +748,10 @@ const flightRecorderSaveLast = Command.make(
   "save-last",
   {
     outputPath: Argument.String("output-path").pipe(Argument.withDescription("Fresh .webm or .mp4 artifact path")),
-    session: Flag.String("session").pipe(Flag.optional, Flag.withAlias("s")),
-    tabId: Flag.Int("tab-id").pipe(Flag.optional),
+    session: sessionFlag(),
+    tabId: tabIdFlag(),
     durationMs: Flag.Int("duration-ms").pipe(Flag.optional, Flag.withDescription("How much recent history to save; defaults to 30 seconds")),
-    json: Flag.Boolean("json"),
+    json: jsonFlag,
   },
   Effect.fn("Cli.flightRecorderSaveLast")(function* ({ outputPath, session, tabId, durationMs, json }) {
     const relay = yield* RelayClient.Service
@@ -752,8 +768,8 @@ const flightRecorderSaveLast = Command.make(
 const flightRecorderCancel = Command.make(
   "cancel",
   {
-    session: Flag.String("session").pipe(Flag.optional, Flag.withAlias("s")),
-    tabId: Flag.Int("tab-id").pipe(Flag.optional),
+    session: sessionFlag(),
+    tabId: tabIdFlag(),
   },
   Effect.fn("Cli.flightRecorderCancel")(function* ({ session, tabId }) {
     const relay = yield* RelayClient.Service
@@ -769,7 +785,7 @@ const flightRecorder = Command.make("flight-recorder").pipe(
 )
 
 const networkSession = Effect.fnUntraced(function* (session: Option.Option<string>) {
-  return yield* resolveExistingSessionId(Option.getOrUndefined(session) ?? Option.getOrUndefined(yield* sessionIdConfig))
+  return yield* resolveSelectedSessionId(Option.getOrUndefined(session) ?? Option.getOrUndefined(yield* sessionIdConfig))
 })
 
 const parseNetworkContent = Effect.fnUntraced(function* (content: Option.Option<string>) {
@@ -792,32 +808,28 @@ function formatNetworkResult(result: NetworkStopResponse): string {
 const networkStart = Command.make(
   "start",
   {
-    session: Flag.String("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Capture the default page for this Browser Control session")),
+    session: sessionFlag("Capture the default page for this Browser Control session"),
     urlFilter: Flag.String("url").pipe(Flag.optional, Flag.withDescription("Capture only requests whose URL contains this text")),
     resourceTypes: Flag.String("resource-type").pipe(Flag.atMost(50), Flag.withDescription("Capture this Playwright resource type; repeat for multiple types")),
     content: Flag.String("content").pipe(Flag.optional, Flag.withDescription("Response and request body mode: embed (default) or omit")),
     maxBodyBytes: Flag.Int("max-body-bytes").pipe(Flag.optional, Flag.withDescription("Maximum captured bytes per body, defaults to 1000000")),
     maxTotalBodyBytes: Flag.Int("max-total-body-bytes").pipe(Flag.optional, Flag.withDescription("Maximum captured body bytes for the whole capture, defaults to 25000000")),
     maxEntries: Flag.Int("max-entries").pipe(Flag.optional, Flag.withDescription("Maximum request entries, defaults to 1000")),
-    json: Flag.Boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Print machine-readable JSON")),
+    json: jsonFlag,
   },
   Effect.fn("Cli.networkStart")(function* ({ session, urlFilter, resourceTypes, content, maxBodyBytes, maxTotalBodyBytes, maxEntries, json }) {
     const relay = yield* RelayClient.Service
     yield* ensureCliRelayAndExtension()
     const sessionId = yield* networkSession(session)
     const contentValue = yield* parseNetworkContent(content)
-    const urlFilterValue = Option.getOrUndefined(urlFilter)
-    const maxBodyBytesValue = Option.getOrUndefined(maxBodyBytes)
-    const maxTotalBodyBytesValue = Option.getOrUndefined(maxTotalBodyBytes)
-    const maxEntriesValue = Option.getOrUndefined(maxEntries)
     const result = yield* relay.networkStart({
       sessionId,
-      ...(urlFilterValue === undefined ? {} : { urlFilter: urlFilterValue }),
+      ...(Option.isSome(urlFilter) ? { urlFilter: urlFilter.value } : {}),
       ...(resourceTypes.length === 0 ? {} : { resourceTypes }),
       ...(contentValue === undefined ? {} : { content: contentValue }),
-      ...(maxBodyBytesValue === undefined ? {} : { maxBodyBytes: maxBodyBytesValue }),
-      ...(maxTotalBodyBytesValue === undefined ? {} : { maxTotalBodyBytes: maxTotalBodyBytesValue }),
-      ...(maxEntriesValue === undefined ? {} : { maxEntries: maxEntriesValue }),
+      ...(Option.isSome(maxBodyBytes) ? { maxBodyBytes: maxBodyBytes.value } : {}),
+      ...(Option.isSome(maxTotalBodyBytes) ? { maxTotalBodyBytes: maxTotalBodyBytes.value } : {}),
+      ...(Option.isSome(maxEntries) ? { maxEntries: maxEntries.value } : {}),
     })
     yield* Console.log(json ? JSON.stringify(result, null, 2) : formatNetworkStatus(result))
   }),
@@ -826,12 +838,13 @@ const networkStart = Command.make(
 const networkStatus = Command.make(
   "status",
   {
-    session: Flag.String("session").pipe(Flag.optional, Flag.withAlias("s")),
-    json: Flag.Boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Print machine-readable JSON")),
+    session: sessionFlag(),
+    json: jsonFlag,
   },
   Effect.fn("Cli.networkStatus")(function* ({ session, json }) {
     const relay = yield* RelayClient.Service
     const sessionId = yield* networkSession(session)
+    yield* ensureCliRelay()
     const result = yield* relay.networkStatus({ sessionId })
     yield* Console.log(json ? JSON.stringify(result, null, 2) : formatNetworkStatus(result))
   }),
@@ -840,19 +853,20 @@ const networkStatus = Command.make(
 const networkStop = Command.make(
   "stop",
   {
-    session: Flag.String("session").pipe(Flag.optional, Flag.withAlias("s")),
+    session: sessionFlag(),
     output: Flag.String("output").pipe(Flag.optional, Flag.withAlias("o"), Flag.withDescription("Write a credential-redacted HAR artifact to this path")),
     secrets: Flag.String("secrets").pipe(Flag.optional, Flag.withDescription("Store captured credentials under this reusable profile name")),
-    json: Flag.Boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Print machine-readable JSON")),
+    json: jsonFlag,
   },
   Effect.fn("Cli.networkStop")(function* ({ session, output, secrets, json }) {
     const relay = yield* RelayClient.Service
-    const sessionId = yield* networkSession(session)
     const outputValue = Option.getOrUndefined(output)
     const secretsValue = Option.getOrUndefined(secrets)
     if (!outputValue && !secretsValue) {
       return yield* Effect.fail(new Error("network stop requires --output, --secrets, or both"))
     }
+    const sessionId = yield* networkSession(session)
+    yield* ensureCliRelay()
     const result = yield* relay.networkStop({
       sessionId,
       ...(outputValue ? { outputPath: path.resolve(outputValue) } : {}),
@@ -864,10 +878,11 @@ const networkStop = Command.make(
 
 const networkCancel = Command.make(
   "cancel",
-  { session: Flag.String("session").pipe(Flag.optional, Flag.withAlias("s")) },
+  { session: sessionFlag() },
   Effect.fn("Cli.networkCancel")(function* ({ session }) {
     const relay = yield* RelayClient.Service
     const sessionId = yield* networkSession(session)
+    yield* ensureCliRelay()
     const result = yield* relay.networkCancel({ sessionId })
     yield* Console.log(result.cancelled ? "Network capture cancelled" : "Network capture was not active")
   }),
@@ -882,7 +897,7 @@ const secretsStatus = Command.make(
   "status",
   {
     name: Argument.String("name"),
-    json: Flag.Boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Print machine-readable JSON")),
+    json: jsonFlag,
   },
   Effect.fn("Cli.secretsStatus")(function* ({ name, json }) {
     const relay = yield* RelayClient.Service
@@ -901,22 +916,20 @@ const secretsRefresh = Command.make(
   "refresh",
   {
     name: Argument.String("name"),
-    session: Flag.String("session").pipe(Flag.optional, Flag.withAlias("s")),
+    session: sessionFlag(),
     urlFilter: Flag.String("url").pipe(Flag.optional, Flag.withDescription("Observe credentials only on matching request URLs")),
     timeoutMs: Flag.Int("timeout-ms").pipe(Flag.optional, Flag.withDescription("Page reload timeout, defaults to 30000")),
-    json: Flag.Boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Print machine-readable JSON")),
+    json: jsonFlag,
   },
   Effect.fn("Cli.secretsRefresh")(function* ({ name, session, urlFilter, timeoutMs, json }) {
     const relay = yield* RelayClient.Service
     yield* ensureCliRelayAndExtension()
     const sessionId = yield* networkSession(session)
-    const urlFilterValue = Option.getOrUndefined(urlFilter)
-    const timeoutMsValue = Option.getOrUndefined(timeoutMs)
     const result = yield* relay.authRefresh({
       sessionId,
       name,
-      ...(urlFilterValue === undefined ? {} : { urlFilter: urlFilterValue }),
-      ...(timeoutMsValue === undefined ? {} : { timeoutMs: timeoutMsValue }),
+      ...(Option.isSome(urlFilter) ? { urlFilter: urlFilter.value } : {}),
+      ...(Option.isSome(timeoutMs) ? { timeoutMs: timeoutMs.value } : {}),
     })
     yield* Console.log(json ? JSON.stringify(result, null, 2) : `Secrets profile ${name} refreshed: observed=${result.observedSecretRefs.length} changed=${result.updatedSecretRefs.length}`)
   }),
@@ -935,14 +948,12 @@ const secretsRun = Command.make(
     yield* ensureCliRelay()
     const [executable, ...args] = decodeCliOperands(command)
     if (!executable) return yield* Effect.fail(new Error("secrets run requires a command after --"))
-    const cwdValue = Option.getOrUndefined(cwd)
-    const timeoutMsValue = Option.getOrUndefined(timeoutMs)
     const result = yield* relay.authRun({
       name,
       command: executable,
       args,
-      cwd: path.resolve(cwdValue ?? process.cwd()),
-      ...(timeoutMsValue === undefined ? {} : { timeoutMs: timeoutMsValue }),
+      cwd: path.resolve(Option.getOrElse(cwd, () => process.cwd())),
+      ...(Option.isSome(timeoutMs) ? { timeoutMs: timeoutMs.value } : {}),
     })
     yield* Effect.sync(() => {
       if (result.stdout) process.stdout.write(result.stdout)
@@ -961,16 +972,12 @@ const secrets = Command.make("secrets").pipe(
 const journal = Command.make(
   "journal",
   {
-    session: Flag.String("session").pipe(Flag.optional, Flag.withAlias("s"), Flag.withDescription("Show the journal for this Browser Control session id")),
+    session: sessionFlag("Show the journal for this Browser Control session id"),
     limit: Flag.Int("limit").pipe(Flag.optional, Flag.withDescription("Number of most recent entries to show, defaults to 20")),
-    json: Flag.Boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Print machine-readable JSON")),
+    json: jsonFlag,
   },
   Effect.fn("Cli.journal")(function* ({ session, limit, json }) {
-    const store = yield* SessionStore.Service
-    const sessionId = Option.getOrUndefined(session) ?? Option.getOrUndefined(yield* sessionIdConfig) ?? (yield* store.read)
-    if (!sessionId) {
-      return yield* Effect.fail(new Error("No session provided and no current Browser Control session exists"))
-    }
+    const sessionId = yield* networkSession(session)
     const entries = yield* Effect.tryPromise({
       try: () => readJournalEntries({ baseDir: defaultJournalBaseDir(), sessionId, limit: Option.getOrUndefined(limit) ?? 20 }),
       catch: (cause) => new Error(`read session journal for ${sessionId}`, { cause }),
@@ -993,7 +1000,7 @@ const journal = Command.make(
 const doctor = Command.make(
   "doctor",
   {
-    json: Flag.Boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Print machine-readable JSON")),
+    json: jsonFlag,
   },
   Effect.fn("Cli.doctor")(function* ({ json }) {
     const report = yield* createDoctorReport({ packageRoot })
@@ -1003,9 +1010,7 @@ const doctor = Command.make(
       yield* Console.log(formatDoctorReport(report))
     }
     if (report.status === "fail") {
-      yield* Effect.sync(() => {
-        process.exitCode = 1
-      })
+      yield* failExit
     }
   }),
 ).pipe(Command.withDescription("Diagnose the local Browser Control install and runtime"))

@@ -1,3 +1,4 @@
+import { Match, Predicate } from "effect"
 import type { Page } from "playwright-core"
 import type { JsonObject } from "./protocol.ts"
 
@@ -298,12 +299,17 @@ export function inputDispatchMouseEventToGhostCursorAction(params: JsonObject | 
   if (type !== "mouseMoved" && type !== "mousePressed" && type !== "mouseReleased") {
     return undefined
   }
-  if (typeof params.x !== "number" || typeof params.y !== "number") {
+  if (!Predicate.isNumber(params.x) || !Predicate.isNumber(params.y)) {
     return undefined
   }
   const button = parseButton(params.button)
   return {
-    type: type === "mousePressed" ? "down" : type === "mouseReleased" ? "up" : "move",
+    type: Match.value(type).pipe(
+      Match.when("mousePressed", () => "down" as const),
+      Match.when("mouseReleased", () => "up" as const),
+      Match.when("mouseMoved", () => "move" as const),
+      Match.exhaustive,
+    ),
     x: params.x,
     y: params.y,
     button,
@@ -319,7 +325,7 @@ export function ghostCursorRestoreExpression(position: { readonly x: number; rea
 }
 
 export async function showGhostCursor(options: { readonly page: Page; readonly cursorOptions?: GhostCursorClientOptions }): Promise<void> {
-  await ensureGhostCursorInjected(options.page)
+  await options.page.evaluate(ghostCursorClientSource)
   const payload: GhostCursorEvaluatePayload = options.cursorOptions ? { cursorOptions: options.cursorOptions } : {}
   await options.page.evaluate(
     (payload: GhostCursorEvaluatePayload) => {
@@ -335,16 +341,6 @@ export async function hideGhostCursor(options: { readonly page: Page }): Promise
     const api = (globalThis as { __browserControlGhostCursor?: GhostCursorBrowserApi }).__browserControlGhostCursor
     api?.hide()
   })
-}
-
-async function ensureGhostCursorInjected(page: Page): Promise<void> {
-  const hasGhostCursor = await page.evaluate(() => {
-    return Boolean((globalThis as { __browserControlGhostCursor?: unknown }).__browserControlGhostCursor)
-  })
-  if (hasGhostCursor) {
-    return
-  }
-  await page.evaluate(ghostCursorClientSource)
 }
 
 function parseButton(value: JsonObject[string] | undefined): GhostCursorMouseAction["button"] {

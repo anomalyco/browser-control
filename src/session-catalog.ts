@@ -3,7 +3,7 @@ import os from "node:os"
 import path from "node:path"
 import crypto from "node:crypto"
 import { Schema } from "effect"
-import { isUnsupportedDirectorySyncError } from "./fs-durability.ts"
+import { isNodeError, isUnsupportedDirectorySyncError } from "./fs-durability.ts"
 import { isValidSessionId } from "./relay-helpers.ts"
 
 export const PersistedSession = Schema.Struct({
@@ -84,8 +84,4 @@ export class SessionCatalog {
       throw new Error(`Could not write Browser Control session catalog at ${this.filePath}`, { cause: error })
     }
   }
-}
-
-function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-  return error instanceof Error && "code" in error
 }

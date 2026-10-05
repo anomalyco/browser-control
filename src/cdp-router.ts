@@ -1,7 +1,7 @@
 import { ClientCdpSessionAlias, type CdpClientPool } from "./cdp-client-pool.ts"
 import { canClientSeeTarget } from "./cdp-visibility.ts"
-import type { TargetInfo } from "./protocol.ts"
-import { isRestrictedTarget } from "./relay-helpers.ts"
+import type { CdpRequest, TargetInfo } from "./protocol.ts"
+import { getString, isRestrictedTarget } from "./relay-helpers.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
 import { shouldExposeChildTarget, type TargetRegistry } from "./target-registry.ts"
 
@@ -127,6 +127,28 @@ export class CdpRouter<Client extends object> {
       rootSessionId,
       ...(expectedChromeSessionId ? { chromeSessionId: expectedChromeSessionId } : {}),
     }
+  }
+
+  resolveCommandRoute(client: Client, message: CdpRequest): CdpRoutedSession {
+    const browserAlias = message.sessionId !== undefined && this.isBrowserAlias(client, message.sessionId)
+    const rootRoutable = isRootRoutableBrowserContextMethod(message.method) && (!message.sessionId || browserAlias)
+    const requestedBrowserContextId = getString(message.params, "browserContextId")
+    const preferredRoot = rootRoutable ? this.preferredRoot(client, requestedBrowserContextId) : undefined
+    const route = rootRoutable && preferredRoot
+      ? { tabId: preferredRoot.tabId, rootSessionId: preferredRoot.sessionId }
+      : message.sessionId
+      ? this.session(client, message.sessionId)
+      : undefined
+    if (route) return route
+    throw new Error(rootRoutable
+      ? requestedBrowserContextId !== undefined
+        ? `A healthy visible root target in browser context ${requestedBrowserContextId} is required for ${message.method}`
+        : this.clients.sessionId(client) === undefined
+        ? `Exactly one visible browser context is required for ${message.method}`
+        : `A healthy session-owned root target is required for ${message.method}`
+      : message.sessionId
+      ? `Unknown CDP session ${message.sessionId} for ${message.method}`
+      : `CDP sessionId is required for ${message.method}`)
   }
 
   reconcileClient(client: Client): void {

@@ -1,11 +1,36 @@
+import { Match, Schema } from "effect"
 import type { Frame, Page } from "playwright-core"
 
-export type DemonstrationStep =
-  | { readonly kind: "click"; readonly selector: string; readonly role?: string; readonly name?: string }
-  | { readonly kind: "fill"; readonly selector: string; readonly value: string; readonly redacted?: boolean }
-  | { readonly kind: "check"; readonly selector: string; readonly checked: boolean }
-  | { readonly kind: "select"; readonly selector: string; readonly value: string }
-  | { readonly kind: "navigation"; readonly url: string }
+const DemonstrationStep = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("click"),
+    selector: Schema.String,
+    role: Schema.optionalKey(Schema.String),
+    name: Schema.optionalKey(Schema.String),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("fill"),
+    selector: Schema.String,
+    value: Schema.String,
+    redacted: Schema.optionalKey(Schema.Boolean),
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("check"),
+    selector: Schema.String,
+    checked: Schema.Boolean,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("select"),
+    selector: Schema.String,
+    value: Schema.String,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("navigation"),
+    url: Schema.String,
+  }),
+])
+
+export type DemonstrationStep = typeof DemonstrationStep.Type
 
 export type DemonstrationResult = {
   readonly startedUrl: string
@@ -15,10 +40,10 @@ export type DemonstrationResult = {
 }
 
 type PageRecorderState = {
-  readonly bindingName: string
   active?: { readonly id: string; readonly startedUrl: string; readonly steps: DemonstrationStep[] }
 }
 
+const demonstrationBindingName = "__browserControlDemonstration__"
 const pageRecorders = new WeakMap<Page, PageRecorderState>()
 let nextRecorder = 0
 
@@ -30,7 +55,7 @@ export async function startDemonstrationRecorder(page: Page): Promise<{ readonly
   state.active = active
   const pendingInstalls = new Set<Promise<void>>()
   const install = (frame: Frame): Promise<void> => {
-    const pending = frame.evaluate(installDemonstrationListeners, { bindingName: state.bindingName, recorderId: id })
+    const pending = frame.evaluate(installDemonstrationListeners, { recorderId: id })
       .then(() => {}, () => {})
       .finally(() => pendingInstalls.delete(pending))
     pendingInstalls.add(pending)
@@ -67,33 +92,37 @@ export function formatDemonstrationCode(options: {
   readonly startedUrl: string
   readonly steps: readonly DemonstrationStep[]
 }): string {
-  const lines = [`// Recorded from ${options.startedUrl}`]
-  for (const step of options.steps) {
-    if (step.kind === "navigation") {
-      lines.push(`// Navigated to ${step.url}`)
-    } else if (step.kind === "click") {
-      const description = step.role && step.name ? ` // ${step.role} ${JSON.stringify(step.name)}` : ""
-      lines.push(`await page.locator(${JSON.stringify(step.selector)}).click()${description}`)
-    } else if (step.kind === "fill") {
-      if (step.redacted) lines.push(`// Fill ${JSON.stringify(step.selector)} from an approved secret source.`)
-      else lines.push(`await page.locator(${JSON.stringify(step.selector)}).fill(${JSON.stringify(step.value)})`)
-    } else if (step.kind === "check") {
-      lines.push(`await page.locator(${JSON.stringify(step.selector)}).${step.checked ? "check" : "uncheck"}()`)
-    } else {
-      lines.push(`await page.locator(${JSON.stringify(step.selector)}).selectOption(${JSON.stringify(step.value)})`)
-    }
-  }
-  lines.push("return { url: page.url(), title: await page.title() }")
+  const lines = [
+    `// Recorded from ${options.startedUrl}`,
+    ...options.steps.map((step) =>
+      Match.value(step).pipe(
+        Match.when({ kind: "navigation" }, ({ url }) => `// Navigated to ${url}`),
+        Match.when({ kind: "click" }, ({ selector, role, name }) => {
+          const description = role && name ? ` // ${role} ${JSON.stringify(name)}` : ""
+          return `await page.locator(${JSON.stringify(selector)}).click()${description}`
+        }),
+        Match.when({ kind: "fill" }, ({ selector, value, redacted }) =>
+          redacted
+            ? `// Fill ${JSON.stringify(selector)} from an approved secret source.`
+            : `await page.locator(${JSON.stringify(selector)}).fill(${JSON.stringify(value)})`),
+        Match.when({ kind: "check" }, ({ selector, checked }) =>
+          `await page.locator(${JSON.stringify(selector)}).${checked ? "check" : "uncheck"}()`),
+        Match.when({ kind: "select" }, ({ selector, value }) =>
+          `await page.locator(${JSON.stringify(selector)}).selectOption(${JSON.stringify(value)})`),
+        Match.exhaustive,
+      ),
+    ),
+    "return { url: page.url(), title: await page.title() }",
+  ]
   return lines.join("\n")
 }
 
 async function recorderState(page: Page): Promise<PageRecorderState> {
   const existing = pageRecorders.get(page)
   if (existing) return existing
-  const bindingName = `__browserControlDemonstration${++nextRecorder}`
-  const state: PageRecorderState = { bindingName }
+  const state: PageRecorderState = {}
   pageRecorders.set(page, state)
-  await page.exposeBinding(bindingName, (_source, value: unknown) => {
+  await page.exposeBinding(demonstrationBindingName, (_source, value: unknown) => {
     const active = state.active
     if (!active || !isDemonstrationStep(value)) return
     appendStep(active.steps, value)
@@ -111,25 +140,18 @@ function appendStep(steps: DemonstrationStep[], next: DemonstrationStep): void {
   steps.push(next)
 }
 
-function isDemonstrationStep(value: unknown): value is DemonstrationStep {
-  if (!value || typeof value !== "object" || !("kind" in value)) return false
-  const step = value as Record<string, unknown>
-  if (step.kind === "navigation") return typeof step.url === "string"
-  if (typeof step.selector !== "string") return false
-  if (step.kind === "click") return true
-  if (step.kind === "fill") return typeof step.value === "string"
-  if (step.kind === "check") return typeof step.checked === "boolean"
-  return step.kind === "select" && typeof step.value === "string"
-}
+const isDemonstrationStep = Schema.is(DemonstrationStep)
 
-function installDemonstrationListeners(options: { readonly bindingName: string; readonly recorderId: string }): void {
+function installDemonstrationListeners(options: { readonly recorderId: string }): void {
   type BrowserState = { readonly id: string; readonly cleanup: () => void }
-  const key = "__browserControlDemonstrationListeners__"
-  const browserWindow = window as unknown as Record<string, BrowserState | undefined>
-  browserWindow[key]?.cleanup()
+  const browserWindow = window as Window & {
+    __browserControlDemonstration__?: (step: DemonstrationStep) => unknown
+    __browserControlDemonstrationListeners__?: BrowserState
+  }
+  browserWindow.__browserControlDemonstrationListeners__?.cleanup()
   const send = (step: DemonstrationStep) => {
-    const binding = (window as unknown as Record<string, unknown>)[options.bindingName]
-    if (typeof binding === "function") void Promise.resolve(binding(step)).catch(() => {})
+    const binding = browserWindow.__browserControlDemonstration__
+    if (binding instanceof Function) void Promise.resolve(binding(step)).catch(() => {})
   }
   const cssPath = (element: Element): string => {
     const id = element.getAttribute("id")
@@ -207,13 +229,18 @@ function installDemonstrationListeners(options: { readonly bindingName: string; 
     document.removeEventListener("click", onClick, true)
     document.removeEventListener("input", onInput, true)
     document.removeEventListener("change", onChange, true)
-    if (browserWindow[key]?.id === options.recorderId) delete browserWindow[key]
+    if (browserWindow.__browserControlDemonstrationListeners__?.id === options.recorderId) {
+      delete browserWindow.__browserControlDemonstrationListeners__
+    }
   }
-  browserWindow[key] = { id: options.recorderId, cleanup }
+  browserWindow.__browserControlDemonstrationListeners__ = { id: options.recorderId, cleanup }
 }
 
 function removeDemonstrationListeners(options: { readonly recorderId: string }): void {
-  const key = "__browserControlDemonstrationListeners__"
-  const browserWindow = window as unknown as Record<string, { readonly id: string; readonly cleanup: () => void } | undefined>
-  if (browserWindow[key]?.id === options.recorderId) browserWindow[key]?.cleanup()
+  const browserWindow = window as Window & {
+    __browserControlDemonstrationListeners__?: { readonly id: string; readonly cleanup: () => void }
+  }
+  if (browserWindow.__browserControlDemonstrationListeners__?.id === options.recorderId) {
+    browserWindow.__browserControlDemonstrationListeners__.cleanup()
+  }
 }

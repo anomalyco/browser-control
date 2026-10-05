@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import { pageStatusFromJson, pageStatusView } from "../extension/src/page-status.ts"
-import { makePageStatus } from "../src/page-status.ts"
+import { makePageStatus } from "../src/protocol.ts"
 
 describe("pageStatusView", () => {
   it("keeps USER ownership plus adopted read-only session context", () => {

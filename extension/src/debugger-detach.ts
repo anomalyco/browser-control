@@ -2,7 +2,7 @@
 export function debuggerDetachedEvent(options: {
   readonly tabId: number
   readonly reason: string
-  readonly sessionId?: string
+  readonly sessionId?: string | undefined
 }) {
   return {
     method: "debugger.detached" as const,

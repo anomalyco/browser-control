@@ -1,3 +1,5 @@
+import { Predicate } from "effect"
+
 export type CredentialSlot = {
   readonly ref: string
   value: string
@@ -126,7 +128,7 @@ export class SecretCollector {
   }
 
   redactExactValue(value: unknown, minimumLength: number): unknown {
-    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") return value
+    if (!Predicate.isString(value) && !Predicate.isNumber(value) && !Predicate.isBoolean(value)) return value
     const serialized = String(value)
     if (serialized.length < minimumLength) return value
     const ref = this.refsByValue.get(serialized) ?? this.retiredRefsByValue.get(serialized)
@@ -169,34 +171,17 @@ export class SecretCollector {
     return value
   }
 
-  private protectJson(value: unknown, location: string, path: readonly string[] = []): unknown {
+  private protectJson(value: unknown, location: string, path: readonly string[] = [], inSecret = false): unknown {
     if (Array.isArray(value)) {
-      return value.map((item, index) => this.protectJson(item, location, [...path, String(index)]))
+      return value.map((item, index) => this.protectJson(item, location, [...path, String(index)], inSecret))
     }
-    if (!value || typeof value !== "object") return value
-    const result: Record<string, unknown> = {}
-    for (const [key, item] of Object.entries(value)) {
-      const nextPath = [...path, key]
-      if (item !== null && item !== "" && secretNamePattern.test(key)) {
-        result[key] = this.protectSecretJsonValue(item, location, nextPath)
-      } else {
-        result[key] = this.protectJson(item, location, nextPath)
-      }
-    }
-    return result
-  }
-
-  private protectSecretJsonValue(value: unknown, location: string, path: readonly string[]): unknown {
-    if (Array.isArray(value)) {
-      return value.map((item, index) => this.protectSecretJsonValue(item, location, [...path, String(index)]))
-    }
-    if (value && typeof value === "object") {
+    if (Predicate.isObject(value)) {
       return Object.fromEntries(Object.entries(value).map(([key, item]) => [
         key,
-        this.protectSecretJsonValue(item, location, [...path, key]),
+        this.protectJson(item, location, [...path, key], inSecret || secretNamePattern.test(key)),
       ]))
     }
-    if (value === null || value === "") return value
+    if (!inSecret || value === null || value === "") return value
     return this.reference(String(value), `${location}.json.${path.join(".")}`)
   }
 
@@ -346,13 +331,13 @@ export function redactKnownValues(text: string, slots: readonly RedactionSlot[])
 }
 
 function redactKnownValue(value: unknown, slots: readonly RedactionSlot[]): unknown {
-  if (typeof value === "string") return redactKnownValues(value, slots)
-  if (typeof value === "number" || typeof value === "boolean") {
+  if (Predicate.isString(value)) return redactKnownValues(value, slots)
+  if (Predicate.isNumber(value) || Predicate.isBoolean(value)) {
     const slot = slots.find((candidate) => candidate.value === String(value))
     return slot ? `\${${slot.ref}}` : value
   }
   if (Array.isArray(value)) return value.map((item) => redactKnownValue(item, slots))
-  if (!value || typeof value !== "object") return value
+  if (!Predicate.isObject(value)) return value
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [
     key,
     secretNamePattern.test(key) ? redactSecretValue(item) : redactKnownValue(item, slots),
@@ -361,7 +346,7 @@ function redactKnownValue(value: unknown, slots: readonly RedactionSlot[]): unkn
 
 function redactSecretValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redactSecretValue)
-  if (value && typeof value === "object") {
+  if (Predicate.isObject(value)) {
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactSecretValue(item)]))
   }
   return value === null || value === "" ? value : "[REDACTED]"
@@ -386,10 +371,8 @@ function jwtExpiration(value: string): string | undefined {
   if (parts.length !== 3 || !parts[1]) return undefined
   try {
     const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as { exp?: unknown }
-    return typeof payload.exp === "number" ? new Date(payload.exp * 1_000).toISOString() : undefined
+    return Predicate.isNumber(payload.exp) ? new Date(payload.exp * 1_000).toISOString() : undefined
   } catch {
     return undefined
   }
 }
-
-export * as NetworkRedaction from "./network-redaction.ts"

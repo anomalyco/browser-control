@@ -1,7 +1,6 @@
 import type {
   ChromeTabCaptureAudioConstraints,
   ChromeTabCaptureVideoConstraints,
-  OffscreenCancelRecordingMessage,
   OffscreenCancelAllRecordingsResult,
   OffscreenCancelRecordingResult,
   OffscreenMessage,
@@ -45,9 +44,13 @@ async function handleMessage(message: OffscreenMessage): Promise<OffscreenResult
     return handleStatusRecording(message)
   }
   if (message.action === "recording.cancel") {
-    return handleCancelRecording(message)
+    return handleCancelRecordingForTab(message.tabId)
   }
   return handleCancelAllRecordings()
+}
+
+function stopMediaTracks(stream: MediaStream | undefined): void {
+  for (const track of stream?.getTracks() ?? []) track.stop()
 }
 
 function isOffscreenMessage(message: unknown): message is OffscreenMessage {
@@ -147,10 +150,7 @@ async function handleStartRecording(message: OffscreenStartRecordingMessage): Pr
     recordings.set(message.tabId, recording)
     return { success: true, tabId: message.tabId, startedAt, mimeType: recorder.mimeType || mimeType || "video/webm" }
   } catch (error) {
-    stream?.getTracks().map((track) => {
-      track.stop()
-      return undefined
-    })
+    stopMediaTracks(stream)
     return { success: false, error: error instanceof Error ? error.message : String(error) }
   }
 }
@@ -178,10 +178,7 @@ async function handleStopRecording(message: OffscreenStopRecordingMessage): Prom
     })
     await recording.sendTail
     if (recording.sendError) throw recording.sendError
-    recording.stream.getTracks().map((track) => {
-      track.stop()
-      return undefined
-    })
+    stopMediaTracks(recording.stream)
     recordings.delete(message.tabId)
     const finalResult = await chrome.runtime.sendMessage({
       action: "recording.chunk",
@@ -209,10 +206,6 @@ function handleStatusRecording(message: OffscreenStatusRecordingMessage): Offscr
   }
 }
 
-function handleCancelRecording(message: OffscreenCancelRecordingMessage): OffscreenCancelRecordingResult {
-  return handleCancelRecordingForTab(message.tabId)
-}
-
 function handleCancelAllRecordings(): OffscreenCancelAllRecordingsResult {
   let failure: OffscreenCancelAllRecordingsResult | undefined
   for (const tabId of Array.from(recordings.keys())) {
@@ -232,10 +225,7 @@ function handleCancelRecordingForTab(tabId: number): OffscreenCancelRecordingRes
     if (recording.recorder.state !== "inactive") {
       recording.recorder.stop()
     }
-    recording.stream.getTracks().map((track) => {
-      track.stop()
-      return undefined
-    })
+    stopMediaTracks(recording.stream)
     recordings.delete(tabId)
     chrome.runtime.sendMessage({ action: "recording.cancelled", tabId })
     return { success: true, tabId }

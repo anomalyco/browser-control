@@ -360,7 +360,7 @@ require a new extension capture protocol and permission model.
   matching the minimum runtime supported by the pinned Effect Platform stack.
 - Until the first Store review completes, the browser extension is loaded
   unpacked from the npm package's `extension/dist` directory or a source build.
-  Its current shim version is `0.0.24`. A manifest public key gives unpacked
+  Its current shim version is `0.0.25`. A manifest public key gives unpacked
   builds one stable extension id across install paths and operating systems;
   Store packaging strips that key so the Store keeps its assigned id.
 - Extension and npm releases are independently versioned. The extension hello

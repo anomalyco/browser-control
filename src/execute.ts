@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect"
+import { Effect, Predicate, Schema } from "effect"
 import { installPageReadTimeout } from "./page-read-timeout.ts"
 import { chromium, errors, type Browser, type BrowserContext, type ConsoleMessage, type ElementHandle, type Frame, type Locator, type Page } from "playwright-core"
 import * as acorn from "acorn"
@@ -19,7 +19,7 @@ import type { HandoffOutcome } from "./handoff.ts"
 import * as AuthProfile from "./auth-profile.ts"
 import * as AuthenticatedOrigin from "./authenticated-origin.ts"
 import * as NetworkCapture from "./network-capture.ts"
-import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest, ExecuteAftermath, ExecuteLogEntry, ExecuteLogSummary, ExecuteMedia } from "./relay-schema.ts"
+import { AuthenticatedJsonOutcome, type AuthenticatedJsonRequest, type ExecuteAftermath, type ExecuteLogEntry, type ExecuteLogSummary, type ExecuteMedia } from "./relay-schema.ts"
 import type { SessionTarget } from "./relay-types.ts"
 import { executionContextFailureDiagnostic, runtimeFailureKind } from "./runtime-diagnostics.ts"
 import { ariaSnapshotWithoutTextControlValues, registerAriaSnapshotSelector } from "./aria-snapshot.ts"
@@ -124,11 +124,11 @@ const runSettledPlaywrightOperation = Effect.fn("Execute.settledPlaywrightOperat
 /**
  * Decide what to do with a default page that failed or needs a health check.
  *
- * Only a relay-owned page with nothing left to lose (a crashed renderer or a
- * `chrome-error://` document) is closed and recreated. Any other live page is
- * kept: an unresponsive execution context is a symptom of Playwright's stale
- * view of the tab or of the page itself, not proof that the tab is gone, and
- * the tab may hold login or form state the user produced.
+ * Only a relay-owned page with nothing left to lose (a crashed renderer,
+ * `about:blank`, or a `chrome-error://` document) is closed and recreated. Any
+ * other live page is kept: an unresponsive execution context is a symptom of
+ * Playwright's stale view of the tab or of the page itself, not proof that the
+ * tab is gone, and the tab may hold login or form state the user produced.
  */
 export const recoverSessionPage = Effect.fn("Execute.recoverSessionPage")(function* (options: {
   readonly ownsPage: boolean
@@ -153,19 +153,19 @@ export const recoverSessionPage = Effect.fn("Execute.recoverSessionPage")(functi
     return "use" as const
   }
   if (!options.ownsPage) {
-    return yield* Effect.fail(new SessionPageRecoveryError({
+    return yield* new SessionPageRecoveryError({
       message: unresponsivePageDiagnosis({ ownsPage: false, repaired: options.repaired === true }),
       reason: "adopted-unresponsive",
       cause: healthFailure,
-    }))
+    })
   }
   if (!isDisposableSessionPage(options)) {
     if (options.repaired) {
-      return yield* Effect.fail(new SessionPageRecoveryError({
+      return yield* new SessionPageRecoveryError({
         message: unresponsivePageDiagnosis({ ownsPage: true, repaired: true }),
         reason: "owned-unresponsive",
         cause: healthFailure,
-      }))
+      })
     }
     return "repair" as const
   }
@@ -180,11 +180,11 @@ export const recoverSessionPage = Effect.fn("Execute.recoverSessionPage")(functi
     }),
   )
   if (closeFailure) {
-    return yield* Effect.fail(new SessionPageRecoveryError({
+    return yield* new SessionPageRecoveryError({
       message: "The unhealthy relay-owned session page could not be closed. Run `browser-control session reset` before continuing.",
       reason: "close-failed",
       cause: closeFailure,
-    }))
+    })
   }
   return "recreate" as const
 })
@@ -344,7 +344,7 @@ type AriaSnapshotOptions = {
   readonly timeout?: number
 }
 
-export type AriaSnapshotHelper = (target?: AriaSnapshotTarget, options?: AriaSnapshotOptions) => Promise<string>
+type AriaSnapshotHelper = (target?: AriaSnapshotTarget, options?: AriaSnapshotOptions) => Promise<string>
 
 type SnapshotOptions = {
   readonly within?: AriaSnapshotTarget
@@ -359,8 +359,8 @@ type SnapshotOptions = {
   readonly timeout?: number
 }
 
-export type SnapshotHelper = (options?: SnapshotOptions) => Promise<string>
-export type SnapshotRefHelper = (id: string) => Locator
+type SnapshotHelper = (options?: SnapshotOptions) => Promise<string>
+type SnapshotRefHelper = (id: string) => Locator
 
 type SnapshotEntry = {
   readonly depth: number
@@ -531,7 +531,7 @@ export class ExecuteSandbox {
   private pageHealthCheckRequired = false
   private pageCrashed = false
   private pageProtectedUi = false
-  private pendingPageTarget: { readonly targetId: string; readonly warnReplaced: boolean; readonly repaired?: boolean } | undefined
+  private pendingTargetRebind: "replaced" | "repaired" | undefined
   private readonly state: Record<string, unknown> = {}
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private readonly networkCapture = new NetworkCapture.Recorder()
@@ -549,14 +549,10 @@ export class ExecuteSandbox {
         const extracted = extractExecuteMedia(result)
         const redactedValue = this.networkCapture.redactValue(extracted.value)
         const jsonSafeResult = toJsonSafeValue(redactedValue)
-        const warnings = this.drainWarnings()
-        const logCompactionWarning = formatLogCompactionWarning(logSummary)
-        if (logCompactionWarning) {
-          warnings.push(logCompactionWarning)
-        }
-        if (!jsonSafeResult.serializable) {
-          warnings.push(`Execute result could not be represented as JSON value: ${jsonSafeResult.reason}`)
-        }
+        const warnings = this.finalizeWarnings(
+          logSummary,
+          jsonSafeResult.serializable ? undefined : `Execute result could not be represented as JSON value: ${jsonSafeResult.reason}`,
+        )
         return {
           text: stringifyResult(redactedValue),
           ...(jsonSafeResult.serializable ? { value: jsonSafeResult.value } : {}),
@@ -564,7 +560,7 @@ export class ExecuteSandbox {
           isError: false,
           logs: this.redactCaptureLogs(logs),
           logSummary,
-          warnings: warnings.map((warning) => this.networkCapture.redactText(warning)),
+          warnings,
           aftermath: this.redactCaptureAftermath(aftermath),
         }
       },
@@ -589,20 +585,16 @@ export class ExecuteSandbox {
           if (diagnostic?.startsWith("execution-context/")) {
             this.pageHealthCheckRequired = true
           }
-          const warnings = this.drainWarnings()
-          if (diagnostic === protectedExtensionUiDiagnostic) {
-            warnings.push(protectedExtensionUiWarning)
-          }
-          const logCompactionWarning = formatLogCompactionWarning(logSummary)
-          if (logCompactionWarning) {
-            warnings.push(logCompactionWarning)
-          }
+          const warnings = this.finalizeWarnings(
+            logSummary,
+            diagnostic === protectedExtensionUiDiagnostic ? protectedExtensionUiWarning : undefined,
+          )
           return {
             text: this.networkCapture.redactText(error instanceof ExecuteCodeError ? error.stack ?? error.message : error.message),
             isError: true,
             logs: this.redactCaptureLogs(error instanceof ExecuteCodeError ? error.logs : []),
             logSummary,
-            warnings: warnings.map((warning) => this.networkCapture.redactText(warning)),
+            warnings,
             ...(diagnostic ? { diagnostic: this.networkCapture.redactText(diagnostic) } : {}),
             ...(aftermath ? { aftermath: this.redactCaptureAftermath(aftermath) } : {}),
             ...(error instanceof ExecuteCodeError ? {} : { setupFailed: true as const }),
@@ -621,13 +613,10 @@ export class ExecuteSandbox {
     const sandbox = this
     return Effect.gen(function* () {
       if (request.sensitive === true && sandbox.networkCapture.status().active) {
-        return { _tag: "SensitiveCaptureActive" } as const
+        return AuthenticatedJsonOutcome.cases.SensitiveCaptureActive.make({})
       }
-      const globals = yield* Effect.tryPromise({
-        try: () => sandbox.getGlobals({}),
-        catch: (cause) => cause instanceof Error ? cause : new Error("Set up authenticated origin page", { cause }),
-      })
-      return yield* AuthenticatedOrigin.requestJson(globals.page, request)
+      const page = yield* sandbox.ensureSessionPage("Set up authenticated origin page")
+      return yield* AuthenticatedOrigin.requestJson(page, request)
     }).pipe(Effect.uninterruptible)
   }
 
@@ -635,6 +624,18 @@ export class ExecuteSandbox {
     const warnings = this.pendingWarnings
     this.pendingWarnings = []
     return warnings
+  }
+
+  private finalizeWarnings(logSummary: ExecuteLogSummary, extraWarning?: string): string[] {
+    const warnings = this.drainWarnings()
+    const logCompactionWarning = formatLogCompactionWarning(logSummary)
+    if (logCompactionWarning) {
+      warnings.push(logCompactionWarning)
+    }
+    if (extraWarning) {
+      warnings.push(extraWarning)
+    }
+    return warnings.map((warning) => this.networkCapture.redactText(warning))
   }
 
   redactNetworkCaptureText(text: string): string {
@@ -665,12 +666,11 @@ export class ExecuteSandbox {
     return Effect.gen(function* () {
       const browser = sandbox.browser
       sandbox.browser = undefined
-      sandbox.page = undefined
-      sandbox.clearPageListeners()
-      sandbox.pageHealthCheckRequired = false
-      if (sandbox.defaultPageTargetId) {
-        sandbox.pendingPageTarget = { targetId: sandbox.defaultPageTargetId, warnReplaced: false }
-      }
+      sandbox.unbindDefaultPage(sandbox.defaultPageTargetId, {
+        ownsPage: sandbox.ownsPage,
+        pageCrashed: sandbox.pageCrashed,
+        pageProtectedUi: sandbox.pageProtectedUi,
+      })
       yield* sandbox.networkCapture.cancel()
       if (browser) {
         yield* runSettledPlaywrightOperation({
@@ -688,8 +688,7 @@ export class ExecuteSandbox {
       const browser = sandbox.browser
       const ownsOpenPage = page !== undefined && sandbox.ownsPage && !page.isClosed()
       sandbox.browser = undefined
-      sandbox.unbindDefaultPage(undefined)
-      sandbox.notifyDefaultTargetChange()
+      sandbox.unbindDefaultPage(undefined, { notify: true })
       yield* sandbox.networkCapture.cancel()
 
       if (ownsOpenPage) {
@@ -730,20 +729,30 @@ export class ExecuteSandbox {
         })
       }
       sandbox.unbindDefaultPage(targetId)
-      sandbox.networkCapture.bindPage(undefined)
     }).pipe(Effect.uninterruptible)
   }
 
   /** Forget the bound page; a target id is re-resolved exactly on the next execute. */
-  private unbindDefaultPage(targetId: string | undefined): void {
+  private unbindDefaultPage(
+    targetId: string | undefined,
+    options: {
+      readonly ownsPage?: boolean
+      readonly pageCrashed?: boolean
+      readonly pageProtectedUi?: boolean
+      readonly rebind?: "replaced" | "repaired"
+      readonly notify?: boolean
+    } = {},
+  ): void {
     this.clearPageListeners()
     this.page = undefined
     this.defaultPageTargetId = targetId
-    this.ownsPage = false
+    this.ownsPage = options.ownsPage ?? false
     this.pageHealthCheckRequired = false
-    this.pageCrashed = false
-    this.pageProtectedUi = false
-    this.pendingPageTarget = targetId ? { targetId, warnReplaced: false } : undefined
+    this.pageCrashed = options.pageCrashed ?? false
+    this.pageProtectedUi = options.pageProtectedUi ?? false
+    this.pendingTargetRebind = targetId ? options.rebind : undefined
+    this.networkCapture.bindPage(undefined)
+    if (options.notify) this.notifyDefaultTargetChange()
   }
 
   private async connectContext(): Promise<{ readonly browser: Browser; readonly context: BrowserContext }> {
@@ -775,12 +784,12 @@ export class ExecuteSandbox {
         }
         throw cause
       }
-      this.page = undefined
-      if (this.defaultPageTargetId && this.pendingPageTarget?.targetId !== this.defaultPageTargetId) {
-        this.pendingPageTarget = { targetId: this.defaultPageTargetId, warnReplaced: false }
-      }
-      this.pageHealthCheckRequired = false
-      this.networkCapture.bindPage(undefined)
+      this.unbindDefaultPage(this.defaultPageTargetId, {
+        ownsPage: this.ownsPage,
+        pageCrashed: this.pageCrashed,
+        pageProtectedUi: this.pageProtectedUi,
+        ...(this.pendingTargetRebind ? { rebind: this.pendingTargetRebind } : {}),
+      })
       if (hadBrowser) {
         this.pendingWarnings.push("Relay connection was lost and re-established; the session default page was re-resolved.")
       }
@@ -800,12 +809,13 @@ export class ExecuteSandbox {
    */
   private async repairSessionPage(): Promise<void> {
     const browser = this.browser
-    const targetId = this.defaultPageTargetId
     this.browser = undefined
-    this.page = undefined
-    this.clearPageListeners()
-    this.networkCapture.bindPage(undefined)
-    this.pendingPageTarget = targetId ? { targetId, warnReplaced: false, repaired: true } : undefined
+    this.unbindDefaultPage(this.defaultPageTargetId, {
+      ownsPage: this.ownsPage,
+      pageCrashed: this.pageCrashed,
+      pageProtectedUi: this.pageProtectedUi,
+      rebind: "repaired",
+    })
     if (browser) {
       await Effect.runPromise(runPlaywrightOperation({
         label: "Close browser connection to repair the session page",
@@ -815,9 +825,12 @@ export class ExecuteSandbox {
     }
   }
 
-  private async getGlobals(options: ExecuteOptions): Promise<SandboxGlobals> {
+  private async acquireSessionPage(targetSelection?: ExecuteTargetSelection): Promise<{
+    readonly browser: Browser
+    readonly context: BrowserContext
+    readonly page: Page
+  }> {
     let { browser, context } = await this.connectContext()
-    const targetSelection = options.targetSelection
     let page: Page
     try {
       page = await this.getSessionPage({ context, ...(targetSelection ? { targetSelection } : {}) })
@@ -829,9 +842,21 @@ export class ExecuteSandbox {
     }
     installPageReadTimeout(page)
     this.networkCapture.bindPage(this.page)
+    return { browser, context, page }
+  }
+
+  private ensureSessionPage(label: string): Effect.Effect<Page, Error> {
+    return Effect.tryPromise({
+      try: async () => (await this.acquireSessionPage()).page,
+      catch: (cause) => cause instanceof Error ? cause : new Error(label, { cause }),
+    })
+  }
+
+  private async getGlobals(options: ExecuteOptions): Promise<SandboxGlobals> {
+    const { browser, context, page } = await this.acquireSessionPage(options.targetSelection)
     const showGhostCursor = async (options?: ShowGhostCursorOptions) => {
-      const cursorOptions = ghostCursorOptions(options)
-      await showGhostCursorOnPage({ page: options?.page ?? page, ...(cursorOptions ? { cursorOptions } : {}) })
+      const { page: targetPage = page, ...cursorOptions } = options ?? {}
+      await showGhostCursorOnPage({ page: targetPage, cursorOptions })
     }
     const hideGhostCursor = async (options?: HideGhostCursorOptions) => {
       await hideGhostCursorOnPage({ page: options?.page ?? page })
@@ -950,7 +975,6 @@ export class ExecuteSandbox {
       return false
     }
     this.unbindDefaultPage(undefined)
-    this.networkCapture.bindPage(undefined)
     if (!this.pendingWarnings.includes(defaultPageClosedWarning)) {
       this.pendingWarnings.push(defaultPageClosedWarning)
     }
@@ -959,21 +983,17 @@ export class ExecuteSandbox {
 
   markTargetReplaced(previousTargetId: string, targetId: string): boolean {
     if (this.defaultPageTargetId !== previousTargetId) return false
-    this.clearPageListeners()
-    this.page = undefined
-    this.defaultPageTargetId = targetId
-    this.pageHealthCheckRequired = false
-    this.pageProtectedUi = false
-    this.pendingPageTarget = { targetId, warnReplaced: true }
-    this.networkCapture.bindPage(undefined)
+    this.unbindDefaultPage(targetId, {
+      ownsPage: this.ownsPage,
+      pageCrashed: this.pageCrashed,
+      rebind: "replaced",
+    })
     return true
   }
 
   restore(target: SessionTarget | undefined): void {
     if (target) {
-      this.defaultPageTargetId = target.id
-      this.ownsPage = target.owner === "relay"
-      this.pendingPageTarget = { targetId: target.id, warnReplaced: false }
+      this.unbindDefaultPage(target.id, { ownsPage: target.owner === "relay" })
     }
     this.pendingWarnings.push("The relay restarted; session JavaScript state and snapshot refs were reset.")
   }
@@ -993,16 +1013,15 @@ export class ExecuteSandbox {
     }
     this.defaultPageTargetId = targetId
     this.ownsPage = ownsPage
+    this.pendingTargetRebind = undefined
     const listener = () => {
       if (this.boundPageClose?.page === page) this.boundPageClose = undefined
       if (this.page !== page) return
-      this.page = undefined
-      this.defaultPageTargetId = undefined
-      this.ownsPage = false
-      this.pendingPageTarget = undefined
-      this.networkCapture.bindPage(undefined)
-      this.clearSnapshotRefs()
-      this.notifyDefaultTargetChange()
+      this.unbindDefaultPage(undefined, {
+        pageCrashed: this.pageCrashed,
+        pageProtectedUi: this.pageProtectedUi,
+        notify: true,
+      })
     }
     this.boundPageClose = { page, listener }
     page.once("close", listener)
@@ -1044,11 +1063,8 @@ export class ExecuteSandbox {
   networkStart(options: NetworkCapture.NetworkCaptureOptions = {}): Effect.Effect<NetworkCapture.NetworkCaptureStatus, Error> {
     const sandbox = this
     return Effect.gen(function* () {
-      const globals = yield* Effect.tryPromise({
-        try: () => sandbox.getGlobals({}),
-        catch: (cause) => cause instanceof Error ? cause : new Error("Set up page for network capture", { cause }),
-      })
-      return yield* sandbox.networkCapture.start(globals.page, options)
+      const page = yield* sandbox.ensureSessionPage("Set up page for network capture")
+      return yield* sandbox.networkCapture.start(page, options)
     }).pipe(Effect.uninterruptible)
   }
 
@@ -1071,21 +1087,18 @@ export class ExecuteSandbox {
   }): Effect.Effect<NetworkCapture.NetworkCaptureResult, Error> {
     const sandbox = this
     return Effect.gen(function* () {
-      const globals = yield* Effect.tryPromise({
-        try: () => sandbox.getGlobals({}),
-        catch: (cause) => cause instanceof Error ? cause : new Error("Set up page for auth refresh", { cause }),
-      })
+      const page = yield* sandbox.ensureSessionPage("Set up page for auth refresh")
       yield* AuthProfile.read(options.name).pipe(Effect.asVoid)
-      yield* sandbox.networkCapture.start(globals.page, {
+      yield* sandbox.networkCapture.start(page, {
         ...(options.urlFilter ? { urlFilter: options.urlFilter } : {}),
       })
       return yield* Effect.gen(function* () {
         yield* Effect.tryPromise({
-          try: () => globals.page.reload({ waitUntil: "domcontentloaded", timeout: options.timeoutMs ?? 30_000 }),
+          try: () => page.reload({ waitUntil: "domcontentloaded", timeout: options.timeoutMs ?? 30_000 }),
           catch: (cause) => cause instanceof Error ? cause : new Error("Refresh auth profile", { cause }),
         })
         yield* Effect.tryPromise({
-          try: () => globals.page.waitForLoadState("networkidle", { timeout: Math.min(options.timeoutMs ?? 30_000, 5_000) }).catch(() => {}),
+          try: () => page.waitForLoadState("networkidle", { timeout: Math.min(options.timeoutMs ?? 30_000, 5_000) }).catch(() => {}),
           catch: (cause) => cause instanceof Error ? cause : new Error("Wait for auth refresh network", { cause }),
         })
         return yield* sandbox.networkCapture.stop({ secrets: options.name, requireObservedSecrets: true })
@@ -1102,9 +1115,9 @@ export class ExecuteSandbox {
       }
       return selected
     }
-    if (this.pendingPageTarget) {
-      const pendingTarget = this.pendingPageTarget
-      const targetId = pendingTarget.targetId
+    if (!this.page && this.defaultPageTargetId) {
+      const targetId = this.defaultPageTargetId
+      const rebind = this.pendingTargetRebind
       const replacement = await waitForPageTarget({ context, targetId, timeoutMs: sessionPageHealthCheckTimeoutMs })
       if (!replacement) {
         throw new SessionPageRecoveryError({
@@ -1114,9 +1127,8 @@ export class ExecuteSandbox {
         })
       }
       this.bindDefaultPage(replacement, targetId, this.ownsPage, false)
-      this.pendingPageTarget = undefined
-      if (pendingTarget.warnReplaced) this.pendingWarnings.push(defaultPageReplacedWarning)
-      if (!pendingTarget.repaired) return replacement
+      if (rebind === "replaced") this.pendingWarnings.push(defaultPageReplacedWarning)
+      if (rebind !== "repaired") return replacement
       this.pageHealthCheckRequired = true
       const checked = await this.checkSessionPage(replacement, { repaired: true })
       if (checked) {
@@ -1135,9 +1147,11 @@ export class ExecuteSandbox {
       }
     }
     if (this.page?.isClosed()) {
-      this.defaultPageTargetId = undefined
-      this.ownsPage = false
-      this.notifyDefaultTargetChange()
+      this.unbindDefaultPage(undefined, {
+        pageCrashed: this.pageCrashed,
+        pageProtectedUi: this.pageProtectedUi,
+        notify: true,
+      })
       this.pendingWarnings.push(defaultPageClosedWarning)
     }
     const page = await context.newPage()
@@ -1177,13 +1191,7 @@ export class ExecuteSandbox {
     if (recovery === "repair") {
       throw new SessionPageRepairRequired()
     }
-    this.page = undefined
-    this.defaultPageTargetId = undefined
-    this.ownsPage = false
-    this.pageHealthCheckRequired = false
-    this.pageCrashed = false
-    this.pageProtectedUi = false
-    this.notifyDefaultTargetChange()
+    this.unbindDefaultPage(undefined, { notify: true })
     this.pendingWarnings.push(defaultPageRecoveredWarning)
     return undefined
   }
@@ -1244,14 +1252,14 @@ export function installDownloadCapabilityGuard(page: Page): void {
   if (downloadGuardedPages.has(page)) {
     return
   }
-  const waitForEvent = page.waitForEvent.bind(page)
+  const waitForEvent = page.waitForEvent.bind(page) as (event: string, ...args: unknown[]) => Promise<unknown>
   Object.defineProperty(page, "waitForEvent", {
     configurable: true,
     value: (event: string, ...args: unknown[]) => {
       if (event === "download") {
         return Promise.reject(new Error(downloadCapabilityErrorMessage))
       }
-      return Reflect.apply(waitForEvent, page, [event, ...args])
+      return waitForEvent(event, ...args)
     },
   })
   downloadGuardedPages.add(page)
@@ -1361,20 +1369,9 @@ export async function pageTargetId(page: Page): Promise<string> {
   }
 }
 
-function ghostCursorOptions(options: ShowGhostCursorOptions | undefined): GhostCursorClientOptions | undefined {
-  if (!options) {
-    return undefined
-  }
-  return {
-    ...(options.color ? { color: options.color } : {}),
-    ...(options.size !== undefined ? { size: options.size } : {}),
-    ...(options.zIndex !== undefined ? { zIndex: options.zIndex } : {}),
-  }
-}
-
 export function createAriaSnapshotHelper(page: Pick<Page, "locator">): AriaSnapshotHelper {
   return async (target, options) => {
-    const locator = target === undefined ? page.locator("body") : typeof target === "string" ? page.locator(target) : target
+    const locator = target === undefined ? page.locator("body") : Predicate.isString(target) ? page.locator(target) : target
     return await ariaSnapshotWithoutTextControlValues(locator, {
       timeout: options?.timeout ?? defaultAriaSnapshotTimeoutMs,
     })
@@ -1396,8 +1393,10 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
   const refRoots = new WeakMap<Locator, { readonly selector: string; readonly role: string; readonly name?: string }>()
   const snapshot: SnapshotHelper = async (options = {}) => {
     const within = options.within
-    const refRoot = typeof within === "object" ? refRoots.get(within) : undefined
-    const locator = typeof within === "object" && !refRoot ? within : undefined
+    const withinSelector = Predicate.isString(within) ? within : undefined
+    const withinLocator = within !== undefined && !Predicate.isString(within) ? within : undefined
+    const refRoot = withinLocator ? refRoots.get(withinLocator) : undefined
+    const locator = withinLocator && !refRoot ? withinLocator : undefined
     let locatorScope: number | undefined
     if (locator) {
       const scopes = registry.locatorScopes ??= new WeakMap()
@@ -1416,7 +1415,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       interactive: options.interactive ?? false,
       maxCandidates: Math.max(1_000, maxItems * 20),
       maxItems,
-      rootSelector: typeof within === "string" ? within : refRoot?.selector,
+      rootSelector: withinSelector ?? refRoot?.selector,
       rootRole: refRoot?.role,
       rootName: refRoot?.name,
     }
@@ -1425,8 +1424,8 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       depth: settings.depth,
       interactive: settings.interactive,
       maxItems: settings.maxItems,
-      scope: typeof within === "string"
-        ? { kind: "selector", selector: within }
+      scope: withinSelector !== undefined
+        ? { kind: "selector", selector: withinSelector }
         : refRoot
         ? { kind: "ref", selector: refRoot.selector, role: refRoot.role, name: refRoot.name }
         : locator
@@ -1854,10 +1853,10 @@ return (${capture.toString()})(rootOrSettings, locatorSettings)`,
           run: () => page.evaluate(browserCapture, settings),
         }))
       } catch (error) {
-        if (typeof within !== "string" || !/not a valid selector|querySelectorAll/i.test(error instanceof Error ? error.message : String(error))) {
+        if (withinSelector === undefined || !/not a valid selector|querySelectorAll/i.test(error instanceof Error ? error.message : String(error))) {
           throw error
         }
-        result = await page.locator(within).evaluate(browserCapture, { ...settings, rootSelector: undefined }, { timeout: timeoutMs })
+        result = await page.locator(withinSelector).evaluate(browserCapture, { ...settings, rootSelector: undefined }, { timeout: timeoutMs })
       }
     }
 
@@ -1991,7 +1990,7 @@ function findSnapshotLines(lines: readonly string[], query: string | RegExp, req
   const context = Math.max(0, Math.min(10, Math.floor(requestedContext ?? 2)))
   const matches: number[] = []
   for (const [index, line] of lines.entries()) {
-    const matched = typeof query === "string"
+    const matched = Predicate.isString(query)
       ? line.toLowerCase().includes(query.toLowerCase())
       : (() => {
           query.lastIndex = 0
@@ -2000,7 +1999,7 @@ function findSnapshotLines(lines: readonly string[], query: string | RegExp, req
     if (matched) matches.push(index)
   }
   if (matches.length === 0) {
-    return `No snapshot lines matched ${typeof query === "string" ? JSON.stringify(query) : query.toString()}.`
+    return `No snapshot lines matched ${Predicate.isString(query) ? JSON.stringify(query) : query.toString()}.`
   }
   const included = new Set<number>()
   for (const index of matches) {
@@ -2101,7 +2100,7 @@ function snapshotRefAriaRole(role: string): Parameters<Page["getByRole"]>[0] | u
 }
 
 async function fillInput(options: { readonly page: Page; readonly target: InputTarget; readonly value: string }): Promise<void> {
-  if (typeof options.target === "string") {
+  if (Predicate.isString(options.target)) {
     await fillInputs(options.page, [{ selector: options.target, value: options.value }])
     return
   }
@@ -2131,7 +2130,7 @@ export async function fillInputs(page: Page, fields: ReadonlyArray<InputField>):
   try {
     const resolvedFields: Array<{ readonly target: string | ElementHandle; readonly label: string; readonly value: string }> = []
     for (const field of fields) {
-      if (typeof field.selector === "string") {
+      if (Predicate.isString(field.selector)) {
         resolvedFields.push({ target: field.selector, label: `selector: ${field.selector}`, value: field.value })
         continue
       }
@@ -2250,9 +2249,6 @@ async function showScreenshotLabels(page: Page): Promise<readonly ScreenshotLabe
       "[contenteditable]",
     ]
     const candidates = Array.from(document.querySelectorAll(selectors.join(",")))
-      .filter((element, index, elements) => {
-        return elements.indexOf(element) === index
-      })
       .filter((element) => {
         const rect = element.getBoundingClientRect()
         const style = window.getComputedStyle(element)
@@ -2266,30 +2262,22 @@ async function showScreenshotLabels(page: Page): Promise<readonly ScreenshotLabe
       })
       .slice(0, 80)
 
-    const escapeCss = (value: string): string => {
-      return CSS.escape(value)
-    }
-
-    const quoteAttribute = (value: string): string => {
-      return CSS.escape(value)
-    }
-
     const selectorForElement = (element: Element): string => {
       const id = element.getAttribute("id")
       if (id) {
-        return `#${escapeCss(id)}`
+        return `#${CSS.escape(id)}`
       }
       const testId = element.getAttribute("data-testid")
       if (testId) {
-        return `[data-testid="${quoteAttribute(testId)}"]`
+        return `[data-testid="${CSS.escape(testId)}"]`
       }
       const dataTest = element.getAttribute("data-test")
       if (dataTest) {
-        return `[data-test="${quoteAttribute(dataTest)}"]`
+        return `[data-test="${CSS.escape(dataTest)}"]`
       }
       const name = element.getAttribute("name")
       if (name) {
-        return `${element.tagName.toLowerCase()}[name="${quoteAttribute(name)}"]`
+        return `${element.tagName.toLowerCase()}[name="${CSS.escape(name)}"]`
       }
       const parent = element.parentElement
       if (!parent) {
@@ -2660,51 +2648,8 @@ export async function runUserCode({ code, globals }: { readonly code: string; re
   }
   try {
     const AsyncFunction = async function () {}.constructor as new (...args: string[]) => (...args: unknown[]) => Promise<unknown>
-    const fn = new AsyncFunction(
-      "console",
-      "browser",
-      "context",
-      "page",
-      "state",
-      "modules",
-      "fillInput",
-      "fillInputs",
-      "screenshotWithLabels",
-      "screenshotDiff",
-      "ariaSnapshot",
-      "snapshot",
-      "ref",
-      "webmcp",
-      "showGhostCursor",
-      "hideGhostCursor",
-      "ghostCursor",
-      "handoff",
-      "demonstrate",
-      "network",
-      wrapCodeWithModuleAliases(code),
-    )
-    const result = await fn(
-      sandboxConsole,
-      globals.browser,
-      globals.context,
-      globals.page,
-      globals.state,
-      globals.modules,
-      globals.fillInput,
-      globals.fillInputs,
-      globals.screenshotWithLabels,
-      globals.screenshotDiff,
-      globals.ariaSnapshot,
-      globals.snapshot,
-      globals.ref,
-      globals.webmcp,
-      globals.showGhostCursor,
-      globals.hideGhostCursor,
-      globals.ghostCursor,
-      globals.handoff,
-      globals.demonstrate,
-      globals.network,
-    )
+    const fn = new AsyncFunction("console", ...sandboxGlobalKeys, wrapCodeWithModuleAliases(code))
+    const result = await fn(sandboxConsole, ...sandboxGlobalKeys.map((key) => globals[key]))
     return { result, ...buildResultMetadata() }
   } catch (cause) {
     const error = cause instanceof Error ? cause : new Error("execute sandbox code", { cause })
@@ -2716,6 +2661,28 @@ export async function runUserCode({ code, globals }: { readonly code: string; re
     globals.page.off("framenavigated", onFrameNavigated)
   }
 }
+
+const sandboxGlobalKeys = [
+  "browser",
+  "context",
+  "page",
+  "state",
+  "modules",
+  "fillInput",
+  "fillInputs",
+  "screenshotWithLabels",
+  "screenshotDiff",
+  "ariaSnapshot",
+  "snapshot",
+  "ref",
+  "webmcp",
+  "showGhostCursor",
+  "hideGhostCursor",
+  "ghostCursor",
+  "handoff",
+  "demonstrate",
+  "network",
+] as const satisfies readonly (keyof Omit<SandboxGlobals, "handoffTracker">)[]
 
 function safePageUrl(page: Page): string | null {
   try {
@@ -2753,7 +2720,7 @@ function createSandboxConsole(options: { readonly addLog: (entry: ExecuteLogEntr
 }
 
 function formatLogValue(value: unknown): string {
-  if (typeof value === "string") {
+  if (Predicate.isString(value)) {
     return value
   }
   return util.inspect(value, { depth: 4, colors: false, maxArrayLength: 100, maxStringLength: 1000 })
@@ -2771,7 +2738,7 @@ export function getAutoReturnExpression(code: string): string | null {
       return null
     }
     const statement = ast.body[0]
-    if (!statement || statement.type === "ReturnStatement" || statement.type !== "ExpressionStatement") {
+    if (statement?.type !== "ExpressionStatement") {
       return null
     }
     const expression = statement.expression
@@ -2805,7 +2772,7 @@ function wrapCodeWithModuleAliases(code: string): string {
 }
 
 function stringifyResult(result: unknown): string {
-  if (typeof result === "string") {
+  if (Predicate.isString(result)) {
     return result
   }
   if (result === undefined) {
@@ -2838,7 +2805,7 @@ export function extractExecuteMedia(value: unknown): { readonly value: unknown; 
       media.push(image)
       return { type: image.type, mimeType: image.mimeType, size: image.size }
     }
-    if (item === null || typeof item !== "object") return item
+    if (!Predicate.isObjectOrArray(item)) return item
     const previous = seen.get(item)
     if (previous !== undefined) return previous
     if (Array.isArray(item)) {
@@ -2904,7 +2871,7 @@ function imageMimeType(value: Buffer): string | undefined {
 export function toJsonSafeValue(value: unknown): JsonSafeResult {
   try {
     const seen = new WeakSet<object>()
-    const converted = convertJsonSafe(value, { seen, depth: 0, topLevel: true })
+    const converted = convertJsonSafe(value, { seen, depth: 0 })
     if (converted.omit) {
       return { serializable: false, reason: converted.reason }
     }
@@ -2925,35 +2892,38 @@ type JsonSafeConversion =
   | { readonly omit: false; readonly value: unknown }
   | { readonly omit: true; readonly reason: string }
 
-function convertJsonSafe(value: unknown, options: { readonly seen: WeakSet<object>; readonly depth: number; readonly topLevel: boolean }): JsonSafeConversion {
-  if (value === null || typeof value === "string" || typeof value === "boolean") {
+function convertJsonSafe(value: unknown, options: { readonly seen: WeakSet<object>; readonly depth: number }): JsonSafeConversion {
+  if (value === null || Predicate.isString(value) || Predicate.isBoolean(value)) {
     return { omit: false, value }
   }
-  if (typeof value === "number") {
+  if (Predicate.isNumber(value)) {
     return { omit: false, value: Number.isFinite(value) ? value : null }
   }
-  if (typeof value === "bigint") {
+  if (Predicate.isBigInt(value)) {
     return { omit: false, value: value.toString() }
   }
   if (value === undefined) {
-    return options.topLevel ? { omit: true, reason: "undefined" } : { omit: true, reason: "undefined property" }
+    return { omit: true, reason: "undefined" }
   }
-  if (typeof value === "function" || typeof value === "symbol") {
-    return { omit: true, reason: `${typeof value} value` }
+  if (Predicate.isFunction(value)) {
+    return { omit: true, reason: "function value" }
   }
-  if (typeof value !== "object") {
-    return { omit: true, reason: `unsupported ${typeof value} value` }
+  if (Predicate.isSymbol(value)) {
+    return { omit: true, reason: "symbol value" }
+  }
+  if (!Predicate.isObjectOrArray(value)) {
+    return { omit: true, reason: "unsupported value" }
   }
   const isMap = value instanceof Map
   const isSet = !isMap && value instanceof Set
   if (!isMap && !isSet && !isPlainJsonContainer(value)) {
-    return { omit: true, reason: options.topLevel ? "class instance" : "class instance property" }
+    return { omit: true, reason: "class instance" }
   }
   if (options.seen.has(value)) {
-    return options.topLevel ? { omit: true, reason: "circular reference" } : { omit: true, reason: "circular property" }
+    return { omit: true, reason: "circular reference" }
   }
   if (options.depth >= maxJsonSafeDepth) {
-    return options.topLevel ? { omit: true, reason: "maximum object depth exceeded" } : { omit: true, reason: "nested value exceeded maximum depth" }
+    return { omit: true, reason: "maximum object depth exceeded" }
   }
   options.seen.add(value)
   try {
@@ -2964,18 +2934,18 @@ function convertJsonSafe(value: unknown, options: { readonly seen: WeakSet<objec
         try {
           entries = value.entries()
         } catch {
-          return { omit: true, reason: options.topLevel ? "map entries unavailable" : "map property entries unavailable" }
+          return { omit: true, reason: "map entries unavailable" }
         }
         for (const [key, item] of entries) {
-          if (typeof key !== "string") {
-            return { omit: true, reason: options.topLevel ? "map contains non-string key" : "map property contains non-string key" }
+          if (!Predicate.isString(key)) {
+            return { omit: true, reason: "map contains non-string key" }
           }
-          const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1, topLevel: false })
+          const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1 })
           if (!converted.omit) output[key] = converted.value
         }
         return { omit: false, value: output }
       } catch {
-        return { omit: true, reason: options.topLevel ? "map iteration failed" : "map property iteration failed" }
+        return { omit: true, reason: "map iteration failed" }
       }
     }
     if (isSet) {
@@ -2985,15 +2955,15 @@ function convertJsonSafe(value: unknown, options: { readonly seen: WeakSet<objec
         try {
           values = value.values()
         } catch {
-          return { omit: true, reason: options.topLevel ? "set values unavailable" : "set property values unavailable" }
+          return { omit: true, reason: "set values unavailable" }
         }
         for (const item of values) {
-          const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1, topLevel: false })
+          const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1 })
           output.push(converted.omit ? null : converted.value)
         }
         return { omit: false, value: output }
       } catch {
-        return { omit: true, reason: options.topLevel ? "set iteration failed" : "set property iteration failed" }
+        return { omit: true, reason: "set iteration failed" }
       }
     }
     if (Array.isArray(value)) {
@@ -3001,7 +2971,7 @@ function convertJsonSafe(value: unknown, options: { readonly seen: WeakSet<objec
       try {
         length = value.length
       } catch {
-        return { omit: true, reason: options.topLevel ? "array length unavailable" : "array property unavailable" }
+        return { omit: true, reason: "array length unavailable" }
       }
       const items: unknown[] = []
       for (let index = 0; index < length; index++) {
@@ -3012,7 +2982,7 @@ function convertJsonSafe(value: unknown, options: { readonly seen: WeakSet<objec
           items.push(null)
           continue
         }
-        const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1, topLevel: false })
+        const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1 })
         items.push(converted.omit ? null : converted.value)
       }
       return {
@@ -3023,7 +2993,7 @@ function convertJsonSafe(value: unknown, options: { readonly seen: WeakSet<objec
     const output: Record<string, unknown> = {}
     const keys = safeObjectKeys(value)
     if (!keys) {
-      return { omit: true, reason: options.topLevel ? "object keys unavailable" : "object property keys unavailable" }
+      return { omit: true, reason: "object keys unavailable" }
     }
     for (const key of keys) {
       let item: unknown
@@ -3032,7 +3002,7 @@ function convertJsonSafe(value: unknown, options: { readonly seen: WeakSet<objec
       } catch {
         continue
       }
-      const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1, topLevel: false })
+      const converted = convertJsonSafe(item, { seen: options.seen, depth: options.depth + 1 })
       if (!converted.omit) {
         output[key] = converted.value
       }
@@ -3043,11 +3013,11 @@ function convertJsonSafe(value: unknown, options: { readonly seen: WeakSet<objec
   }
 }
 
-function isPlainJsonContainer(value: object): boolean {
+function isPlainJsonContainer<T extends object>(value: T): boolean {
   if (Array.isArray(value)) {
     return true
   }
-  let prototype: object | null
+  let prototype: unknown
   try {
     prototype = Object.getPrototypeOf(value)
   } catch {
@@ -3056,7 +3026,7 @@ function isPlainJsonContainer(value: object): boolean {
   return prototype === Object.prototype || prototype === null
 }
 
-function safeObjectKeys(value: object): string[] | undefined {
+function safeObjectKeys<T extends object>(value: T): string[] | undefined {
   try {
     return Object.keys(value)
   } catch {

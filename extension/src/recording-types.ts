@@ -34,7 +34,7 @@ export type OffscreenStatusRecordingMessage = {
   readonly tabId: number
 }
 
-export type OffscreenCancelRecordingMessage = {
+type OffscreenCancelRecordingMessage = {
   readonly action: "recording.cancel"
   readonly tabId: number
 }

@@ -134,7 +134,7 @@ describe("relay child target announce dedupe", () => {
             emit("Target.attachedToTarget", { sessionId: replacementSessionId, targetInfo: replacementInfo, waitingForDebugger: false })
           }
           await flush()
-          expect(events.filter((event) => event.method.startsWith("Target.")).map((event) => [event.method, event.params?.sessionId])).toEqual([
+          expect(events.flatMap((event) => event.method.startsWith("Target.") ? [[event.method, event.params?.sessionId]] : [])).toEqual([
             ["Target.detachedFromTarget", "grandchild"],
             ["Target.detachedFromTarget", "child"],
             ...(transition === "detach" || transition === "held-page" ? [] : [["Target.attachedToTarget", replacementSessionId]]),
@@ -162,7 +162,7 @@ describe("relay child target announce dedupe", () => {
           if (transition === "held-page") {
             emit("Target.targetInfoChanged", { targetInfo: { ...replacementInfo, url: "https://example.com/visible" } })
             await flush()
-            expect(events.filter((event) => event.method === "Target.attachedToTarget").map((event) => event.params?.sessionId)).toEqual([replacementSessionId])
+            expect(events.flatMap((event) => event.method === "Target.attachedToTarget" ? [event.params?.sessionId] : [])).toEqual([replacementSessionId])
           }
           await send(hidden, { method: "Browser.getVersion" })
           expect(hiddenEvents).toEqual([])

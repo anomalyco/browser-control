@@ -1,7 +1,7 @@
-import { Deferred, Effect, Fiber } from "effect"
+import { Deferred, Effect, Fiber, Predicate } from "effect"
 import type { CdpRoutedSession } from "./cdp-router.ts"
 import type { CdpEvent, JsonObject } from "./protocol.ts"
-import { getObject } from "./relay-helpers.ts"
+import { getNumber, getObject, getString } from "./relay-helpers.ts"
 import { boundedToken, runtimeFailureKind } from "./runtime-diagnostics.ts"
 import type { TargetRegistry } from "./target-registry.ts"
 
@@ -58,13 +58,14 @@ export class CdpRuntime<Client extends object> {
     const requester = event.sessionId ? this.requesters.get(client)?.get(event.sessionId) : undefined
     const active = requester?.current() ? requester : undefined
     const context = getObject(event.params?.context)
-    const id = context?.id
+    const id = getNumber(context, "id")
+    const destroyedId = getNumber(event.params, "executionContextId")
     if (event.method === "Runtime.executionContextsCleared") active?.delivered.clear()
-    if (event.method === "Runtime.executionContextDestroyed" && typeof event.params?.executionContextId === "number") {
-      active?.delivered.delete(event.params.executionContextId)
+    if (event.method === "Runtime.executionContextDestroyed" && destroyedId !== undefined) {
+      active?.delivered.delete(destroyedId)
     }
-    if (event.method === "Runtime.executionContextCreated" && active?.frameId !== undefined && typeof id === "number") {
-      const unique = typeof context?.uniqueId === "string" ? context.uniqueId : undefined
+    if (event.method === "Runtime.executionContextCreated" && active?.frameId !== undefined && id !== undefined) {
+      const unique = getString(context, "uniqueId")
       if (active.delivered.has(id) && active.delivered.get(id) === unique) return
       active.delivered.set(id, unique)
     }
@@ -75,8 +76,8 @@ export class CdpRuntime<Client extends object> {
   frameTreeResponse(client: Client, route: CdpRoutedSession, canContinue: () => boolean): (result: unknown) => void {
     const requester = this.requester(client, route, canContinue)
     return (result) => {
-      const frameId = getObject(getObject(getObject(result)?.frameTree)?.frame)?.id
-      if (typeof frameId !== "string" || !requester.current()) return
+      const frameId = getString(getObject(getObject(getObject(result)?.frameTree)?.frame), "id")
+      if (!Predicate.isString(frameId) || !requester.current()) return
       requester.frameId = frameId
       for (const waiter of this.waiters) this.settle(waiter)
     }
@@ -110,8 +111,8 @@ export class CdpRuntime<Client extends object> {
         cache.contexts = new Map()
         return
       case "Runtime.executionContextDestroyed": {
-        const id = event.params?.executionContextId
-        if (typeof id === "number") cache.contexts?.delete(id)
+        const id = getNumber(event.params, "executionContextId")
+        if (id !== undefined) cache.contexts?.delete(id)
         return
       }
       case "Page.frameDetached":
@@ -120,8 +121,8 @@ export class CdpRuntime<Client extends object> {
         }
         return
       case "Runtime.executionContextCreated": {
-        const id = getObject(event.params?.context)?.id
-        if (!cache.contexts || typeof id !== "number") return
+        const id = getNumber(getObject(event.params?.context), "id")
+        if (!cache.contexts || id === undefined) return
         cache.contexts.set(id, event)
         if (cache.contexts.size > maxCachedContexts) cache.contexts = undefined
       }

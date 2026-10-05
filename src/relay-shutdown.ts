@@ -1,4 +1,4 @@
-import { Data, Effect, Exit, Latch, Schema } from "effect"
+import { Data, Effect, Exit, Latch, Match, Schema } from "effect"
 import type { RelayShutdownRequest } from "./relay-schema.ts"
 import { RelayLifecycleEvent } from "./relay-lifecycle-log.ts"
 
@@ -88,42 +88,42 @@ export class RelayShutdown {
     const control = this
     return Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
       if (request.instanceId !== control.options.instanceId) {
-        return yield* Effect.fail(new RelayShutdownError({ reason: "instance-changed", message: "Relay shutdown does not match the active managed instance" }))
+        return yield* new RelayShutdownError({ reason: "instance-changed", message: "Relay shutdown does not match the active managed instance" })
       }
       if (!control.options.managed) {
-        return yield* Effect.fail(new RelayShutdownError({ reason: "not-managed", message: "A foreground relay must be stopped by its owner" }))
+        return yield* new RelayShutdownError({ reason: "not-managed", message: "A foreground relay must be stopped by its owner" })
       }
-      if (!control.accepting) return yield* Effect.fail(control.busyError())
+      if (!control.accepting) return yield* control.busyError()
       control.state = State.Draining()
       const fields = { instanceId: request.instanceId, requestId: request.requestId, client: request.client }
       yield* Effect.gen(function* () {
         yield* control.options.audit(RelayLifecycleEvent.cases.Requested.make(fields))
         const drain = Effect.gen(function* () {
           const busy = control.options.busy()
-          if (busy) return yield* Effect.fail(control.busyError(busy))
+          if (busy) return yield* control.busyError(busy)
           yield* Effect.all([control.options.drain, control.idle.await], { concurrency: "unbounded" })
           yield* control.idle.await
           yield* control.options.settle
           const remaining = control.options.busy()
-          if (remaining) return yield* Effect.fail(control.busyError(remaining))
+          if (remaining) return yield* control.busyError(remaining)
         })
         yield* restore(drain.pipe(Effect.timeoutOrElse({
           duration: control.options.timeoutMs ?? 10_000,
-          orElse: () => Effect.fail(control.busyError("timeout")),
+          orElse: () => control.busyError("timeout"),
         })))
         if (!State.$is("Draining")(control.state)) {
-          return yield* Effect.fail(control.busyError())
+          return yield* control.busyError()
         }
         yield* control.options.audit(RelayLifecycleEvent.cases.Stopping.make(fields))
         yield* restore(Effect.void)
         if (!State.$is("Draining")(control.state)) {
-          return yield* Effect.fail(control.busyError())
+          return yield* control.busyError()
         }
         if (control.requests !== 0 || !control.options.quiescent()) {
-          return yield* Effect.fail(control.busyError("changed"))
+          return yield* control.busyError("changed")
         }
         const busy = control.options.busy()
-        if (busy) return yield* Effect.fail(control.busyError(busy))
+        if (busy) return yield* control.busyError(busy)
         control.state = State.Stopping()
         control.options.stop()
       }).pipe(Effect.onExit((exit) => {
@@ -140,15 +140,13 @@ export class RelayShutdown {
   }
 
   private busyError(reason?: "raw-clients" | "recordings" | "timeout" | "changed"): RelayShutdownError {
-    const message = reason === "raw-clients"
-      ? "Relay has raw CDP clients attached; disconnect them before restarting"
-      : reason === "recordings"
-      ? "Relay has active recordings or network captures; stop them before restarting"
-      : reason === "timeout"
-      ? "Relay restart timed out waiting for accepted work; the relay is still running"
-      : reason === "changed"
-      ? "Relay changed while preparing restart; it is still running, retry the restart"
-      : "Relay is draining for an explicit restart; retry after it completes"
+    const message = Match.value(reason).pipe(
+      Match.when("raw-clients", () => "Relay has raw CDP clients attached; disconnect them before restarting"),
+      Match.when("recordings", () => "Relay has active recordings or network captures; stop them before restarting"),
+      Match.when("timeout", () => "Relay restart timed out waiting for accepted work; the relay is still running"),
+      Match.when("changed", () => "Relay changed while preparing restart; it is still running, retry the restart"),
+      Match.orElse(() => "Relay is draining for an explicit restart; retry after it completes"),
+    )
     return new RelayShutdownError({ reason: "busy", message })
   }
 }

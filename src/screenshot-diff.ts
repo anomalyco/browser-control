@@ -1,5 +1,6 @@
 import fs from "node:fs/promises"
 import path from "node:path"
+import { Predicate } from "effect"
 import pixelmatch from "pixelmatch"
 import { PNG } from "pngjs"
 import type { Page } from "playwright-core"
@@ -34,7 +35,7 @@ export function createScreenshotDiff(page: Pick<Page, "screenshot">): (options: 
     if (options.path !== undefined && (!path.isAbsolute(options.path) || path.extname(options.path).toLowerCase() !== ".png")) {
       throw new Error("screenshotDiff output path must be an absolute .png path")
     }
-    const baseline = typeof options.baseline === "string" ? await readBaseline(options.baseline) : options.baseline
+    const baseline = Predicate.isString(options.baseline) ? await readBaseline(options.baseline) : options.baseline
     const before = decodePng(baseline)
     const current = await page.screenshot({ type: "png", scale: "css", fullPage: options.fullPage ?? false })
     const after = decodePng(current)

@@ -11,7 +11,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import util from "node:util"
 import { registerAriaSnapshotSelector } from "../src/aria-snapshot.ts"
-import { createAriaSnapshotHelper } from "../src/execute.ts"
+import { createAriaSnapshotHelper, fillInputs as fillPageInputs } from "../src/execute.ts"
 import { getObject } from "../src/relay-helpers.ts"
 import { browserControlBuildId } from "../src/version.ts"
 
@@ -2034,23 +2034,7 @@ const fill = Effect.fnUntraced(function* (locator: ReturnType<Page["locator"]>, 
 })
 
 const fillInput = Effect.fnUntraced(function* (locator: ReturnType<Page["locator"]>, value: string, label: string) {
-  yield* playwright(`fill input ${label}`, () =>
-    locator.evaluate((element, nextValue) => {
-      if (!(element instanceof HTMLInputElement) && !(element instanceof HTMLTextAreaElement)) {
-        throw new Error("fillInput expects an input or textarea locator")
-      }
-      const prototype = Object.getPrototypeOf(element) as HTMLInputElement | HTMLTextAreaElement
-      const valueSetter = Object.getOwnPropertyDescriptor(element, "value")?.set
-      const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set
-      if (prototypeValueSetter && valueSetter !== prototypeValueSetter) {
-        prototypeValueSetter.call(element, nextValue)
-      } else {
-        element.value = nextValue
-      }
-      element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: nextValue }))
-      element.dispatchEvent(new Event("change", { bubbles: true }))
-    }, value),
-  )
+  yield* playwright(`fill input ${label}`, () => fillPageInputs(locator.page(), [{ selector: locator, value }]))
 })
 
 const fillInputs = Effect.fnUntraced(function* (
@@ -2058,31 +2042,7 @@ const fillInputs = Effect.fnUntraced(function* (
   fields: ReadonlyArray<{ readonly selector: string; readonly value: string }>,
   label: string,
 ) {
-  yield* playwright(`fill inputs ${label}`, () =>
-    page.evaluate((inputFields) => {
-      return inputFields.map((field) => {
-        const matches = document.querySelectorAll(field.selector)
-        if (matches.length !== 1) {
-          throw new Error(`fillInputs expects exactly one match for selector: ${field.selector}; got ${matches.length}`)
-        }
-        const element = matches[0]
-        if (!(element instanceof HTMLInputElement) && !(element instanceof HTMLTextAreaElement)) {
-          throw new Error(`fillInputs expects input or textarea selector: ${field.selector}`)
-        }
-        const prototype = Object.getPrototypeOf(element) as HTMLInputElement | HTMLTextAreaElement
-        const valueSetter = Object.getOwnPropertyDescriptor(element, "value")?.set
-        const prototypeValueSetter = Object.getOwnPropertyDescriptor(prototype, "value")?.set
-        if (prototypeValueSetter && valueSetter !== prototypeValueSetter) {
-          prototypeValueSetter.call(element, field.value)
-        } else {
-          element.value = field.value
-        }
-        element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: field.value }))
-        element.dispatchEvent(new Event("change", { bubbles: true }))
-        return field.selector
-      })
-    }, fields),
-  )
+  yield* playwright(`fill inputs ${label}`, () => fillPageInputs(page, fields))
 })
 
 const textContent = Effect.fnUntraced(function* (locator: ReturnType<Page["locator"]>, label: string, timeout = 10_000) {

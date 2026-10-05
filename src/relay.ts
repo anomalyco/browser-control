@@ -7,17 +7,18 @@ import { fileURLToPath } from "node:url"
 import { Clock, Config, Effect, Option } from "effect"
 import { WebSocket, WebSocketServer, type RawData } from "ws"
 import {
+  removeDefaultLightColorSchemeEmulation,
   replayChildFrameNavigation,
   replayChildTargetsForParent,
   replayTargetCreated,
 } from "./cdp-shims.ts"
 import { CdpClientPool } from "./cdp-client-pool.ts"
-import { CdpRouter, isRootRoutableBrowserContextMethod } from "./cdp-router.ts"
+import { CdpRouter } from "./cdp-router.ts"
 import { CdpRuntime } from "./cdp-runtime.ts"
 import { ExtensionRpc } from "./extension-rpc.ts"
 import { createHttpRequestHandler } from "./http-api.ts"
 import type { CdpEvent, CdpRequest, JsonObject, PageStatus } from "./protocol.ts"
-import { extensionProtocolCompatibility, isCdpRequest, isExtensionEvent, isExtensionResponse, parseJsonObject } from "./protocol.ts"
+import { extensionProtocolCompatibility, isCdpRequest, isExtensionEvent, isExtensionResponse, makePageStatus, parseJsonObject } from "./protocol.ts"
 import {
   closeHttpServer,
   closeWebSocketServer,
@@ -25,7 +26,10 @@ import {
   defaultHost,
   defaultPort,
   formatHostForUrl,
+  getIdText,
+  getNumber,
   getObject,
+  getString,
   getTargetInfo,
   headerValue,
   isRestrictedTarget,
@@ -48,7 +52,6 @@ import {
   type HandoffOutcome,
 } from "./handoff.ts"
 import { ExecuteSandbox, type HandoffPageTarget } from "./execute.ts"
-import { makePageStatus } from "./page-status.ts"
 import { appendJournalEntry, defaultJournalBaseDir, makeJournalEntry } from "./session-journal.ts"
 import { defaultSessionCatalogPath, SessionCatalog } from "./session-catalog.ts"
 import { BrowserControlSessions } from "./session-manager.ts"
@@ -175,9 +178,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   let extensionGeneration = 0
   let rejectedExtensionConnections = 0
   const extensionRpc = new ExtensionRpc()
-  const sendToExtension = Effect.fnUntraced(function* (command: Parameters<ExtensionRpc["send"]>[0]) {
-    return yield* extensionRpc.send(command)
-  })
+  const sendToExtension = (command: Parameters<ExtensionRpc["send"]>[0]) => extensionRpc.send(command)
+  const sendExtensionBestEffort = (command: Parameters<ExtensionRpc["send"]>[0]): void => {
+    Effect.runPromise(Effect.ignore(sendToExtension(command))).catch(() => {})
+  }
   const sendDebuggerCommand = Effect.fnUntraced(function* (options: {
     readonly tabId: number
     readonly sessionId?: string
@@ -255,7 +259,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         continue
       }
       // Best-effort: older shims without action.setBadge just reject the command.
-      Effect.runPromise(Effect.ignore(sendToExtension({ method: "action.setBadge", params: { tabId: target.tabId, ...badge } }))).catch(() => {})
+      sendExtensionBestEffort({ method: "action.setBadge", params: { tabId: target.tabId, ...badge } })
       sendPageStatus(target, state)
     }
   }
@@ -265,7 +269,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     badge: { readonly text: string; readonly color: string; readonly title: string },
     options: { readonly sessionId?: string; readonly message?: string; readonly handoffId?: string } = {},
   ) => {
-    Effect.runPromise(Effect.ignore(sendToExtension({ method: "action.setBadge", params: { tabId: target.tabId, ...badge } }))).catch(() => {})
+    sendExtensionBestEffort({ method: "action.setBadge", params: { tabId: target.tabId, ...badge } })
     sendPageStatus(target, state, options)
   }
   const setActivityForTargetAcknowledged = async (
@@ -274,7 +278,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     badge: { readonly text: string; readonly color: string; readonly title: string },
     options: { readonly sessionId?: string; readonly message?: string; readonly handoffId?: string } = {},
   ): Promise<void> => {
-    Effect.runPromise(Effect.ignore(sendToExtension({ method: "action.setBadge", params: { tabId: target.tabId, ...badge } }))).catch(() => {})
+    sendExtensionBestEffort({ method: "action.setBadge", params: { tabId: target.tabId, ...badge } })
     await Effect.runPromise(sendPageStatusEffect(target, state, options))
   }
   const removeActiveHandoffTab = (sessionId: string, tabId: number): void => {
@@ -436,17 +440,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     })
     return sendToExtension({
       method: "pageStatus.set",
-      params: {
-        tabId: target.tabId,
-        status: {
-          state: status.state,
-          owner: status.owner,
-          ...(status.sessionId ? { sessionId: status.sessionId } : {}),
-          ...(status.readOnly ? { readOnly: true } : {}),
-          ...(status.message ? { message: status.message } : {}),
-          ...(status.handoffId ? { handoffId: status.handoffId } : {}),
-        },
-      },
+      params: { tabId: target.tabId, status },
     }).pipe(Effect.asVoid)
   }
 
@@ -461,7 +455,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   function refreshPageStatus(tabId: number): void {
     const target = registry.tabTargets.get(tabId)
     if (!target) {
-      Effect.runPromise(Effect.ignore(sendToExtension({ method: "pageStatus.clear", params: { tabId } }))).catch(() => {})
+      sendExtensionBestEffort({ method: "pageStatus.clear", params: { tabId } })
       return
     }
     const pending = handoffs.pendingForTab(tabId)
@@ -795,10 +789,24 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     clearLiveExtensionState("Extension replaced")
     extensionRpc.replaceSocket(socket)
     extensionRpc.markHandshake(
-      typeof message.params?.version === "string" ? message.params.version : undefined,
+      getString(message.params, "version"),
       message.params?.protocolVersion,
     )
     return extensionGeneration
+  }
+
+  function resumeIfWaitingForDebugger(tabId: number, childSessionId: string, params: JsonObject | undefined, label: string): void {
+    if (params?.waitingForDebugger !== true) return
+    Effect.runPromise(
+      sendDebuggerCommand({
+        tabId,
+        sessionId: childSessionId,
+        method: "Runtime.runIfWaitingForDebugger",
+        params: {},
+      }).pipe(Effect.ignore),
+    ).catch((error: unknown) => {
+      console.error(label, error)
+    })
   }
 
   function handleExtensionMessage(socket: WebSocket, raw: string, generation: number, announcedRootTabIds: Set<number>): void {
@@ -812,11 +820,12 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return
     }
     const extensionMethod = message.method as string
+    const eventTabId = getNumber(message.params, "tabId")
     if (extensionMethod === "hello") {
       return
     }
     if (extensionMethod === "log") {
-      const text = typeof message.params?.message === "string" ? message.params.message : undefined
+      const text = getString(message.params, "message")
       if (!text) return
       const level = message.params?.level === "error" || message.params?.level === "warn" ? message.params.level : "log"
       console[level](`[browser-control extension] ${text}`)
@@ -838,25 +847,22 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return
     }
     if (extensionMethod === "debugger.attached") {
-      const tabId = typeof message.params?.tabId === "number" ? message.params.tabId : undefined
-      if (tabId) {
-        announcedRootTabIds.add(tabId)
-        rootLifecycle.queue({ tabId, attachIfMissing: true, verificationRetries: 0, errorMessage: "Debugger re-announce failed", generation })
+      if (eventTabId) {
+        announcedRootTabIds.add(eventTabId)
+        rootLifecycle.queue({ tabId: eventTabId, attachIfMissing: true, verificationRetries: 0, errorMessage: "Debugger re-announce failed", generation })
       }
       return
     }
     if (extensionMethod === "toolbar.clicked") {
-      const tabId = typeof message.params?.tabId === "number" ? message.params.tabId : undefined
-      if (tabId) {
-        announcedRootTabIds.add(tabId)
-        handleToolbarClick(tabId)
+      if (eventTabId) {
+        announcedRootTabIds.add(eventTabId)
+        handleToolbarClick(eventTabId)
       }
       return
     }
     if (extensionMethod === "handoff.completed") {
-      const tabId = typeof message.params?.tabId === "number" ? message.params.tabId : undefined
-      const handoffId = typeof message.params?.handoffId === "string" ? message.params.handoffId : undefined
-      const target = tabId ? registry.tabTargets.get(tabId) : undefined
+      const handoffId = getString(message.params, "handoffId")
+      const target = eventTabId ? registry.tabTargets.get(eventTabId) : undefined
       if (target && handoffId) {
         const completed = handoffs.complete({
           id: handoffId,
@@ -871,36 +877,33 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return
     }
     if (extensionMethod === "pageStatus.requested") {
-      const tabId = typeof message.params?.tabId === "number" ? message.params.tabId : undefined
-      if (tabId) {
-        refreshPageStatus(tabId)
+      if (eventTabId) {
+        refreshPageStatus(eventTabId)
       }
       return
     }
     if (extensionMethod === "debugger.detached") {
-      const tabId = typeof message.params?.tabId === "number" ? message.params.tabId : undefined
-      const detachedSessionId = typeof message.params?.sessionId === "string" ? message.params.sessionId : undefined
-      const reason = typeof message.params?.reason === "string" ? message.params.reason : undefined
+      const detachedSessionId = getString(message.params, "sessionId")
+      const reason = getString(message.params, "reason")
       if (detachedSessionId) {
         suppressedChildSessions.delete(detachedSessionId)
         detachChildTargetState(detachedSessionId)
         return
       }
       if (reason === "target_closed") {
-        if (tabId) {
-          rootLifecycle.queue({ tabId, attachIfMissing: false, verificationRetries: 3, errorMessage: "Failed to reconcile ambiguous debugger detach" })
+        if (eventTabId) {
+          rootLifecycle.queue({ tabId: eventTabId, attachIfMissing: false, verificationRetries: 3, errorMessage: "Failed to reconcile ambiguous debugger detach" })
         }
         return
       }
-      if (tabId) {
-        detachTargetState(tabId)
+      if (eventTabId) {
+        detachTargetState(eventTabId)
       }
       return
     }
     if (extensionMethod === "tabs.removed") {
-      const tabId = typeof message.params?.tabId === "number" ? message.params.tabId : undefined
-      if (tabId) {
-        detachTargetState(tabId)
+      if (eventTabId) {
+        detachTargetState(eventTabId)
       }
       return
     }
@@ -908,21 +911,18 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       recordingRelay.handleRecordingCancelled(message)
       return
     }
-    if (extensionMethod !== "debugger.event") {
+    if (extensionMethod !== "debugger.event" || !eventTabId) {
       return
     }
 
-    const tabId = typeof message.params?.tabId === "number" ? message.params.tabId : undefined
-    if (!tabId) {
-      return
-    }
+    const tabId = eventTabId
     const target = registry.routingRootTarget(tabId)
     if (!target) {
       return
     }
-    const method = typeof message.params?.method === "string" ? message.params.method : ""
+    const method = getString(message.params, "method") ?? ""
     const params = getObject(message.params?.params)
-    const sourceSessionId = typeof message.params?.sessionId === "string" ? message.params.sessionId : undefined
+    const sourceSessionId = getString(message.params, "sessionId")
     debugLog?.(`evt tab=${tabId} ${method} src=${sourceSessionId ?? "root"}`)
     const sourceChild = sourceSessionId ? registry.childTargets.get(sourceSessionId) : undefined
     if (sourceSessionId && sourceSessionId !== target.sessionId && !sourceChild) {
@@ -953,21 +953,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }
     }
     if (method === "Target.attachedToTarget") {
-      const childSessionId = typeof params?.sessionId === "string" ? params.sessionId : undefined
+      const childSessionId = getString(params, "sessionId")
       const targetInfo = getTargetInfo(params?.targetInfo)
       if (childSessionId && !targetInfo) {
-        if (params?.waitingForDebugger === true) {
-          Effect.runPromise(
-            sendDebuggerCommand({
-              tabId,
-              sessionId: childSessionId,
-              method: "Runtime.runIfWaitingForDebugger",
-              params: {},
-            }).pipe(Effect.ignore),
-          ).catch((error: unknown) => {
-            console.error("Failed to resume unsupported target", error)
-          })
-        }
+        resumeIfWaitingForDebugger(tabId, childSessionId, params, "Failed to resume unsupported target")
         return
       }
       if (childSessionId && targetInfo) {
@@ -976,18 +965,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           if (targetInfo.type === "iframe" && protectedFrames.mark(tabId, targetInfo.targetId)) {
             retractProtectedFrame(target, targetInfo.targetId, targetInfo.url)
           }
-          if (params?.waitingForDebugger === true) {
-            Effect.runPromise(
-              sendDebuggerCommand({
-                tabId,
-                sessionId: childSessionId,
-                method: "Runtime.runIfWaitingForDebugger",
-                params: {},
-              }).pipe(Effect.ignore),
-            ).catch((error: unknown) => {
-              console.error("Failed to resume restricted target", error)
-            })
-          }
+          resumeIfWaitingForDebugger(tabId, childSessionId, params, "Failed to resume restricted target")
           return
         }
         suppressedChildSessions.delete(childSessionId)
@@ -1010,7 +988,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }
     }
     if (method === "Target.detachedFromTarget") {
-      const childSessionId = typeof params?.sessionId === "string" ? params.sessionId : undefined
+      const childSessionId = getString(params, "sessionId")
       if (childSessionId) {
         shouldBroadcast = false
         suppressedChildSessions.delete(childSessionId)
@@ -1059,11 +1037,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         method,
         params,
         mainFrameId: mainFrameIdsByTab.get(tabId),
-        isChildFrame: (frameId) => typeof registry.tabFrameEvents.get(tabId)?.get(frameId)?.attached?.parentFrameId === "string",
+        isChildFrame: (frameId) => getString(registry.tabFrameEvents.get(tabId)?.get(frameId)?.attached, "parentFrameId") !== undefined,
       })
       if (decision.kind === "retract") {
         const frame = getObject(params?.frame)
-        retractProtectedFrame(target, decision.frameId, typeof params?.url === "string" ? params.url : typeof frame?.url === "string" ? frame.url : undefined)
+        retractProtectedFrame(target, decision.frameId, getString(params, "url") ?? getString(frame, "url"))
         return
       }
       if (decision.kind === "suppress") {
@@ -1077,40 +1055,43 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     if (method === "Page.frameNavigated") {
       const frame = getObject(params?.frame)
-      if (typeof frame?.url === "string" && typeof frame.parentId !== "string" && (sourceSessionId === undefined || sourceSessionId === target.sessionId)) {
-        if (typeof frame.id === "string") {
-          mainFrameIdsByTab.set(tabId, frame.id)
+      const frameId = getString(frame, "id")
+      const frameUrl = getString(frame, "url")
+      const frameParentId = getString(frame, "parentId")
+      if (frameUrl !== undefined && frameParentId === undefined && (sourceSessionId === undefined || sourceSessionId === target.sessionId)) {
+        if (frameId !== undefined) {
+          mainFrameIdsByTab.set(tabId, frameId)
         }
         // The previous document's frames, protected ones included, are gone.
         forgetProtectedFrames(tabId)
-        contextDebugLog?.(`main-frame-navigated frame=${boundedToken(typeof frame.id === "string" ? frame.id : undefined)} loader=${boundedToken(typeof frame.loaderId === "string" ? frame.loaderId : undefined)} ${targetDiagnosticIdentity(target)} ${summarizeDiagnosticUrl(frame.url)}`)
-        registry.updateTargetUrl(tabId, frame.url)
+        contextDebugLog?.(`main-frame-navigated frame=${boundedToken(frameId)} loader=${boundedToken(getString(frame, "loaderId"))} ${targetDiagnosticIdentity(target)} ${summarizeDiagnosticUrl(frameUrl)}`)
+        registry.updateTargetUrl(tabId, frameUrl)
       }
-      if (typeof frame?.id === "string" && typeof frame.parentId === "string" && params) {
-        registry.rememberFrameEvent({ tabId, frameId: frame.id, navigated: params })
+      if (frameId !== undefined && frameParentId !== undefined && params) {
+        registry.rememberFrameEvent({ tabId, frameId, navigated: params })
       }
     }
     if (method === "Page.navigatedWithinDocument") {
-      const frameId = typeof params?.frameId === "string" ? params.frameId : undefined
-      const url = typeof params?.url === "string" ? params.url : undefined
+      const frameId = getString(params, "frameId")
+      const url = getString(params, "url")
       if (frameId && frameId === mainFrameIdsByTab.get(tabId)) {
         contextDebugLog?.(`main-frame-same-document frame=${boundedToken(frameId)} ${targetDiagnosticIdentity(target)} ${summarizeDiagnosticUrl(url)}`)
       }
     }
     if (method === "Page.lifecycleEvent") {
-      const frameId = typeof params?.frameId === "string" ? params.frameId : undefined
+      const frameId = getString(params, "frameId")
       if (frameId && frameId === mainFrameIdsByTab.get(tabId)) {
-        contextDebugLog?.(`main-frame-lifecycle name=${boundedToken(typeof params?.name === "string" ? params.name : undefined)} frame=${boundedToken(frameId)} loader=${boundedToken(typeof params?.loaderId === "string" ? params.loaderId : undefined)} ${targetDiagnosticIdentity(target)}`)
+        contextDebugLog?.(`main-frame-lifecycle name=${boundedToken(getString(params, "name"))} frame=${boundedToken(frameId)} loader=${boundedToken(getString(params, "loaderId"))} ${targetDiagnosticIdentity(target)}`)
       }
     }
     if (method === "Page.frameAttached") {
-      const frameId = typeof params?.frameId === "string" ? params.frameId : undefined
+      const frameId = getString(params, "frameId")
       if (frameId && params) {
         registry.rememberFrameEvent({ tabId, frameId, attached: params })
       }
     }
     if (method === "Page.frameDetached") {
-      const frameId = typeof params?.frameId === "string" ? params.frameId : undefined
+      const frameId = getString(params, "frameId")
       if (frameId) {
         registry.tabFrameEvents.get(tabId)?.delete(frameId)
       }
@@ -1122,7 +1103,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       const context = getObject(params?.context)
       const auxData = getObject(context?.auxData)
       const contextTarget = targetForCdpSession(tabId, eventSessionId)
-      contextDebugLog?.(`context-created id=${boundedToken(typeof context?.id === "number" || typeof context?.id === "string" ? String(context.id) : undefined)} unique=${boundedToken(typeof context?.uniqueId === "string" ? context.uniqueId : undefined)} default=${auxData?.isDefault === true} type=${boundedToken(typeof auxData?.type === "string" ? auxData.type : undefined)} frame=${boundedToken(typeof auxData?.frameId === "string" ? auxData.frameId : undefined)} ${targetDiagnosticIdentity(contextTarget)} ${summarizeDiagnosticUrl(typeof context?.origin === "string" ? context.origin : undefined)}`)
+      contextDebugLog?.(`context-created id=${boundedToken(getIdText(context, "id"))} unique=${boundedToken(getString(context, "uniqueId"))} default=${auxData?.isDefault === true} type=${boundedToken(getString(auxData, "type"))} frame=${boundedToken(getString(auxData, "frameId"))} ${targetDiagnosticIdentity(contextTarget)} ${summarizeDiagnosticUrl(getString(context, "origin"))}`)
       const cursorPosition = ghostCursorPositionsByTab.get(tabId)
       if (cursorPosition && auxData?.isDefault === true && auxData.frameId === mainFrameIdsByTab.get(tabId)) {
         Effect.runPromise(Effect.ignore(sendDebuggerCommand({
@@ -1133,7 +1114,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       }
     } else if (method === "Runtime.executionContextDestroyed") {
       const contextTarget = targetForCdpSession(tabId, eventSessionId)
-      contextDebugLog?.(`context-destroyed id=${boundedToken(typeof params?.executionContextId === "number" || typeof params?.executionContextId === "string" ? String(params.executionContextId) : undefined)} unique=${boundedToken(typeof params?.executionContextUniqueId === "string" ? params.executionContextUniqueId : undefined)} ${targetDiagnosticIdentity(contextTarget)}`)
+      contextDebugLog?.(`context-destroyed id=${boundedToken(getIdText(params, "executionContextId"))} unique=${boundedToken(getString(params, "executionContextUniqueId"))} ${targetDiagnosticIdentity(contextTarget)}`)
     } else if (method === "Runtime.executionContextsCleared") {
       contextDebugLog?.(`contexts-cleared ${targetDiagnosticIdentity(targetForCdpSession(tabId, eventSessionId))}`)
     }
@@ -1197,7 +1178,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           const resultObject = getObject(result)
           const exceptionDetails = isRuntimeEvaluationMethod(message.method) ? getObject(resultObject?.exceptionDetails) : undefined
           if (exceptionDetails) {
-            contextDebugLog?.(`evaluation-exception method=${message.method} exceptionId=${boundedToken(typeof exceptionDetails.exceptionId === "number" || typeof exceptionDetails.exceptionId === "string" ? String(exceptionDetails.exceptionId) : undefined)} line=${typeof exceptionDetails.lineNumber === "number" ? exceptionDetails.lineNumber : "none"} column=${typeof exceptionDetails.columnNumber === "number" ? exceptionDetails.columnNumber : "none"} client=${boundedToken(cdpClients.sessionId(socket) ?? "raw")} ${targetDiagnosticIdentity(diagnosticTargetForClient(socket, message.sessionId))} ${summarizeRuntimeEvaluate(message.params)}`)
+            contextDebugLog?.(`evaluation-exception method=${message.method} exceptionId=${boundedToken(getIdText(exceptionDetails, "exceptionId"))} line=${getNumber(exceptionDetails, "lineNumber") ?? "none"} column=${getNumber(exceptionDetails, "columnNumber") ?? "none"} client=${boundedToken(cdpClients.sessionId(socket) ?? "raw")} ${targetDiagnosticIdentity(diagnosticTargetForClient(socket, message.sessionId))} ${summarizeRuntimeEvaluate(message.params)}`)
           }
           sendCdpResponse(socket, {
             id: message.id,
@@ -1280,7 +1261,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return { sessionId: cdpClients.createBrowserAlias(socket) }
     }
     if (message.method === "Target.attachToTarget") {
-      const targetId = typeof message.params?.targetId === "string" ? message.params.targetId : ""
+      const targetId = getString(message.params, "targetId") ?? ""
       const target = cdpRouter.targetForAttach(socket, targetId)
       if (target) {
         if (cdpClients.hasSession(socket, target.sessionId)) {
@@ -1293,7 +1274,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return yield* Effect.fail(new Error(`Target not found: ${targetId}`))
     }
     if (message.method === "Target.getTargetInfo") {
-      const targetId = typeof message.params?.targetId === "string" ? message.params.targetId : ""
+      const targetId = getString(message.params, "targetId") ?? ""
       const target = cdpRouter.targetInfo(socket, {
         ...(targetId ? { targetId } : {}),
         ...(message.sessionId ? { sessionId: message.sessionId } : {}),
@@ -1308,7 +1289,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     if (message.method === "Target.createTarget" || message.method === "Target.closeTarget") {
       if (message.method === "Target.createTarget") {
-        const url = typeof message.params?.url === "string" ? message.params.url : "about:blank"
+        const url = getString(message.params, "url") ?? "about:blank"
         const browserControlSessionId = cdpClients.sessionId(socket)
         const autoAttachParams = cdpClients.autoAttachParams(socket)
         const target = yield* createAndAttachTab({
@@ -1319,7 +1300,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         })
         return { targetId: target.targetInfo.targetId }
       }
-      const targetId = typeof message.params?.targetId === "string" ? message.params.targetId : ""
+      const targetId = getString(message.params, "targetId") ?? ""
       const target = cdpRouter.targetForAttach(socket, targetId)
       if (!target || !("owner" in target)) {
         return { success: false }
@@ -1328,31 +1309,15 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       return { success: true }
     }
     if (message.method === "Target.detachFromTarget") {
-      const childSessionId = typeof message.params?.sessionId === "string" ? message.params.sessionId : undefined
+      const childSessionId = getString(message.params, "sessionId")
       if (childSessionId) cdpClients.detach(socket, childSessionId)
       return {}
     }
     const normalizedMessage = removeDefaultLightColorSchemeEmulation(message)
-    const browserAlias = message.sessionId !== undefined && cdpRouter.isBrowserAlias(socket, message.sessionId)
-    const rootRoutable = isRootRoutableBrowserContextMethod(message.method) && (!message.sessionId || browserAlias)
-    const requestedBrowserContextId = typeof message.params?.browserContextId === "string" ? message.params.browserContextId : undefined
-    const preferredRoot = rootRoutable ? cdpRouter.preferredRoot(socket, requestedBrowserContextId) : undefined
-    const route = rootRoutable && preferredRoot
-      ? { tabId: preferredRoot.tabId, rootSessionId: preferredRoot.sessionId }
-      : message.sessionId
-      ? cdpRouter.session(socket, message.sessionId)
-      : undefined
-    if (!route) {
-      return yield* Effect.fail(new Error(rootRoutable
-        ? requestedBrowserContextId !== undefined
-          ? `A healthy visible root target in browser context ${requestedBrowserContextId} is required for ${message.method}`
-          : clientBrowserControlSessionId === undefined
-          ? `Exactly one visible browser context is required for ${message.method}`
-          : `A healthy session-owned root target is required for ${message.method}`
-        : message.sessionId
-        ? `Unknown CDP session ${message.sessionId} for ${message.method}`
-        : `CDP sessionId is required for ${message.method}`))
-    }
+    const route = yield* Effect.try({
+      try: () => cdpRouter.resolveCommandRoute(socket, message),
+      catch: (error) => error instanceof Error ? error : new Error(String(error)),
+    })
     const { tabId } = route
     const command = {
       tabId,
@@ -1376,30 +1341,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     return result
   })
 
-  function removeDefaultLightColorSchemeEmulation(message: CdpRequest): CdpRequest {
-    if (message.method !== "Emulation.setEmulatedMedia") {
-      return message
-    }
-    const features = Array.isArray(message.params?.features) ? message.params.features : []
-    const hasDefaultLightColorScheme = features.some((feature) => {
-      const object = getObject(feature)
-      return object?.name === "prefers-color-scheme" && object.value === "light"
-    })
-    if (!hasDefaultLightColorScheme) {
-      return message
-    }
-    return {
-      ...message,
-      params: {
-        ...message.params,
-        features: features.filter((feature) => {
-          const object = getObject(feature)
-          return object?.name !== "prefers-color-scheme"
-        }),
-      },
-    }
-  }
-
   const toggleTab = Effect.fnUntraced(function* (tabId: number) {
     if (registry.tabTargets.has(tabId)) {
       yield* sendToExtension({ method: "debugger.detach", params: { tabId } })
@@ -1417,7 +1358,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     readonly autoAttachParams?: JsonObject
   }) {
     const result = yield* sendToExtension({ method: "tabs.create", params: { url: options.url, active: options.active } })
-    const tabId = typeof result.tabId === "number" ? result.tabId : undefined
+    const tabId = getNumber(result, "tabId")
     if (!tabId) {
       return yield* Effect.fail(new Error("tabs.create did not return a tabId"))
     }
@@ -1482,15 +1423,26 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     })
   })
 
+  function clearTabRuntimeState(tabId: number): void {
+    mainFrameIdsByTab.delete(tabId)
+    protectedFrames.forgetTab(tabId)
+    ghostCursorPositionsByTab.delete(tabId)
+    for (const [sessionId, childTabId] of suppressedChildSessions) {
+      if (childTabId === tabId) {
+        suppressedChildSessions.delete(sessionId)
+      }
+    }
+  }
+
   function detachTargetState(tabId: number, options: {
     readonly preserveSessionTarget?: boolean
     readonly updateExtension?: boolean
   } = {}): void {
     rootLifecycle.invalidate(tabId)
     if (options.updateExtension !== false) {
-      Effect.runPromise(Effect.ignore(sendToExtension({ method: "pageStatus.clear", params: { tabId } }))).catch(() => {})
+      sendExtensionBestEffort({ method: "pageStatus.clear", params: { tabId } })
       scheduleTabGrouping(tabId, "tabs.ungroup")
-      Effect.runPromise(Effect.ignore(sendToExtension({ method: "action.setAttached", params: { tabId, attached: false } }))).catch(() => {})
+      sendExtensionBestEffort({ method: "action.setAttached", params: { tabId, attached: false } })
       void recordingRelay.abortRecordingForTab({ tabId, reason: "Tab detached" }).catch((error: unknown) => {
         console.error("Failed to abort recording for detached tab", error)
       })
@@ -1506,23 +1458,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     // A staged-only root has no committed target but may already own tab-scoped relay state.
     cdpClients.detachTab(tabId, { destroyed: true })
-    mainFrameIdsByTab.delete(tabId)
-    protectedFrames.forgetTab(tabId)
-    ghostCursorPositionsByTab.delete(tabId)
-    for (const [sessionId, childTabId] of suppressedChildSessions) {
-      if (childTabId === tabId) {
-        suppressedChildSessions.delete(sessionId)
-      }
-    }
+    clearTabRuntimeState(tabId)
   }
 
   function recordRootReplacement(change: Extract<RootTargetChange, { readonly kind: "replaced" }>): void {
-    mainFrameIdsByTab.delete(change.target.tabId)
-    protectedFrames.forgetTab(change.target.tabId)
-    ghostCursorPositionsByTab.delete(change.target.tabId)
-    for (const [sessionId, childTabId] of suppressedChildSessions) {
-      if (childTabId === change.target.tabId) suppressedChildSessions.delete(sessionId)
-    }
+    clearTabRuntimeState(change.target.tabId)
     contextDebugLog?.(`target-replaced kind=root old=${targetDiagnosticIdentity(change.previous)} new=${targetDiagnosticIdentity(change.target)}`)
   }
 
@@ -1625,7 +1565,7 @@ function sendUpgradeError(options: {
   readonly status: 400 | 403 | 404 | 503
   readonly message: string
 }): void {
-  const statusText = options.status === 400 ? "Bad Request" : options.status === 403 ? "Forbidden" : "Not Found"
+  const statusText = http.STATUS_CODES[options.status] ?? "Error"
   options.socket.write(
     `HTTP/1.1 ${options.status} ${statusText}\r\ncontent-type: text/plain; charset=utf-8\r\nconnection: close\r\n\r\n${options.message}`,
   )

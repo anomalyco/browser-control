@@ -1,4 +1,4 @@
-import { Effect } from "effect"
+import { Effect, Match } from "effect"
 import { execFile } from "node:child_process"
 import fs from "node:fs/promises"
 import os from "node:os"
@@ -50,7 +50,11 @@ async function fixture(options: { readonly mcpProbe?: "startup" | "initialize" |
         expect(args).toEqual(["add", "--workspace-root", "--prod", "--ignore-scripts", "--config.node-linker=isolated", path.join(staging, "artifacts/package.tgz")])
         await expect(fs.lstat(path.join(cwd, "pnpm-lock.yaml"))).rejects.toMatchObject({ code: "ENOENT" })
       }
-      return args[0] === "--version" ? "browser-control v1.2.3" : args[0] === "--help" ? "browser-control help" : ""
+      return Match.value(args[0]).pipe(
+        Match.when("--version", () => "browser-control v1.2.3"),
+        Match.when("--help", () => "browser-control help"),
+        Match.orElse(() => ""),
+      )
     }
     if (command === "pnpm") {
       expect(cwd).toBe(staging)

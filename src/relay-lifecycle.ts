@@ -1,4 +1,4 @@
-import { Config, Effect, Schedule, Schema } from "effect"
+import { Config, Effect, Result, Schedule, Schema } from "effect"
 import { spawn } from "node:child_process"
 import crypto from "node:crypto"
 import path from "node:path"
@@ -71,7 +71,7 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
   const buildId = options.buildId ?? browserControlBuildId
   const probe = options.relay.version
   const initial = yield* Effect.result(probe)
-  if (initial._tag === "Success") {
+  if (Result.isSuccess(initial)) {
     const buildProblem = relayBuildProblem(initial.success, buildId)
     return {
       version: initial.success,
@@ -81,7 +81,7 @@ export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (op
   }
   const relayWasAbsent = isRelayUnreachable(initial.failure)
   if (!relayWasAbsent && !isRelayStarting(initial.failure)) {
-    return yield* Effect.fail(initial.failure)
+    return yield* initial.failure
   }
 
   if (relayWasAbsent) {
@@ -124,12 +124,12 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
   let original: RelayVersion | undefined
   let replacement: RelayVersion | undefined
   let restartRequestId: string | undefined
-  if (initial._tag === "Success") {
+  if (Result.isSuccess(initial)) {
     original = initial.success
   } else if (isRelayStarting(initial.failure)) {
     original = yield* waitForRelayReady(options)
   } else if (!isRelayUnreachable(initial.failure)) {
-    return yield* Effect.fail(initial.failure)
+    return yield* initial.failure
   }
 
   if (original) {
@@ -147,8 +147,8 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
     }
 
     const confirmed = yield* Effect.result(options.relay.version)
-    if (confirmed._tag === "Failure") {
-      if (!isRelayUnreachable(confirmed.failure)) return yield* Effect.fail(confirmed.failure)
+    if (Result.isFailure(confirmed)) {
+      if (!isRelayUnreachable(confirmed.failure)) return yield* confirmed.failure
     } else if (!isSameRelayInstance(original, confirmed.success)) {
       replacement = confirmed.success
     } else {
@@ -162,9 +162,9 @@ export const restartRelay = Effect.fn("RelayLifecycle.restartRelay")(function* (
         client: { kind: options.clientKind ?? "sdk", instanceId: clientInstanceId, buildId },
       })
       const shutdown = yield* Effect.result(options.relay.shutdown(request))
-      if (shutdown._tag === "Success") restartRequestId = request.requestId
+      if (Result.isSuccess(shutdown)) restartRequestId = request.requestId
       else if (!isRelayUnreachable(shutdown.failure) && !isRelayInstanceChanged(shutdown.failure)) {
-        return yield* Effect.fail(shutdown.failure)
+        return yield* shutdown.failure
       }
       replacement = yield* waitForRelayExitOrReplacement({ ...options, version: original })
     }

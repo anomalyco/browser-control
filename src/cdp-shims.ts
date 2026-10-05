@@ -1,9 +1,33 @@
 import type { WebSocket } from "ws"
-import type { JsonObject, TargetInfo } from "./protocol.ts"
-import { getObject, sendCdpEvent } from "./relay-helpers.ts"
+import type { CdpRequest, JsonObject, TargetInfo } from "./protocol.ts"
+import { getObject, getString, sendCdpEvent } from "./relay-helpers.ts"
 import type { ChildTarget } from "./relay-types.ts"
 import { shouldExposeChildTarget, type TargetRegistry } from "./target-registry.ts"
 import type { CdpClientPool } from "./cdp-client-pool.ts"
+
+export function removeDefaultLightColorSchemeEmulation(message: CdpRequest): CdpRequest {
+  if (message.method !== "Emulation.setEmulatedMedia") {
+    return message
+  }
+  const features = Array.isArray(message.params?.features) ? message.params.features : []
+  const hasDefaultLightColorScheme = features.some((feature) => {
+    const object = getObject(feature)
+    return object?.name === "prefers-color-scheme" && object.value === "light"
+  })
+  if (!hasDefaultLightColorScheme) {
+    return message
+  }
+  return {
+    ...message,
+    params: {
+      ...message.params,
+      features: features.filter((feature) => {
+        const object = getObject(feature)
+        return object?.name !== "prefers-color-scheme"
+      }),
+    },
+  }
+}
 
 export function replayChildTargetsForParent<Client extends Pick<WebSocket, "send">>(options: {
   readonly socket: Client
@@ -51,7 +75,7 @@ function childFrameNavigationParams(options: { readonly registry: TargetRegistry
   if (options.target.targetInfo.type !== "iframe") {
     return undefined
   }
-  const frameEvents = options.registry.findFrameEventsForChild(options.target, getObject)
+  const frameEvents = options.registry.findFrameEventsForChild(options.target)
   const navigated = frameEvents?.navigated
   const frame = getObject(navigated?.frame)
   if (navigated && frame) {
@@ -60,7 +84,7 @@ function childFrameNavigationParams(options: { readonly registry: TargetRegistry
       frame: {
         ...frame,
         id: options.target.targetInfo.targetId,
-        url: options.target.targetInfo.url || (typeof frame.url === "string" ? frame.url : ""),
+        url: options.target.targetInfo.url || (getString(frame, "url") ?? ""),
         ...(options.target.targetInfo.parentFrameId ? { parentId: options.target.targetInfo.parentFrameId } : {}),
       },
     }

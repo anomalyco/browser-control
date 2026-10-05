@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest"
-import { Deferred, Effect, Exit, Fiber, Latch, Scheduler } from "effect"
+import { Deferred, Effect, Exit, Fiber, Latch, Match, Result, Scheduler } from "effect"
 import { TestClock } from "effect/testing"
 import { adoptionTipForUrl, BrowserControlSessions, shouldAppendAdoptionTip } from "../src/session-manager.ts"
+import { AuthenticatedJsonOutcome } from "../src/relay-schema.ts"
 import type { ExecuteSandboxLike, SessionTarget } from "../src/relay-types.ts"
 import type { PersistedSession } from "../src/session-catalog.ts"
 import { TargetRegistry } from "../src/target-registry.ts"
@@ -71,11 +72,10 @@ const makeFakeSandbox = (options?: {
       ),
     authenticatedJson: (request) => options?.onAuthenticatedJson
       ? options.onAuthenticatedJson(request)
-      : Effect.succeed({
-          _tag: "Success",
+      : Effect.succeed(AuthenticatedJsonOutcome.cases.Success.make({
           status: 200,
           value: { ok: true },
-        }),
+        })),
     disconnectSettled: disconnect,
     closeSettled: close,
     networkStart: () => Effect.succeed({ active: true, entryCount: 0, responseCount: 0, failureCount: 0, capturedBodyBytes: 0, truncatedBodyCount: 0, droppedEntryCount: 0 }),
@@ -315,7 +315,7 @@ describe("BrowserControlSessions", () => {
       method: "GET",
       path: "/api/live/get-broadcasts",
     }))
-    expect(result).toEqual({ _tag: "Success", status: 200, value: { ok: true } })
+    expect(result).toEqual(AuthenticatedJsonOutcome.cases.Success.make({ status: 200, value: { ok: true } }))
     expect(records).toEqual([])
   })
 
@@ -324,7 +324,7 @@ describe("BrowserControlSessions", () => {
     const sessions = new BrowserControlSessions("http://127.0.0.1:0", () => makeFakeSandbox({
       onAuthenticatedJson: () => Effect.sync(() => {
         requests += 1
-        return { _tag: "Success", status: 200, value: null } as const
+        return AuthenticatedJsonOutcome.cases.Success.make({ status: 200, value: null })
       }),
     }))
     await Effect.runPromise(sessions.ensure("inspect", { readOnly: true }))
@@ -1744,11 +1744,12 @@ describe("BrowserControlSessions", () => {
       yield* executeStarted.await
       yield* Fiber.interrupt(execute)
 
-      const next = operation === "execute"
-        ? sessions.execute({ sessionId: "alpha", code: "next", createIfMissing: false }).pipe(Effect.asVoid)
-        : operation === "reset"
-        ? sessions.reset("alpha").pipe(Effect.asVoid)
-        : sessions.delete("alpha").pipe(Effect.asVoid)
+      const next = Match.value(operation).pipe(
+        Match.when("execute", () => sessions.execute({ sessionId: "alpha", code: "next", createIfMissing: false }).pipe(Effect.asVoid)),
+        Match.when("reset", () => sessions.reset("alpha").pipe(Effect.asVoid)),
+        Match.when("delete", () => sessions.delete("alpha").pipe(Effect.asVoid)),
+        Match.exhaustive,
+      )
       const queued = yield* Effect.forkChild(next, { startImmediately: true })
       const drain = yield* Effect.forkChild(sessions.beginDrain(), { startImmediately: true })
       expect(sessions.hasPendingWork("alpha")).toBe(true)
@@ -1991,8 +1992,8 @@ describe("BrowserControlSessions", () => {
       yield* Deferred.succeed(release, undefined)
       expect((yield* Fiber.join(alpha)).session.id).toBe("alpha")
       const betaResult = yield* Effect.result(Fiber.join(beta))
-      expect(betaResult._tag).toBe("Failure")
-      if (betaResult._tag === "Failure") {
+      expect(Result.isFailure(betaResult)).toBe(true)
+      if (Result.isFailure(betaResult)) {
         expect(betaResult.failure.message).toBe("Target is already adopted by session alpha. Use that session, or reset/delete it to release the tab before adopting it elsewhere.")
       }
 

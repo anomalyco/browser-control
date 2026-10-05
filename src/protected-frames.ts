@@ -1,5 +1,6 @@
+import { Predicate } from "effect"
 import type { JsonObject } from "./protocol.ts"
-import { getObject, isRestrictedUrl } from "./relay-helpers.ts"
+import { getObject, getString, isRestrictedUrl } from "./relay-helpers.ts"
 
 /**
  * How a root-session `Page.*` event about a child frame should reach CDP
@@ -80,26 +81,27 @@ export class ProtectedFrameTracker {
     const { tabId, method, params } = options
     if (!method.startsWith("Page.") || !params) return { kind: "forward" }
     const frame = getObject(params.frame)
-    const frameId = typeof params.frameId === "string" ? params.frameId : typeof frame?.id === "string" ? frame.id : undefined
+    const frameId = getString(params, "frameId") ?? getString(frame, "id")
     if (!frameId || frameId === options.mainFrameId) return { kind: "forward" }
-    const frameUrl = typeof frame?.url === "string" ? frame.url : undefined
-    const intentUrl = navigationIntentMethods.has(method) && typeof params.url === "string" ? params.url : undefined
+    const frameUrl = getString(frame, "url")
+    const parentId = getString(frame, "parentId")
+    const intentUrl = navigationIntentMethods.has(method) ? getString(params, "url") : undefined
 
     if (this.has(tabId, frameId)) {
       if (method === "Page.frameDetached") {
         this.release(tabId, frameId)
         return { kind: "suppress" }
       }
-      if (method === "Page.frameNavigated" && frameUrl !== undefined && !isRestrictedUrl(frameUrl) && typeof frame?.parentId === "string") {
+      if (method === "Page.frameNavigated" && frameUrl !== undefined && !isRestrictedUrl(frameUrl) && Predicate.isString(parentId)) {
         this.release(tabId, frameId)
-        return { kind: "restore", frameId, parentFrameId: frame.parentId }
+        return { kind: "restore", frameId, parentFrameId: parentId }
       }
       return { kind: "suppress" }
     }
 
     const restricted = intentUrl !== undefined
       ? isRestrictedUrl(intentUrl) && options.isChildFrame(frameId)
-      : method === "Page.frameNavigated" && typeof frame?.parentId === "string" && isRestrictedUrl(frameUrl)
+      : method === "Page.frameNavigated" && Predicate.isString(parentId) && isRestrictedUrl(frameUrl)
     if (!restricted) return { kind: "forward" }
     this.mark(tabId, frameId)
     return { kind: "retract", frameId }

@@ -1,4 +1,4 @@
-import { extensionProtocolVersion, parseExtensionCommand, type ExtensionCommand as ShimCommand, type JsonObject } from "../../src/protocol.ts"
+import { extensionProtocolVersion, isJsonObject, parseExtensionCommand, type ExtensionCommand as ShimCommand, type JsonObject } from "../../src/protocol.ts"
 import { encodeRecordingFrame } from "../../src/recording-protocol.ts"
 import type {
   OffscreenCancelRecordingResult,
@@ -7,7 +7,7 @@ import type {
   OffscreenStatusRecordingResult,
   OffscreenStopRecordingResult,
 } from "./recording-types.ts"
-import { finalizeBrowserControlGrouping, isBrowserControlGroupTitle, shouldUngroupBrowserControlTab, tabGroupColor, tabGroupTitle } from "./tab-groups.ts"
+import { finalizeBrowserControlGrouping, isBrowserControlGroupTitle, tabGroupColor, tabGroupTitle } from "./tab-groups.ts"
 import { pageStatusFromJson } from "./page-status.ts"
 import { debuggerDetachedEvent } from "./debugger-detach.ts"
 import { getOwnedDebuggerTabIds } from "./debugger-ownership.ts"
@@ -65,11 +65,10 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   if (!source.tabId) {
     return
   }
-  const sourceSession = source as chrome.debugger.DebuggerSession
   sendMessage(debuggerDetachedEvent({
     tabId: source.tabId,
     reason,
-    ...(sourceSession.sessionId === undefined ? {} : { sessionId: sourceSession.sessionId }),
+    sessionId: (source as chrome.debugger.DebuggerSession).sessionId,
   }))
 })
 
@@ -312,21 +311,17 @@ async function handleCommand(command: ShimCommand, currentSocket: WebSocket): Pr
   if (command.method === "action.setAttached") {
     const tabId = numberParam(command.params, "tabId")
     const attached = Boolean(command.params?.attached)
-    await chrome.action.setBadgeText({ tabId, text: attached ? "ON" : "" })
-    await chrome.action.setBadgeBackgroundColor({ tabId, color: "#7c3aed" })
-    await chrome.action.setTitle({ tabId, title: attached ? "Detach from Browser Control" : "Attach to Browser Control" })
+    await setTabBadge(tabId, attached ? "ON" : "", "#7c3aed", attached ? "Detach from Browser Control" : "Attach to Browser Control")
     return {}
   }
   if (command.method === "action.setBadge") {
     const tabId = numberParam(command.params, "tabId")
-    const text = optionalStringParam(command.params, "text") ?? ""
-    const color = optionalStringParam(command.params, "color") ?? "#7c3aed"
-    const title = optionalStringParam(command.params, "title")
-    await chrome.action.setBadgeText({ tabId, text })
-    await chrome.action.setBadgeBackgroundColor({ tabId, color })
-    if (title !== undefined) {
-      await chrome.action.setTitle({ tabId, title })
-    }
+    await setTabBadge(
+      tabId,
+      optionalStringParam(command.params, "text") ?? "",
+      optionalStringParam(command.params, "color") ?? "#7c3aed",
+      optionalStringParam(command.params, "title"),
+    )
     return {}
   }
   if (command.method === "pageStatus.set") {
@@ -357,9 +352,17 @@ async function handleCommand(command: ShimCommand, currentSocket: WebSocket): Pr
     return statusRecording(command.params)
   }
   if (command.method === "recording.cancel") {
-    return cancelRecording(command.params)
+    return cancelRecordingForTab(numberParam(command.params, "tabId"))
   }
   throw new Error(`Unknown shim command: ${command.method}`)
+}
+
+async function setTabBadge(tabId: number, text: string, color: string, title?: string): Promise<void> {
+  await chrome.action.setBadgeText({ tabId, text })
+  await chrome.action.setBadgeBackgroundColor({ tabId, color })
+  if (title !== undefined) {
+    await chrome.action.setTitle({ tabId, title })
+  }
 }
 
 async function startRecording(params: JsonObject | undefined): Promise<JsonObject> {
@@ -398,11 +401,6 @@ async function statusRecording(params: JsonObject | undefined): Promise<JsonObje
     tabId,
     ...(result.startedAt === undefined ? {} : { startedAt: result.startedAt }),
   }
-}
-
-async function cancelRecording(params: JsonObject | undefined): Promise<JsonObject> {
-  const tabId = numberParam(params, "tabId")
-  return cancelRecordingForTab(tabId)
 }
 
 async function cancelRecordingForTab(tabId: number): Promise<JsonObject> {
@@ -551,7 +549,7 @@ async function guardedUngroupBrowserControlTab(tabId: number, options: {
       groupTitle = group.title
       assertCurrent()
     }
-    if (!shouldUngroupBrowserControlTab(groupTitle)) {
+    if (!isBrowserControlGroupTitle(groupTitle)) {
       return
     }
     if (options.preserveAttached && (await getOwnedDebuggerTabIds(chrome.debugger)).has(tabId)) {
@@ -582,7 +580,7 @@ function assertCurrentGeneration(currentGeneration: number): void {
 }
 
 async function handleRuntimeMessage(message: unknown, sender: chrome.runtime.MessageSender): Promise<void> {
-  if (!message || typeof message !== "object" || Array.isArray(message)) {
+  if (!isJsonObject(message)) {
     return
   }
   const pageStatusMessage = message as { readonly action?: unknown; readonly handoffId?: unknown }
@@ -702,15 +700,9 @@ function optionalNumberParam(params: JsonObject | undefined, key: string): numbe
 
 function objectParam(params: JsonObject | undefined, key: string): JsonObject | undefined {
   const value = params?.[key]
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined
-  }
-  return value
+  return isJsonObject(value) ? value : undefined
 }
 
 function toJsonObject(value: unknown): JsonObject {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return {}
-  }
-  return value as JsonObject
+  return isJsonObject(value) ? value : {}
 }

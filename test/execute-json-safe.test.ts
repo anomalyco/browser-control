@@ -138,7 +138,14 @@ describe("toJsonSafeValue", () => {
       Object.defineProperty(collection, kind === "map" ? "entries" : "values", {
         value: phase === "acquire"
           ? () => { throw new Error("unavailable") }
-          : function* () { throw new Error("iteration failed") },
+          : () => ({
+              [Symbol.iterator]() {
+                return this
+              },
+              next() {
+                throw new Error("iteration failed")
+              },
+            }),
       })
       const reason = phase === "advance" ? `${kind} iteration failed` : `${kind} ${kind === "map" ? "entries" : "values"} unavailable`
       expect(toJsonSafeValue(collection)).toEqual({ serializable: false, reason })

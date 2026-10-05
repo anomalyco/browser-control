@@ -2,7 +2,7 @@ import fs from "node:fs"
 import http from "node:http"
 import os from "node:os"
 import path from "node:path"
-import { Effect, Latch, Schema } from "effect"
+import { Effect, Latch, Predicate, Schema } from "effect"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createHttpRequestHandler } from "../src/http-api.ts"
 import { FlightRecorderRelay } from "../src/flight-recorder.ts"
@@ -366,7 +366,11 @@ describe("HTTP request schemas", () => {
       busy: () => undefined,
       settle: Effect.void,
       quiescent: () => sessions.isDrained(),
-      audit: (event) => event._tag === "Requested" ? requested.open : event._tag === "Cancelled" ? cancelled.open : Effect.void,
+      audit: (event) => {
+        if (Predicate.isTagged(event, "Requested")) return requested.open
+        if (Predicate.isTagged(event, "Cancelled")) return cancelled.open
+        return Effect.void
+      },
       stop,
     })
     handler = createHttpRequestHandler({

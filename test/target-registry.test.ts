@@ -107,8 +107,8 @@ describe("TargetRegistry root generations", () => {
     expect(registry.routingRootTarget(7)).toBeUndefined()
     expect([...registry.childTargets.values()]).toEqual([otherChild])
     expect([...registry.childTargetsByTargetId.values()]).toEqual([otherChild])
-    expect(registry.findFrameEventsForChild(child("next-child", "child-target"), () => undefined)).toBeUndefined()
-    expect(registry.findFrameEventsForChild(otherChild, () => undefined)).toBeDefined()
+    expect(registry.findFrameEventsForChild(child("next-child", "child-target"))).toBeUndefined()
+    expect(registry.findFrameEventsForChild(otherChild)).toBeDefined()
   })
 
   it("preserves ownership and reports same-tab root replacement", () => {

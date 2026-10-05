@@ -19,7 +19,6 @@ import {
   SessionAdoptResponse,
   SessionContainer,
   SessionEnsureRequest,
-  SessionEnsureResponse,
   SessionNewRequest,
   SessionsContainer,
   SessionSummary,
@@ -57,7 +56,6 @@ const decodeNetworkStopResponse = Schema.decodeUnknownSync(NetworkStopResponse)
 const decodeAuthenticatedJsonRequest = Schema.decodeUnknownSync(AuthenticatedJsonRequest)
 const decodeAuthenticatedJsonOutcome = Schema.decodeUnknownSync(AuthenticatedJsonOutcome)
 const decodeSessionEnsureRequest = Schema.decodeUnknownSync(SessionEnsureRequest)
-const decodeSessionEnsureResponse = Schema.decodeUnknownSync(SessionEnsureResponse)
 
 const session = {
   id: "rapid-otter-633",
@@ -162,7 +160,7 @@ describe("relay-schema", () => {
 
   it("decodes session ensure and authenticated origin contracts", () => {
     expect(decodeSessionEnsureRequest({ id: "x-live-chat-auth" })).toEqual({ id: "x-live-chat-auth" })
-    expect(decodeSessionEnsureResponse({ session }).session.id).toBe(session.id)
+    expect(decodeSessionContainer({ session }).session.id).toBe(session.id)
     expect(decodeAuthenticatedJsonRequest({
       sessionId: "x-live-chat-auth",
       origin: "https://studio.x.com",
@@ -172,11 +170,12 @@ describe("relay-schema", () => {
       body: { broadcastId: "1" },
       sensitive: true,
     }).sensitive).toBe(true)
-    expect(decodeAuthenticatedJsonOutcome({
-      _tag: "Success",
-      status: 200,
-      value: { ok: true },
-    })._tag).toBe("Success")
+    expect(decodeAuthenticatedJsonOutcome(
+      AuthenticatedJsonOutcome.cases.Success.make({
+        status: 200,
+        value: { ok: true },
+      }),
+    )._tag).toBe("Success")
   })
 
   it("rejects non-JSON bodies and invalid authenticated request limits", () => {

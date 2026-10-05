@@ -2,9 +2,12 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { performance } from "node:perf_hooks"
 import type { JsonObject } from "./protocol.ts"
-import { getObject } from "./relay-helpers.ts"
+import { getNumber, getObject, getString } from "./relay-helpers.ts"
+import type { FlightRecorderSaveResponse, FlightRecorderStatusResponse } from "./relay-schema.ts"
 import {
-  cdpRecordingSize,
+  cdpArtifactType,
+  findByRecordingTarget,
+  prepareCdpScreencastViewport,
   startFfmpegVideoEncoder,
   type RecordingTargetOptions,
   type SendDebuggerCommand,
@@ -47,28 +50,9 @@ export type FlightRecorderStartOptions = {
   readonly frameRate?: number
 }
 
-export type FlightRecorderStatus = {
-  readonly active: boolean
-  readonly tabId?: number
-  readonly sessionId?: string
-  readonly startedAt?: number
-  readonly retentionMs?: number
-  readonly retainedDurationMs?: number
-  readonly frameRate?: number
-  readonly bufferedFrames?: number
-  readonly bufferedBytes?: number
-  readonly sourceFrameCount?: number
-  readonly droppedFrameCount?: number
-  readonly saving?: boolean
-}
+export type FlightRecorderStatus = FlightRecorderStatusResponse
 
-export type FlightRecorderSaveReceipt = {
-  readonly path: string
-  readonly durationMs: number
-  readonly frameCount: number
-  readonly sourceFrameCount: number
-  readonly droppedFrameCount: number
-}
+export type FlightRecorderSaveReceipt = FlightRecorderSaveResponse
 
 export class FlightRecorderRelay {
   private readonly active = new Map<number, ActiveFlightRecorder>()
@@ -105,9 +89,7 @@ export class FlightRecorderRelay {
     }
     this.starting.add(options.tabId)
     try {
-      await this.options.sendDebuggerCommand({ tabId: options.tabId, method: "Page.bringToFront", params: {} })
-      const metrics = await this.options.sendDebuggerCommand({ tabId: options.tabId, method: "Page.getLayoutMetrics", params: {} })
-      const { width, height } = cdpRecordingSize(metrics)
+      const { width, height } = await prepareCdpScreencastViewport(this.options.sendDebuggerCommand, options.tabId)
       const recorder: ActiveFlightRecorder = {
         tabId: options.tabId,
         ...(options.sessionId ? { sessionId: options.sessionId } : {}),
@@ -158,8 +140,8 @@ export class FlightRecorderRelay {
     recorder: ActiveFlightRecorder,
     target: FlightRecorderTarget & { readonly outputPath: string; readonly durationMs?: number },
   ): Promise<FlightRecorderSaveReceipt> {
-    const extension = path.extname(target.outputPath).toLowerCase()
-    if (extension !== ".webm" && extension !== ".mp4") throw new Error("Flight recorder output path must end in .webm or .mp4")
+    const artifactType = cdpArtifactType(target.outputPath)
+    if (!artifactType) throw new Error("Flight recorder output path must end in .webm or .mp4")
     const requestedDuration = target.durationMs ?? Math.min(30_000, recorder.retentionMs)
     if (!Number.isInteger(requestedDuration) || requestedDuration < 1 || requestedDuration > recorder.retentionMs) {
       throw new Error(`Flight recorder durationMs must be an integer from 1 to ${recorder.retentionMs}`)
@@ -177,7 +159,7 @@ export class FlightRecorderRelay {
     try {
       encoder = await (this.options.startVideoEncoder ?? startFfmpegVideoEncoder)({
         outputPath: target.outputPath,
-        artifactType: extension === ".mp4" ? "mp4" : "webm",
+        artifactType,
         frameRate: recorder.frameRate,
         width: recorder.width,
         height: recorder.height,
@@ -221,30 +203,31 @@ export class FlightRecorderRelay {
     if (options.method !== "Page.screencastFrame") return false
     const recorder = this.active.get(options.tabId)
     if (!recorder) return false
-    const frameSessionId = options.params?.sessionId
-    if (typeof frameSessionId === "number") {
+    const frameSessionId = getNumber(options.params, "sessionId")
+    if (frameSessionId !== undefined) {
       void this.options.sendDebuggerCommand({
         tabId: recorder.tabId,
         method: "Page.screencastFrameAck",
         params: { sessionId: frameSessionId },
       }).catch(() => {})
     }
-    if (typeof options.params?.data !== "string") return true
+    const frameData = getString(options.params, "data")
+    if (frameData === undefined) return true
     recorder.sourceFrameCount += 1
-    if (options.params.data.length > Math.ceil(maxBufferedBytes * 4 / 3) + 4) {
+    if (frameData.length > Math.ceil(maxBufferedBytes * 4 / 3) + 4) {
       recorder.droppedFrameCount += 1
       return true
     }
-    const data = Buffer.from(options.params.data, "base64")
+    const data = Buffer.from(frameData, "base64")
     if (data.byteLength > maxBufferedBytes) {
       recorder.droppedFrameCount += 1
       return true
     }
-    const metadata = getObject(options.params.metadata)
+    const surfaceWidth = getNumber(getObject(options.params?.metadata), "deviceWidth")
     const frame: BufferedFrame = {
       data,
       receivedAt: this.monotonicNow(),
-      ...(typeof metadata?.deviceWidth === "number" ? { surfaceWidth: metadata.deviceWidth } : {}),
+      ...(surfaceWidth !== undefined ? { surfaceWidth } : {}),
     }
     recorder.frames.push(frame)
     recorder.bufferedBytes += data.byteLength
@@ -287,10 +270,7 @@ export class FlightRecorderRelay {
   }
 
   private find(target: FlightRecorderTarget): ActiveFlightRecorder | undefined {
-    if (target.tabId !== undefined) return this.active.get(target.tabId)
-    if (target.sessionId) return [...this.active.values()].find((recorder) => recorder.sessionId === target.sessionId)
-    if (this.active.size > 1) throw new Error("Multiple flight recorders are active; provide sessionId or tabId")
-    return this.active.values().next().value
+    return findByRecordingTarget(this.active, target, "Multiple flight recorders are active; provide sessionId or tabId")
   }
 
   private now(): number {

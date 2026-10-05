@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { ConfigProvider, Effect, Layer, Queue, Schema, Sink, Stdio, Stream } from "effect"
+import { ConfigProvider, Effect, Layer, Match, Queue, Schema, Sink, Stdio, Stream } from "effect"
 import { McpSchema, McpServer } from "effect/ai"
 import { spawn } from "node:child_process"
 import fs from "node:fs/promises"
@@ -105,8 +105,12 @@ describe("lazy MCP relay startup", () => {
     const execute = vi.fn<RelayClient.Interface["execute"]>(() => Effect.succeed({ session, text: "ok", isError: false, logs: [] }))
     const sessionNew = vi.fn<RelayClient.Interface["sessionNew"]>(() => Effect.succeed(session))
     const sessionAdopt = vi.fn<RelayClient.Interface["sessionAdopt"]>(() => Effect.succeed({ session, adoptedUrl: "https://example.com/", adoptedTargetId: "target-test" }))
-    const operation = name === "execute" ? execute : name === "session_new" ? sessionNew : sessionAdopt
-    const input = name === "execute" ? { code: "1" } : name === "session_adopt" ? { targetIndex: 0 } : {}
+    const [operation, input] = Match.value(name).pipe(
+      Match.when("execute", () => [execute, { code: "1" }] as const),
+      Match.when("session_new", () => [sessionNew, {}] as const),
+      Match.when("session_adopt", () => [sessionAdopt, { targetIndex: 0 }] as const),
+      Match.exhaustive,
+    )
     const shutdown = vi.fn<RelayClient.Interface["shutdown"]>(() => Effect.succeed({ stopping: true }))
     await Effect.runPromise(Effect.gen(function* () {
       const request = yield* stdioClient(Layer.mock(RelayClient.Service, {

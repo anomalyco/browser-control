@@ -14,8 +14,15 @@ vi.mock("@effect/platform-node", async (importOriginal) => {
   }
 })
 
-import { browserControl, executeJsonEnvelope, formatSessionContinuation, normalizeCliArguments } from "../src/cli.ts"
-import type { ExecuteResponse } from "../src/relay-schema.ts"
+import {
+  browserControl,
+  executeJsonEnvelope,
+  formatRecordingQuality,
+  formatSessionContinuation,
+  normalizeCliArguments,
+  resolveExplicitSessionSelector,
+} from "../src/cli.ts"
+import type { ExecuteResponse, RecordingQuality } from "../src/relay-schema.ts"
 
 const session: ExecuteResponse["session"] = {
   id: "schedules-check",
@@ -155,5 +162,46 @@ describe("CLI boolean defaults", () => {
       Command.runWith(parseOnly, { version: "test" })(args).pipe(Effect.provide(NodeServices.layer)),
     )
     expect(parsed).toMatchObject(expected)
+  })
+})
+
+describe("resolveExplicitSessionSelector", () => {
+  it("accepts positional, flag, and environment selectors in precedence order", () => {
+    expect(resolveExplicitSessionSelector({ positional: "positional", flag: undefined, environment: "environment" })).toBe("positional")
+    expect(resolveExplicitSessionSelector({ positional: undefined, flag: "flag", environment: "environment" })).toBe("flag")
+    expect(resolveExplicitSessionSelector({ positional: undefined, flag: undefined, environment: "environment" })).toBe("environment")
+    expect(resolveExplicitSessionSelector({ positional: undefined, flag: undefined, environment: undefined })).toBeUndefined()
+  })
+
+  it("rejects combining positional and flag selectors", () => {
+    expect(() => resolveExplicitSessionSelector({
+      positional: "positional",
+      flag: "flag",
+      environment: undefined,
+    })).toThrow("Use either a positional session id or --session, not both")
+  })
+})
+
+const quality: RecordingQuality = {
+  width: 1280, height: 720, frameRate: 60,
+  sourceFrameCount: 120, encodedSourceFrameCount: 90,
+  coalescedFrameCount: 25, droppedFrameCount: 5,
+  achievedSourceFrameRate: 40, achievedEncodedSourceFrameRate: 30,
+  screenshotFallback: false, sourceWidth: 2560, sourceHeight: 1273,
+}
+
+describe("recording quality receipt", () => {
+  it("distinguishes source and output rates without claiming distinct motion", () => {
+    const text = formatRecordingQuality(quality)
+    expect(text).toContain("1280×720, output 60 fps")
+    expect(text).toContain("2560×1273 CSS px")
+    expect(text).toContain("120 received (40.0/s), 90 retained (30.0/s), 25 coalesced, 5 dropped")
+    expect(text).toContain("not a measurement of distinct motion")
+  })
+  it("calls out the stop-time screenshot fallback", () => {
+    expect(formatRecordingQuality({ ...quality, screenshotFallback: true, sourceFrameCount: 0 })).toContain("WARNING: no compositor frames arrived")
+  })
+  it("does not fabricate metrics for tab capture or an older relay", () => {
+    expect(formatRecordingQuality(undefined)).toContain("unavailable")
   })
 })

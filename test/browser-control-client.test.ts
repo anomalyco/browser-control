@@ -2,6 +2,7 @@ import http from "node:http"
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest"
 import { Effect, Schema } from "effect"
 import * as BrowserControlClient from "../src/browser-control-client.ts"
+import { AuthenticatedJsonOutcome } from "../src/relay-schema.ts"
 import { browserControlBuildId, browserControlVersion } from "../src/version.ts"
 
 let server: http.Server
@@ -94,7 +95,7 @@ describe("BrowserControlClient", () => {
   })
 
   it("schema-decodes authenticated JSON responses", async () => {
-    authenticatedOutcome = { _tag: "Success", status: 200, value: { rows: [{ id: "1" }] } }
+    authenticatedOutcome = AuthenticatedJsonOutcome.cases.Success.make({ status: 200, value: { rows: [{ id: "1" }] } })
     const result = await Effect.runPromise(Effect.gen(function* () {
       const origin = yield* makeOrigin
       return yield* origin.json({
@@ -107,7 +108,7 @@ describe("BrowserControlClient", () => {
 
   it("returns sensitive values as Redacted and redacts schema failures", async () => {
     const token = "distinctive-secret-chat-token"
-    authenticatedOutcome = { _tag: "Success", status: 200, value: { accessToken: token } }
+    authenticatedOutcome = AuthenticatedJsonOutcome.cases.Success.make({ status: 200, value: { accessToken: token } })
     const redacted = await Effect.runPromise(Effect.gen(function* () {
       const origin = yield* makeOrigin
       return yield* origin.json({
@@ -121,7 +122,7 @@ describe("BrowserControlClient", () => {
     expect(String(redacted)).not.toContain(token)
     expect(BrowserControlClient.reveal(redacted)).toEqual({ accessToken: token })
 
-    authenticatedOutcome = { _tag: "Success", status: 200, value: { accessToken: token } }
+    authenticatedOutcome = AuthenticatedJsonOutcome.cases.Success.make({ status: 200, value: { accessToken: token } })
     const error = await Effect.runPromise(Effect.gen(function* () {
       const origin = yield* makeOrigin
       return yield* origin.json({
@@ -135,7 +136,7 @@ describe("BrowserControlClient", () => {
   })
 
   it("reports mutating transport ambiguity as an unknown outcome", async () => {
-    authenticatedOutcome = { _tag: "RequestFailed", outcome: "unknown" }
+    authenticatedOutcome = AuthenticatedJsonOutcome.cases.RequestFailed.make({ outcome: "unknown" })
     const error = await Effect.runPromise(Effect.gen(function* () {
       const origin = yield* makeOrigin
       return yield* origin.json({

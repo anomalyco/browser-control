@@ -4,6 +4,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { terminateChildProcess } from "./child-process.ts"
+import { isNodeError, writeJsonFileAtomically } from "./fs-durability.ts"
 import { redactKnownValues, type CredentialSlot } from "./network-redaction.ts"
 
 const StoredCredentialSlot = Schema.Struct({
@@ -183,20 +184,7 @@ const writeProfile = Effect.fnUntraced(function* (options: {
   )
   if (existing && sameSlots(existing.slots, profile.slots)) return summary(existing)
   yield* Effect.tryPromise({
-    try: async () => {
-      await fs.mkdir(baseDir, { recursive: true, mode: 0o700 })
-      await fs.chmod(baseDir, 0o700)
-      const temporaryPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`
-      let renamed = false
-      try {
-        await fs.writeFile(temporaryPath, `${JSON.stringify(profile, null, 2)}\n`, { mode: 0o600 })
-        await fs.rename(temporaryPath, filePath)
-        renamed = true
-        await fs.chmod(filePath, 0o600)
-      } finally {
-        if (!renamed) await fs.rm(temporaryPath, { force: true }).catch(() => {})
-      }
-    },
+    try: () => writeJsonFileAtomically(filePath, profile, { dirMode: 0o700 }),
     catch: (cause) => new AuthProfileError({ message: `Could not write auth profile: ${options.name}`, operation: "write", reason: "write-failed", cause }),
   })
   return summary(profile)
@@ -216,15 +204,15 @@ export const status = Effect.fn("AuthProfile.status")(function* (name: string, o
 
 export const run = Effect.fn("AuthProfile.run")(function* (options: AuthRunOptions) {
   if (!options.command.trim()) {
-    return yield* Effect.fail(new AuthProfileError({ message: "Auth command must not be empty", operation: "run", reason: "run-failed" }))
+    return yield* new AuthProfileError({ message: "Auth command must not be empty", operation: "run", reason: "run-failed" })
   }
   const timeoutMs = options.timeoutMs ?? 120_000
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > maximumTimeoutMs) {
-    return yield* Effect.fail(new AuthProfileError({ message: `Auth command timeout must be an integer between 1 and ${maximumTimeoutMs} milliseconds`, operation: "run", reason: "run-failed" }))
+    return yield* new AuthProfileError({ message: `Auth command timeout must be an integer between 1 and ${maximumTimeoutMs} milliseconds`, operation: "run", reason: "run-failed" })
   }
   const maxOutputBytes = options.maxOutputBytes ?? 1_000_000
   if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 0 || maxOutputBytes > maximumRunOutputBytes) {
-    return yield* Effect.fail(new AuthProfileError({ message: `Auth command output limit must be an integer between 0 and ${maximumRunOutputBytes} bytes`, operation: "run", reason: "run-failed" }))
+    return yield* new AuthProfileError({ message: `Auth command output limit must be an integer between 0 and ${maximumRunOutputBytes} bytes`, operation: "run", reason: "run-failed" })
   }
   const profile = yield* read(options.name, { ...(options.baseDir ? { baseDir: options.baseDir } : {}) })
   const startedAt = Date.now()
@@ -382,9 +370,3 @@ function childEnvironment(profile: Readonly<Record<string, string>>): NodeJS.Pro
   )
   return { ...inherited, ...profile }
 }
-
-function isNodeError(value: unknown): value is NodeJS.ErrnoException {
-  return value instanceof Error && "code" in value
-}
-
-export * as AuthProfile from "./auth-profile.ts"

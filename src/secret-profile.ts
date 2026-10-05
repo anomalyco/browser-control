@@ -1,4 +1,3 @@
-import { Effect } from "effect"
 import * as AuthProfile from "./auth-profile.ts"
 
 export type Summary = AuthProfile.AuthProfileSummary
@@ -9,14 +8,10 @@ export type Error = AuthProfile.AuthProfileError
 export const Error = AuthProfile.AuthProfileError
 
 /** Return profile metadata without revealing credential values. */
-export const status = Effect.fn("SecretProfile.status")(function* (name: string, options: StatusOptions = {}) {
-  return yield* AuthProfile.status(name, options)
-})
+export const status = AuthProfile.status
 
 /**
  * Run a trusted credential-bearing worker with profile slots injected as BC_SECRET_N.
  * Known values are redacted from bounded stdout and stderr before they return.
  */
-export const run = Effect.fn("SecretProfile.run")(function* (options: RunOptions) {
-  return yield* AuthProfile.run(options)
-})
+export const run = AuthProfile.run

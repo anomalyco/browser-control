@@ -1,4 +1,4 @@
-import { Context, Effect, FileSystem, Layer, Option, Path, Schema } from "effect"
+import { Context, Effect, FileSystem, Layer, Option, Path, Predicate, Schema } from "effect"
 import os from "node:os"
 import { endpointForPort, portConfig } from "./relay-client.ts"
 
@@ -36,7 +36,7 @@ export interface Interface {
   readonly clear: Effect.Effect<void, SessionStoreError>
 }
 
-export class Service extends Context.Service<Service, Interface>()("browser-control/SessionStore") {}
+export class Service extends Context.Service<Service, Interface>()("@opencode-ai/browser-control/SessionStore") {}
 
 const defaultFilePath = (): string => {
   return `${os.homedir()}/.browser-control/session.json`
@@ -71,7 +71,7 @@ export const make = Effect.fn("SessionStore.make")(function* (options?: {
     .pipe(
       Effect.map(Option.some),
       Effect.catchTag("PlatformError", (error) =>
-        error.reason._tag === "NotFound" ? Effect.succeed(Option.none<string>()) : Effect.fail(error)),
+        Predicate.isTagged(error.reason, "NotFound") ? Effect.succeed(Option.none<string>()) : Effect.fail(error)),
       Effect.mapError(storeError("read")),
       Effect.flatMap(Option.match({
         onNone: () => Effect.succeed({}),
