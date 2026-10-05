@@ -4,3 +4,4 @@ dist/
 extension/dist/
 artifacts/
 tmp/
+crates/bc-studio/target/

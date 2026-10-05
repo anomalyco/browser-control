@@ -18,11 +18,16 @@ import {
   clearGhostCursorCallouts,
   hideGhostCursor as hideGhostCursorOnPage,
   setGhostCursorCaption,
+  setGhostCursorSpotlight,
   showGhostCursor as showGhostCursorOnPage,
   showGhostCursorCallout,
+  showGhostCursorKeys,
+  zoomGhostCursorCamera,
   type GhostCursorCalloutOptions,
   type GhostCursorCaptionOptions,
   type GhostCursorClientOptions,
+  type GhostCursorSpotlightOptions,
+  type GhostCursorZoomOptions,
 } from "./ghost-cursor.ts"
 import type { HandoffOutcome } from "./handoff.ts"
 import * as AuthProfile from "./auth-profile.ts"
@@ -320,6 +325,11 @@ type SandboxGlobals = {
     readonly clearCaption: (options?: { readonly page?: Page }) => Promise<void>
     readonly callout: (target: Locator | string, label: string, options?: GhostCursorCalloutOptions & { readonly page?: Page }) => Promise<void>
     readonly clearCallouts: (options?: { readonly page?: Page }) => Promise<void>
+    readonly zoom: (target: Locator | string | { readonly x: number; readonly y: number } | null, options?: GhostCursorZoomOptions & { readonly page?: Page }) => Promise<void>
+    readonly resetZoom: (options?: { readonly durationMs?: number; readonly page?: Page }) => Promise<void>
+    readonly spotlight: (target: Locator | string | null, options?: GhostCursorSpotlightOptions & { readonly page?: Page }) => Promise<void>
+    readonly clearSpotlight: (options?: { readonly page?: Page }) => Promise<void>
+    readonly keys: (keys: string | readonly string[], label?: string, options?: { readonly page?: Page }) => Promise<void>
   }
   readonly handoff: (message?: string, options?: HandoffCallOptions) => Promise<void>
   readonly demonstrate: (message?: string, options?: HandoffCallOptions) => Promise<DemonstrationResult>
@@ -981,6 +991,24 @@ export class ExecuteSandbox {
         },
         clearCallouts: async (clearOptions) => {
           await clearGhostCursorCallouts({ page: clearOptions?.page ?? page })
+        },
+        zoom: async (target, zoomOptions) => {
+          const { page: targetPage = page, ...rest } = zoomOptions ?? {}
+          await zoomGhostCursorCamera({ page: targetPage, target, zoomOptions: rest })
+        },
+        resetZoom: async (resetOptions) => {
+          const { page: targetPage = page, ...rest } = resetOptions ?? {}
+          await zoomGhostCursorCamera({ page: targetPage, target: null, zoomOptions: rest })
+        },
+        spotlight: async (target, spotlightOptions) => {
+          const { page: targetPage = page, ...rest } = spotlightOptions ?? {}
+          await setGhostCursorSpotlight({ page: targetPage, target, spotlightOptions: rest })
+        },
+        clearSpotlight: async (clearOptions) => {
+          await setGhostCursorSpotlight({ page: clearOptions?.page ?? page, target: null })
+        },
+        keys: async (keys, label, keyOptions) => {
+          await showGhostCursorKeys({ page: keyOptions?.page ?? page, keys, ...(label ? { label } : {}) })
         },
       },
       handoff,
