@@ -15,8 +15,12 @@ describe("target selection", () => {
       .toThrow("Matches: [0] https://example.com/a, [1] https://kit.example/b")
   })
 
-  it("selects by zero-based index", () => {
+  it("selects by zero-based index and auto-selects a single attached target when selection is empty", () => {
     expect(selectTarget({ targets, selection: { index: 1 }, getUrl: (target) => target.url })?.url).toBe("https://kit.example/b")
+    expect(selectTarget({ targets: [targets[0]!], selection: {}, getUrl: (target) => target.url })?.url).toBe("https://example.com/a")
+    expect(() => selectTarget<{ readonly url: string }>({ targets: [], selection: {}, getUrl: (target) => target.url })).toThrow("No attached pages available")
+    expect(() => selectTarget({ targets, selection: {}, getUrl: (target) => target.url }))
+      .toThrow("Multiple attached pages (2); use --target-url or --target-index to choose one. Matches: [0] https://example.com/a, [1] https://kit.example/b")
   })
 
   it("waits for the exact replacement target instead of selecting a same-URL decoy", async () => {

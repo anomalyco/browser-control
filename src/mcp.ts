@@ -32,7 +32,7 @@ type ExecuteArguments = {
 
 type AdoptArguments = {
   readonly session?: string | undefined
-  readonly targetSelection: TargetSelection
+  readonly targetSelection?: TargetSelection
 }
 
 const emptyInputSchema = objectSchema({})
@@ -183,10 +183,10 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
     },
     {
       name: "session_adopt",
-      description: "Make an attached tab the Browser Control session's default page for subsequent bare execute calls.",
+      description: "Make an attached tab the Browser Control session's default page for subsequent bare execute calls. Omit targetUrl and targetIndex when only one user-attached tab is available.",
       inputSchema: objectSchema({
         session: { type: "string", description: "Optional existing Browser Control session id. Explicit ids must already exist; omit this field to use the MCP server's current session, which is created when needed." },
-        targetUrl: { type: "string", description: "Adopt an existing attached page whose URL contains this text. This does not navigate or open a URL." },
+        targetUrl: { type: "string", description: "Adopt an existing attached page whose URL contains this text. Omit when only one user-attached tab is available. This does not navigate or open a URL." },
         targetIndex: { type: "integer", minimum: 0, description: "Adopt the attached page at this zero-based target index." },
       }),
       readOnly: false,
@@ -198,7 +198,7 @@ function makeToolSpecs(relay: RelayClient.Interface, currentSession: CurrentSess
         const result = yield* relay.sessionAdopt({
           sessionId,
           createIfMissing: !args.session,
-          targetSelection: args.targetSelection,
+          ...(args.targetSelection ? { targetSelection: args.targetSelection } : {}),
         })
         establishCurrentSession(sessionId)
         return { ...result, confirmation: `Adopted session '${result.session.id}' default page: ${result.adoptedUrl}` }
@@ -581,12 +581,9 @@ function parseAdoptArguments(input: unknown): AdoptArguments {
   const object = requireObject(input)
   const session = optionalStringField(object, "session")
   const targetSelection = parseMcpTargetSelection(object)
-  if (!targetSelection) {
-    throw new Error("session_adopt requires targetUrl or targetIndex")
-  }
   return {
     ...(session ? { session } : {}),
-    targetSelection,
+    ...(targetSelection ? { targetSelection } : {}),
   }
 }
 

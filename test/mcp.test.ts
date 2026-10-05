@@ -220,6 +220,9 @@ describe("MCP tool results", () => {
           [{ session: "chosen", targetIndex: 0 }, { createIfMissing: false, targetSelection: { index: 0 } }],
           [{ session: "", targetUrl: "", targetIndex: 0 }, { createIfMissing: true, targetSelection: { index: 0 } }],
           [{ session: 42, targetUrl: false, targetIndex: 0 }, { createIfMissing: true, targetSelection: { index: 0 } }],
+          [{}, { createIfMissing: true }],
+          [{ session: "", targetUrl: "" }, { createIfMissing: true }],
+          [{ session: 42, targetUrl: false }, { createIfMissing: true }],
         ] as const) {
           const result = yield* server.callTool({ name: "session_adopt", arguments: args })
           expect(result.isError).toBe(false)
@@ -233,10 +236,6 @@ describe("MCP tool results", () => {
             // Effect.try currently hides the inner parser message at the MCP boundary.
             expect(result).toMatchObject({ isError: true, content: [{ type: "text", text: "An error occurred in Effect.try" }] })
           }
-        }
-        for (const args of [{}, { targetUrl: "" }, { targetUrl: 42 }]) {
-          const result = yield* server.callTool({ name: "session_adopt", arguments: args })
-          expect(result).toMatchObject({ isError: true, content: [{ type: "text", text: "An error occurred in Effect.try" }] })
         }
         const result = yield* server.callTool({ name: "execute", arguments: { code: "" } })
         expect(result).toMatchObject({ isError: true, content: [{ type: "text", text: "An error occurred in Effect.try" }] })

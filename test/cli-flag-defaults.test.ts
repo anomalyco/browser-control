@@ -110,6 +110,16 @@ describe("CLI opt-in boolean flags", { timeout: 15_000 }, () => {
     }])
   })
 
+  it("session adopt allows omitting target selectors when adopting a single attached tab", async () => {
+    const { stdout } = await runCli(["session", "adopt", "--session", session.id])
+
+    expect(stdout).toBe(`Created and adopted session '${session.id}' default page: https://example.test/\n`)
+    expect(requests).toEqual([{
+      route: "POST /cli/session/adopt",
+      body: { sessionId: session.id, createIfMissing: true },
+    }])
+  })
+
   it.each([false, true])("session new accepts --read-only supplied=%s", async (readOnly) => {
     const { stdout, stderr } = await runCli(["session", "new", ...(readOnly ? ["--read-only"] : [])])
 

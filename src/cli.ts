@@ -451,24 +451,23 @@ const sessionAdopt = Command.make(
     const explicitSessionId = Option.getOrUndefined(session) ?? Option.getOrUndefined(yield* sessionIdConfig)
     const targetUrlValue = Option.getOrUndefined(targetUrl)
     const targetIndexValue = Option.getOrUndefined(targetIndex)
-    if (!targetUrlValue && targetIndexValue === undefined) {
-      return yield* Effect.fail(new Error("session adopt requires --target-url or --target-index"))
-    }
     if (targetIndexValue !== undefined && targetIndexValue < 0) {
       return yield* Effect.fail(new Error("Target index must be a non-negative integer"))
     }
     if (targetUrlValue && targetIndexValue !== undefined) {
       return yield* Effect.fail(new Error("Use only one target selector: --target-url or --target-index"))
     }
+    const targetSelection = targetUrlValue
+      ? { urlIncludes: targetUrlValue }
+      : targetIndexValue !== undefined
+      ? { index: targetIndexValue }
+      : undefined
     // An explicit id names the session the agent wants to continue with; creating it here
     // mirrors `session new <id>` and never infers identity from shared current-session state.
     const result = yield* relay.sessionAdopt({
       ...(explicitSessionId ? { sessionId: explicitSessionId } : {}),
       createIfMissing: true,
-      targetSelection: {
-        ...(targetUrlValue ? { urlIncludes: targetUrlValue } : {}),
-        ...(targetIndexValue !== undefined ? { index: targetIndexValue } : {}),
-      },
+      ...(targetSelection ? { targetSelection } : {}),
     })
     yield* Console.log(`${result.session.created ? "Created and adopted" : "Adopted"} session '${result.session.id}' default page: ${result.adoptedUrl}`)
     if (result.session.created) {

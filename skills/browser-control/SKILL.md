@@ -74,11 +74,13 @@ sessions.
 
 To control a tab already open in the user's browser, ask the user to click the
 Browser Control toolbar button on that tab. Select it for one execute or adopt
-it for sticky reuse:
+it for sticky reuse (omit `--target-url` / `targetUrl` when only one user tab is
+attached):
 
 ```bash
-browser-control execute --target-url github.com 'return page.url()'
+browser-control session adopt --session github
 browser-control session adopt --target-url github.com --session github
+browser-control execute --target-url github.com 'return page.url()'
 ```
 
 `execute --target-url` selects a page for that call only. Continuing with just
@@ -285,8 +287,8 @@ Use the least expensive view that answers the question:
   values, custom ARIA range values, and editable content are omitted so they do
   not enter tool output. Await it separately; do not run other operations on
   the same page concurrently.
-- `screenshotWithLabels({ page, path? })` adds visual labels and metadata when
-  layout matters.
+- `screenshotWithLabels({ page?, path? })` adds visual labels and metadata when
+  layout matters, and registers its `e1..eN` labels for `ref()`.
 - `screenshotDiff({ baseline, path?, threshold?, fullPage? })` compares a saved
   PNG (absolute path or Buffer) with the current session page at CSS-pixel scale.
   It returns `matches`, `changedPixels`, `changedRatio` (0..1), dimensions, and a

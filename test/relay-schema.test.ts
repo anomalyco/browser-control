@@ -120,11 +120,14 @@ describe("relay-schema", () => {
       sessionId: "rapid-otter-633",
       createIfMissing: true,
       targetSelection: { urlIncludes: "example.com" },
-    }).targetSelection.urlIncludes).toBe("example.com")
+    }).targetSelection?.urlIncludes).toBe("example.com")
     expect(decodeAdoptRequest({
       createIfMissing: true,
       targetSelection: { index: 0 },
     }).sessionId).toBeUndefined()
+    expect(decodeAdoptRequest({
+      createIfMissing: true,
+    }).targetSelection).toBeUndefined()
     const response = { session: { ...session, created: true }, adoptedUrl: "https://example.com/", adoptedTargetId: "target-2" }
     expect(encodeAdoptResponse(decodeAdoptResponse(response))).toEqual(response)
   })

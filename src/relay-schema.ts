@@ -69,7 +69,7 @@ export interface ExecuteRequest extends Schema.Schema.Type<typeof ExecuteRequest
 export const SessionAdoptRequest = Schema.Struct({
   sessionId: Schema.optionalKey(Schema.String),
   createIfMissing: Schema.Boolean,
-  targetSelection: TargetSelection,
+  targetSelection: Schema.optionalKey(TargetSelection),
 })
 
 export interface SessionAdoptRequest extends Schema.Schema.Type<typeof SessionAdoptRequest> {}

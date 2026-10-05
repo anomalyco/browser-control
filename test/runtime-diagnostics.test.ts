@@ -10,12 +10,14 @@ import {
 
 describe("runtime diagnostics", () => {
   it("names only the bounded context-read timeout through wrapped causes", () => {
-    const error = new PageReadTimeoutError(100)
-    for (const cause of [error, new Error(error.message, { cause: error })]) {
-      expect(runtimeFailureKind(cause)).toBe("timeout")
-      expect(executionContextFailureDiagnostic(cause, undefined)).toBe(
-        "session-page/context-read-timeout; operation=page.title; timeoutMs=100",
-      )
+    for (const operation of ["page.title", "page.content"] as const) {
+      const error = new PageReadTimeoutError(100, operation)
+      for (const cause of [error, new Error(error.message, { cause: error })]) {
+        expect(runtimeFailureKind(cause)).toBe("timeout")
+        expect(executionContextFailureDiagnostic(cause, undefined)).toBe(
+          `session-page/context-read-timeout; operation=${operation}; timeoutMs=100`,
+        )
+      }
     }
   })
 

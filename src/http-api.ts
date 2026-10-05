@@ -437,10 +437,20 @@ function handleCliRequest(options: {
       const body = yield* readJsonBody(options.request)
       const request = yield* decodeRequest(SessionAdoptRequest, body, "session adopt")
       const requestedSessionId = optionalSessionId(request.sessionId)
+      const allTargets = options.registry.listRootTargets()
+      const candidates = request.targetSelection
+        ? allTargets
+        : (() => {
+            const adoptableUserTargets = allTargets.filter((target) =>
+              target.owner === "user" && (!target.browserControlSessionId || target.browserControlSessionId === requestedSessionId)
+            )
+            return adoptableUserTargets.length > 0 ? adoptableUserTargets : allTargets
+          })()
       const selectedTarget = selectTarget({
-        targets: options.registry.listRootTargets(),
-        selection: request.targetSelection,
+        targets: candidates,
+        selection: request.targetSelection ?? {},
         getUrl: (target) => target.targetInfo.url,
+        getIndex: (target) => allTargets.indexOf(target),
       })
       if (!selectedTarget) {
         throw new Error("No page matched target selection")

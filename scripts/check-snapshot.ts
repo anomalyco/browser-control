@@ -98,6 +98,29 @@ try {
     assert.equal(await ref("e1").count(), 1)
     assert.equal(await ref("e2").count(), 1)
   })
+  await check("open Shadow DOM controls are captured and actionable via ref()", async () => {
+    await page.setContent(`
+      <main>
+        <div id="shadow-host"></div>
+        <input id="submit-btn" type="submit" value="Place Order">
+      </main>
+    `)
+    await page.evaluate(() => {
+      const host = document.getElementById("shadow-host")!
+      const root = host.attachShadow({ mode: "open" })
+      root.innerHTML = '<button id="inside-shadow">Confirm Shadow</button>'
+      root.getElementById("inside-shadow")!.addEventListener("click", () => {
+        host.setAttribute("data-clicked", "yes")
+      })
+    })
+    const { snapshot, ref } = createSnapshotHelpers(page, { selectors: new Map() })
+    const outline = await snapshot()
+    assert.match(outline, /button "Confirm Shadow" \[ref=e1\]/)
+    assert.match(outline, /button "Place Order" \[ref=e2\]/)
+    await ref("e1").click()
+    assert.equal(await page.locator("#shadow-host").getAttribute("data-clicked"), "yes")
+    assert.equal(await ref("e2").count(), 1)
+  })
   await check("snapshot tolerates document without body or documentElement", async () => {
     await page.setContent("<main><button>Before</button></main>")
     await page.evaluate(() => {

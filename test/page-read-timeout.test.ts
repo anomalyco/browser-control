@@ -44,3 +44,22 @@ it("preserves read errors and installs the bound only once", async () => {
   await expect(page.title()).rejects.toBe(failure)
   expect(vi.getTimerCount()).toBe(0)
 })
+
+it("bounds hung page.content() reads with the same watchdog", async () => {
+  vi.useFakeTimers()
+  const page = {
+    title: vi.fn<() => Promise<string>>().mockResolvedValue("Title"),
+    content: vi.fn<() => Promise<string>>().mockImplementationOnce(() => new Promise(() => {})).mockResolvedValue("<html></html>"),
+  }
+  installPageReadTimeout(page, 100)
+  const first = page.content().catch((error: unknown) => error)
+  await vi.advanceTimersByTimeAsync(100)
+  expect(await first).toMatchObject({
+    name: "PageReadTimeoutError",
+    operation: "page.content",
+    timeoutMs: 100,
+    message: "page.content() timed out after 100ms: the page execution-context read did not complete; the context may be unavailable or busy.",
+  })
+  await expect(page.content()).resolves.toBe("<html></html>")
+  expect(vi.getTimerCount()).toBe(0)
+})

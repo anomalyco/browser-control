@@ -7,6 +7,7 @@ import {
   defaultAriaSnapshotTimeoutMs,
   fillInputs,
   formatNodeContextWarning,
+  formatPointerInterceptionWarning,
   pageTargetId,
   runUserCode,
 } from "../src/execute.ts"
@@ -144,6 +145,9 @@ describe("user code execution", () => {
     expect(formatNodeContextWarning(await failure('return await fetch("/api/me")'))).toContain("page.evaluate(() => fetch(...))")
     expect(formatNodeContextWarning(await failure("return missingHelper()"))).toBeUndefined()
     expect(formatNodeContextWarning(new Error("page.evaluate: ReferenceError: window is not defined"))).toBeUndefined()
+    expect(formatPointerInterceptionWarning(new Error(
+      "locator.click: Timeout 30000ms exceeded.\nCall log:\n  - <div id=\"cookie-banner\">...</div> from <div id=\"portal\">...</div> intercepts pointer events",
+    ))).toContain("<div id=\"cookie-banner\">...</div> from <div id=\"portal\">...</div> intercepts pointer events")
   })
 })
 

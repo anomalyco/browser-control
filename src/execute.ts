@@ -295,7 +295,7 @@ type SandboxGlobals = {
   readonly modules: typeof nodeModules
   readonly fillInput: (target: InputTarget, value: string) => Promise<void>
   readonly fillInputs: (page: Page, fields: ReadonlyArray<InputField>) => Promise<void>
-  readonly screenshotWithLabels: (options: ScreenshotWithLabelsOptions) => Promise<ScreenshotWithLabelsResult>
+  readonly screenshotWithLabels: (options?: ScreenshotWithLabelsOptions) => Promise<ScreenshotWithLabelsResult>
   readonly screenshotDiff: (options: ScreenshotDiffOptions) => Promise<ScreenshotDiffResult>
   readonly ariaSnapshot: AriaSnapshotHelper
   readonly snapshot: SnapshotHelper
@@ -422,8 +422,9 @@ type HideGhostCursorOptions = {
 }
 
 type ScreenshotWithLabelsOptions = {
-  readonly page: Page
+  readonly page?: Page
   readonly path?: string
+  readonly registry?: SnapshotRefRegistry
 }
 
 type ScreenshotWithLabelsResult = {
@@ -595,6 +596,7 @@ export class ExecuteSandbox {
             logSummary,
             diagnostic === protectedExtensionUiDiagnostic ? protectedExtensionUiWarning : undefined,
             error instanceof ExecuteCodeError ? formatNodeContextWarning(error.originalError) : undefined,
+            error instanceof ExecuteCodeError ? formatPointerInterceptionWarning(error.originalError) : formatPointerInterceptionWarning(error),
           )
           return {
             text: this.networkCapture.redactText(error instanceof ExecuteCodeError ? error.stack ?? error.message : error.message),
@@ -932,7 +934,11 @@ export class ExecuteSandbox {
       modules: nodeModules,
       fillInput: (target, value) => fillInput({ page, target, value }),
       fillInputs,
-      screenshotWithLabels,
+      screenshotWithLabels: (screenshotOptions = {}) => screenshotWithLabels({
+        ...screenshotOptions,
+        page: screenshotOptions.page ?? page,
+        registry: this.snapshotRefs,
+      }),
       screenshotDiff: createScreenshotDiff(page),
       ariaSnapshot,
       snapshot,
@@ -1297,10 +1303,12 @@ export function selectTarget<T>({
   targets,
   selection,
   getUrl,
+  getIndex,
 }: {
   readonly targets: readonly T[]
   readonly selection: ExecuteTargetSelection
   readonly getUrl: (target: T) => string
+  readonly getIndex?: (target: T, fallbackIndex: number) => number
 }): T | undefined {
   if (selection.urlIncludes && selection.index !== undefined) {
     throw new TargetSelectionError({ reason: "invalid", message: "Use only one target selector: --target-url or --target-index" })
@@ -1316,7 +1324,7 @@ export function selectTarget<T>({
       })
     }
     if (matches.length > 1) {
-      const candidates = targets.flatMap((candidate, index) => matches.includes(candidate) ? [`[${index}] ${getUrl(candidate)}`] : [])
+      const candidates = targets.flatMap((candidate, index) => matches.includes(candidate) ? [`[${getIndex ? getIndex(candidate, index) : index}] ${getUrl(candidate)}`] : [])
       throw new TargetSelectionError({
         reason: "ambiguous",
         message: `Multiple attached pages (${matches.length}) match URL ${selection.urlIncludes}; use a more specific --target-url or --target-index. Matches: ${candidates.join(", ")}`,
@@ -1337,10 +1345,17 @@ export function selectTarget<T>({
     }
     return target
   }
+  if (targets.length === 0) {
+    throw new TargetSelectionError({
+      reason: "not-found",
+      message: "No attached pages available. Attach the intended user tab with the Browser Control toolbar first.",
+    })
+  }
   if (targets.length > 1) {
+    const candidates = targets.map((candidate, index) => `[${getIndex ? getIndex(candidate, index) : index}] ${getUrl(candidate)}`)
     throw new TargetSelectionError({
       reason: "ambiguous",
-      message: `Multiple attached pages (${targets.length}); use --target-url or --target-index to choose one`,
+      message: `Multiple attached pages (${targets.length}); use --target-url or --target-index to choose one. Matches: ${candidates.join(", ")}`,
     })
   }
   return targets[0]
@@ -1492,7 +1507,8 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         if (ariaLabel) return normalize(ariaLabel)
         const labelledBy = element.getAttribute("aria-labelledby")
         if (labelledBy) {
-          const labelled = normalize(labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.textContent ?? "").join(" "))
+          const rootNode = element.getRootNode() as Document | ShadowRoot
+          const labelled = normalize(labelledBy.split(/\s+/).map((id) => (rootNode.getElementById?.(id) ?? document.getElementById(id))?.textContent ?? "").join(" "))
           if (labelled) return labelled
         }
         return ""
@@ -1516,7 +1532,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
             if (ancestor === element) break
             ancestor = ancestor.parentElement
           }
-          if (!hidden && !parent?.closest("input, textarea, select, script, style")) {
+          if (!hidden && !parent?.closest("input, textarea, select, script, style, noscript, template")) {
             if (node.nodeType === Node.TEXT_NODE) parts.push(node.textContent ?? "")
             else if (node instanceof HTMLImageElement) parts.push(node.getAttribute("alt") ?? "")
           }
@@ -1532,6 +1548,10 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           if (label) {
             const labelText = safeText(label)
             if (labelText) return labelText
+          }
+          if (element instanceof HTMLInputElement && (element.type === "button" || element.type === "submit" || element.type === "reset")) {
+            const buttonValue = normalize(element.value || (element.type === "submit" ? "Submit" : element.type === "reset" ? "Reset" : ""))
+            if (buttonValue) return buttonValue
           }
           const title = titleName(element)
           if (title) return title
@@ -1675,17 +1695,41 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         if (element instanceof HTMLFieldSetElement) details.push(`${element.elements.length} controls`)
         return details.length ? details.join(" ") : undefined
       }
-      const cssPath = (element: Element): string => {
+      const isShadowRoot = (node: unknown): node is ShadowRoot =>
+        typeof ShadowRoot !== "undefined" && node instanceof ShadowRoot
+      const parentElementOrHost = (node: Element | null): Element | null => {
+        if (!node) return null
+        if (node.parentElement) return node.parentElement
+        const rootNode = node.getRootNode?.()
+        return isShadowRoot(rootNode) ? rootNode.host : null
+      }
+      const querySelectorAllDeep = (scope: Element | Document | ShadowRoot, selector: string): Element[] => {
+        if (!scope.children) {
+          return Array.from(scope.querySelectorAll(selector))
+        }
+        const results: Element[] = []
+        const visit = (node: Element | Document | ShadowRoot) => {
+          for (const child of Array.from(node.children ?? [])) {
+            if (child.matches(selector)) results.push(child)
+            if (child.shadowRoot) visit(child.shadowRoot)
+            visit(child)
+          }
+        }
+        if (scope instanceof Element && scope.shadowRoot) visit(scope.shadowRoot)
+        visit(scope)
+        return results
+      }
+      const localCssPath = (element: Element, scope: Document | ShadowRoot): string => {
         const id = element.getAttribute("id")
         if (id) {
           const candidate = `#${CSS.escape(id)}`
-          if (document.querySelectorAll(candidate).length === 1) return candidate
+          if (scope.querySelectorAll(candidate).length === 1) return candidate
         }
         for (const attribute of ["data-testid", "data-test", "name", "aria-label", "placeholder"]) {
           const value = element.getAttribute(attribute)
           if (value) {
             const candidate = `[${attribute}="${CSS.escape(value)}"]`
-            if (document.querySelectorAll(candidate).length === 1) return candidate
+            if (scope.querySelectorAll(candidate).length === 1) return candidate
           }
         }
         const tag = element.tagName.toLowerCase()
@@ -1693,12 +1737,25 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         const roleSuffix = role ? `[role="${quote(role)}"]` : ""
         for (const className of element.classList) {
           const candidate = `${tag}.${CSS.escape(className)}${roleSuffix}`
-          if (document.querySelectorAll(candidate).length === 1) return candidate
+          if (scope.querySelectorAll(candidate).length === 1) return candidate
         }
         const parent = element.parentElement
-        if (!parent) return tag
+        if (!parent) {
+          if (isShadowRoot(scope)) {
+            const siblings = Array.from(scope.children).filter((sibling) => sibling.tagName === element.tagName)
+            return `${tag}:nth-of-type(${siblings.indexOf(element) + 1})`
+          }
+          return tag
+        }
         const siblings = Array.from(parent.children).filter((sibling) => sibling.tagName === element.tagName)
-        return `${cssPath(parent)} > ${tag}:nth-of-type(${siblings.indexOf(element) + 1})`
+        return `${localCssPath(parent, scope)} > ${tag}:nth-of-type(${siblings.indexOf(element) + 1})`
+      }
+      const cssPath = (element: Element): string => {
+        const rootNode = element.getRootNode?.()
+        if (isShadowRoot(rootNode)) {
+          return `${cssPath(rootNode.host)} >> ${localCssPath(element, rootNode)}`
+        }
+        return localCssPath(element, document)
       }
       const headingDepth = (element: Element): number => {
         const ownLevel = /^H([1-6])$/.exec(element.tagName)?.[1]
@@ -1725,10 +1782,10 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       }
       const structuralParentKeys = (element: Element): string[] => {
         const keys: string[] = []
-        let parent = element.parentElement
+        let parent = parentElementOrHost(element)
         while (parent && parent !== root) {
           if (parent.matches(structuralSelector)) keys.push(structuralKey(parent))
-          parent = parent.parentElement
+          parent = parentElementOrHost(parent)
         }
         return keys
       }
@@ -1785,7 +1842,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       ].join(",")
       const candidates = [
         ...(root.matches(candidateSelector) ? [root] : []),
-        ...Array.from(root.querySelectorAll(candidateSelector)),
+        ...querySelectorAllDeep(root, candidateSelector),
       ]
       const collapsedNavigation = new Set<Element>()
       let reservedLists = 0
@@ -2215,14 +2272,38 @@ export async function fillInputs(page: Page, fields: ReadonlyArray<InputField>):
   }
 }
 
-async function screenshotWithLabels(options: ScreenshotWithLabelsOptions): Promise<ScreenshotWithLabelsResult> {
+async function screenshotWithLabels(options: ScreenshotWithLabelsOptions = {}): Promise<ScreenshotWithLabelsResult> {
+  if (!options.page) {
+    throw new Error("screenshotWithLabels requires a page")
+  }
   if (options.path !== undefined && !path.isAbsolute(options.path)) {
     throw new Error("screenshotWithLabels requires an absolute path")
   }
 
-  const labels = await showScreenshotLabels(options.page)
+  const page = options.page
+  const labels = await showScreenshotLabels(page)
+  if (options.registry) {
+    const registry = options.registry
+    registry.removeNavigationListener?.()
+    registry.selectors.clear()
+    registry.page = page
+    registry.url = page.url()
+    for (const label of labels) {
+      registry.selectors.set(label.ref, {
+        selector: label.selector,
+        role: "screenshot-label",
+      })
+    }
+    const onFrameNavigated = (frame: Frame) => {
+      if (frame !== page.mainFrame()) return
+      invalidateSnapshotDocument(registry)
+    }
+    const removeNavigationListener = () => page.off("framenavigated", onFrameNavigated)
+    page.on("framenavigated", onFrameNavigated)
+    registry.removeNavigationListener = removeNavigationListener
+  }
   try {
-    const screenshot = await options.page.screenshot(options.path ? { path: options.path } : {})
+    const screenshot = await page.screenshot(options.path ? { path: options.path } : {})
     return {
       ...(options.path ? { path: options.path } : { image: screenshot }),
       size: screenshot.byteLength,
@@ -2230,7 +2311,7 @@ async function screenshotWithLabels(options: ScreenshotWithLabelsOptions): Promi
       labels,
     }
   } finally {
-    await hideScreenshotLabels(options.page)
+    await hideScreenshotLabels(page)
   }
 }
 
@@ -2634,6 +2715,16 @@ export function formatNodeContextWarning(error: Error): string | undefined {
     return "Execute code runs in Node, so fetch has no page origin or cookies. Use page.evaluate(() => fetch(...)) for same-origin requests."
   }
   return undefined
+}
+
+const pointerInterceptionPattern = /(<[a-zA-Z][^>\n]*>[^\n]*?)\s+intercepts pointer events/
+
+/** Extract the covering element when Playwright times out because another element intercepts pointer events. */
+export function formatPointerInterceptionWarning(error: unknown): string | undefined {
+  if (!(error instanceof Error)) return undefined
+  const blocker = pointerInterceptionPattern.exec(error.message)?.[1]
+  if (!blocker) return undefined
+  return `Pointer action was blocked because ${blocker} intercepts pointer events. Dismiss the covering dialog/banner or scroll the target clear of sticky chrome instead of retrying the same click.`
 }
 
 export async function runUserCode({ code, globals }: { readonly code: string; readonly globals: SandboxGlobals }): Promise<{
