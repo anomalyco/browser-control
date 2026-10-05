@@ -1423,7 +1423,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       tabId: options.tabId,
       method: "Runtime.evaluate",
       params: { expression: ghostCursorMouseActionExpression(action), awaitPromise: true },
-    }).pipe(Effect.timeout("600 millis"), Effect.ignore)
+    }).pipe(Effect.timeout("2 seconds"), Effect.ignore)
   })
 
   function clearTabRuntimeState(tabId: number): void {
