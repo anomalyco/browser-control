@@ -151,8 +151,6 @@ function renderStatus(): void {
     `
     const status = document.createElement("div")
     status.id = "__browser_control_status__"
-    status.setAttribute("role", "status")
-    status.setAttribute("aria-live", "polite")
     shadow.append(style, status)
   }
 
@@ -165,6 +163,7 @@ function renderStatus(): void {
   statusElement.title = view.title
   statusElement.setAttribute("aria-label", view.title)
   statusElement.dataset.tone = view.tone
+  host.setAttribute("aria-hidden", String(view.completion === undefined))
   host.dataset.interactive = String(view.completion !== undefined)
   host.dataset.waiting = String(view.completion !== undefined)
   host.shadowRoot?.getElementById("__browser_control_vignette__")?.remove()

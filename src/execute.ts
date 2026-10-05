@@ -51,6 +51,7 @@ const timedOut = Symbol("timed-out")
 export const downloadCapabilityErrorMessage = "Downloads are unavailable in Browser Control extension-backed tabs: Chromium blocks Browser.setDownloadBehavior and Page.setDownloadBehavior through chrome.debugger, so Playwright cannot retain an artifact for download.saveAs(). Fetch the response in the page and write the returned bytes with fs when the site exposes them."
 const downloadGuardedPages = new WeakSet<Page>()
 const downloadGuardedContexts = new WeakSet<BrowserContext>()
+const viewportZoomGuardedPages = new WeakSet<Page>()
 
 class PlaywrightOperationError extends Schema.TaggedError<PlaywrightOperationError>()(
   "Execute.PlaywrightOperationError",
@@ -548,6 +549,8 @@ export class ExecuteSandbox {
   private pageCrashed = false
   private pageProtectedUi = false
   private pendingTargetRebind: "replaced" | "repaired" | undefined
+  private lastKnownNonBlankUrl: string | undefined
+  private recreatedFromClosedUrl: string | undefined
   private readonly state: Record<string, unknown> = {}
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private readonly networkCapture = new NetworkCapture.Recorder()
@@ -610,7 +613,7 @@ export class ExecuteSandbox {
             diagnostic === protectedExtensionUiDiagnostic ? protectedExtensionUiWarning : undefined,
             error instanceof ExecuteCodeError ? formatNodeContextWarning(error.originalError) : undefined,
             error instanceof ExecuteCodeError ? formatPointerInterceptionWarning(error.originalError) : formatPointerInterceptionWarning(error),
-            formatLocatorFailurePageWarning(error instanceof ExecuteCodeError ? error.originalError : error, aftermath),
+            formatLocatorFailurePageWarning(error instanceof ExecuteCodeError ? error.originalError : error, aftermath, this.recreatedFromClosedUrl),
           )
           return {
             text: this.networkCapture.redactText(error instanceof ExecuteCodeError ? error.stack ?? error.message : error.message),
@@ -864,6 +867,7 @@ export class ExecuteSandbox {
       page = await this.getSessionPage({ context, ...(targetSelection ? { targetSelection } : {}) })
     }
     installPageReadTimeout(page)
+    this.installViewportZoomGuard(page)
     this.networkCapture.bindPage(this.page)
     return { browser, context, page }
   }
@@ -1015,6 +1019,9 @@ export class ExecuteSandbox {
     if (this.defaultPageTargetId !== targetId) {
       return false
     }
+    if (this.lastKnownNonBlankUrl) {
+      this.recreatedFromClosedUrl = this.lastKnownNonBlankUrl
+    }
     this.unbindDefaultPage(undefined)
     if (!this.pendingWarnings.includes(defaultPageClosedWarning)) {
       this.pendingWarnings.push(defaultPageClosedWarning)
@@ -1044,6 +1051,13 @@ export class ExecuteSandbox {
       : undefined)
   }
 
+  private recordNonBlankUrl(url: string | null | undefined): void {
+    if (url && url !== "about:blank" && !url.startsWith("chrome-error://")) {
+      this.lastKnownNonBlankUrl = url
+      this.recreatedFromClosedUrl = undefined
+    }
+  }
+
   private bindDefaultPage(page: Page, targetId: string | undefined, ownsPage: boolean, notify: boolean): void {
     this.clearPageListeners()
     this.page = page
@@ -1054,8 +1068,12 @@ export class ExecuteSandbox {
     this.defaultPageTargetId = targetId
     this.ownsPage = ownsPage
     this.pendingTargetRebind = undefined
+    this.recordNonBlankUrl(safePageUrl(page))
     const close = () => {
       if (this.page !== page) return
+      if (this.lastKnownNonBlankUrl) {
+        this.recreatedFromClosedUrl = this.lastKnownNonBlankUrl
+      }
       this.unbindDefaultPage(undefined, {
         pageCrashed: this.pageCrashed,
         pageProtectedUi: this.pageProtectedUi,
@@ -1063,7 +1081,11 @@ export class ExecuteSandbox {
       })
     }
     const navigate = (frame: Frame) => {
-      if (this.page === page && frame === page.mainFrame()) this.pageCrashed = false
+      if (this.page === page && frame === page.mainFrame()) {
+        this.pageCrashed = false
+        this.recordNonBlankUrl(frame.url())
+        page.setDefaultTimeout(30_000)
+      }
     }
     this.boundPageListeners = { page, close, navigate }
     page.once("close", close)
@@ -1191,6 +1213,9 @@ export class ExecuteSandbox {
       }
     }
     if (this.page?.isClosed()) {
+      if (this.lastKnownNonBlankUrl) {
+        this.recreatedFromClosedUrl = this.lastKnownNonBlankUrl
+      }
       this.unbindDefaultPage(undefined, {
         pageCrashed: this.pageCrashed,
         pageProtectedUi: this.pageProtectedUi,
@@ -1201,7 +1226,65 @@ export class ExecuteSandbox {
     const page = await context.newPage()
     const targetId = await resolvePageTargetId(page)
     this.bindDefaultPage(page, targetId, true, true)
+    if (this.recreatedFromClosedUrl) {
+      this.installClosedPageReplacementGuard(page)
+    }
     return page
+  }
+
+  private installClosedPageReplacementGuard(page: Page): void {
+    page.setDefaultTimeout(2_500)
+    const restoreTimeout = () => {
+      this.recreatedFromClosedUrl = undefined
+      page.setDefaultTimeout(30_000)
+    }
+    const originalGoto = page.goto.bind(page)
+    const originalSetContent = page.setContent.bind(page)
+    Object.defineProperty(page, "goto", {
+      configurable: true,
+      value: async (...args: Parameters<Page["goto"]>) => {
+        restoreTimeout()
+        return await originalGoto(...args)
+      },
+    })
+    Object.defineProperty(page, "setContent", {
+      configurable: true,
+      value: async (...args: Parameters<Page["setContent"]>) => {
+        restoreTimeout()
+        return await originalSetContent(...args)
+      },
+    })
+  }
+
+  private installViewportZoomGuard(page: Page): void {
+    if (viewportZoomGuardedPages.has(page)) return
+    const originalSetViewportSize = page.setViewportSize.bind(page)
+    Object.defineProperty(page, "setViewportSize", {
+      configurable: true,
+      value: async (size: { width: number; height: number }) => {
+        await originalSetViewportSize(size)
+        try {
+          const measured = await withTimeout(
+            page.evaluate(() => ({
+              innerWidth: window.innerWidth,
+              innerHeight: window.innerHeight,
+              dpr: window.devicePixelRatio,
+            })),
+            1_000,
+          )
+          if (
+            measured !== timedOut
+            && (Math.abs(measured.innerWidth - size.width) > 2 || Math.abs(measured.innerHeight - size.height) > 2)
+          ) {
+            const warning = `Viewport size ${size.width}x${size.height} resulted in CSS viewport ${measured.innerWidth}x${measured.innerHeight} (devicePixelRatio=${Number(measured.dpr.toFixed(3))}) due to browser zoom on this origin.`
+            if (!this.pendingWarnings.includes(warning)) {
+              this.pendingWarnings.push(warning)
+            }
+          }
+        } catch {}
+      },
+    })
+    viewportZoomGuardedPages.add(page)
   }
 
   /**
@@ -2817,17 +2900,27 @@ export function formatPointerInterceptionWarning(error: unknown): string | undef
   return `Pointer action was blocked because ${blocker} intercepts pointer events. Dismiss the covering dialog/banner or scroll the target clear of sticky chrome instead of retrying the same click.`
 }
 
-function formatLocatorFailurePageWarning(error: unknown, aftermath: ExecuteAftermath | undefined): string | undefined {
+function formatBoundedPageUrl(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl)
+    return parsed.origin === "null" ? rawUrl.slice(0, 96) : `${parsed.origin}${parsed.pathname}`.slice(0, 120)
+  } catch {
+    return rawUrl.slice(0, 96)
+  }
+}
+
+function formatLocatorFailurePageWarning(
+  error: unknown,
+  aftermath: ExecuteAftermath | undefined,
+  recreatedFromClosedUrl?: string,
+): string | undefined {
   if (!(error instanceof Error) || !locatorFailurePattern.test(error.message)) return undefined
   const rawUrl = aftermath?.endUrl ?? aftermath?.startUrl
   if (!rawUrl) return undefined
-  try {
-    const parsed = new URL(rawUrl)
-    const boundedUrl = parsed.origin === "null" ? rawUrl.slice(0, 96) : `${parsed.origin}${parsed.pathname}`.slice(0, 120)
-    return `Locator failed on page ${boundedUrl}. Run snapshot() to inspect current controls.`
-  } catch {
-    return undefined
+  if (rawUrl === "about:blank" && recreatedFromClosedUrl) {
+    return `Locator failed on about:blank because the previous session page (${formatBoundedPageUrl(recreatedFromClosedUrl)}) was closed. Call page.goto(...) to reopen it before querying controls.`
   }
+  return `Locator failed on page ${formatBoundedPageUrl(rawUrl)}. Run snapshot() to inspect current controls.`
 }
 
 export async function runUserCode({ code, globals }: { readonly code: string; readonly globals: SandboxGlobals }): Promise<{
