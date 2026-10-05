@@ -1059,8 +1059,8 @@ async function createFfmpegVideoEncoder(options: {
 }): Promise<VideoEncoder> {
   const temporaryOutputPath = `${options.outputPath}.partial-${process.pid}-${crypto.randomUUID()}`
   const outputArgs = options.artifactType === "webm"
-    ? ["-c:v", "libvpx", "-crf", "8", "-deadline", "realtime", "-cpu-used", "8", "-b:v", "2M", "-threads", "1"]
-    : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+    ? ["-c:v", "libvpx", "-crf", "4", "-deadline", "good", "-cpu-used", "4", "-b:v", "6M", "-threads", "2"]
+    : ["-c:v", "libx264", "-preset", "fast", "-crf", "14", "-tune", "animation", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
   const child = spawn("ffmpeg", [
     "-hide_banner",
     "-loglevel",

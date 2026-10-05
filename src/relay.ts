@@ -1330,6 +1330,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     const sessionId = message.sessionId
     const announced = sessionId !== undefined && cdpClients.hasSession(socket, sessionId)
+    yield* applyGhostCursorMouseEvent({ tabId, message }).pipe(Effect.ignore)
     const result = yield* (message.method === "Runtime.enable" && sessionId
       ? cdpRuntime.enable(route, command.params, () => clientRoutesSession(socket, sessionId) && (!announced || cdpClients.hasSession(socket, sessionId)), announced ? socket : undefined)
       : sendDebuggerCommand(command)).pipe(
@@ -1340,7 +1341,6 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         })),
         Effect.tap(() => Effect.sync(() => setProtectedUi(tabId, false))),
       )
-    yield* applyGhostCursorMouseEvent({ tabId, message }).pipe(Effect.ignore)
     return result
   })
 
@@ -1422,8 +1422,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     yield* sendDebuggerCommand({
       tabId: options.tabId,
       method: "Runtime.evaluate",
-      params: { expression: ghostCursorMouseActionExpression(action) },
-    })
+      params: { expression: ghostCursorMouseActionExpression(action), awaitPromise: true },
+    }).pipe(Effect.timeout("600 millis"), Effect.ignore)
   })
 
   function clearTabRuntimeState(tabId: number): void {

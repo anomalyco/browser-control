@@ -14,7 +14,16 @@ import buffer from "node:buffer"
 import http from "node:http"
 import https from "node:https"
 import zlib from "node:zlib"
-import { hideGhostCursor as hideGhostCursorOnPage, showGhostCursor as showGhostCursorOnPage, type GhostCursorClientOptions } from "./ghost-cursor.ts"
+import {
+  clearGhostCursorCallouts,
+  hideGhostCursor as hideGhostCursorOnPage,
+  setGhostCursorCaption,
+  showGhostCursor as showGhostCursorOnPage,
+  showGhostCursorCallout,
+  type GhostCursorCalloutOptions,
+  type GhostCursorCaptionOptions,
+  type GhostCursorClientOptions,
+} from "./ghost-cursor.ts"
 import type { HandoffOutcome } from "./handoff.ts"
 import * as AuthProfile from "./auth-profile.ts"
 import * as AuthenticatedOrigin from "./authenticated-origin.ts"
@@ -306,6 +315,10 @@ type SandboxGlobals = {
   readonly ghostCursor: {
     readonly show: (options?: ShowGhostCursorOptions) => Promise<void>
     readonly hide: (options?: HideGhostCursorOptions) => Promise<void>
+    readonly caption: (title: string | null, options?: GhostCursorCaptionOptions & { readonly page?: Page }) => Promise<void>
+    readonly clearCaption: (options?: { readonly page?: Page }) => Promise<void>
+    readonly callout: (target: Locator | string, label: string, options?: GhostCursorCalloutOptions & { readonly page?: Page }) => Promise<void>
+    readonly clearCallouts: (options?: { readonly page?: Page }) => Promise<void>
   }
   readonly handoff: (message?: string, options?: HandoffCallOptions) => Promise<void>
   readonly demonstrate: (message?: string, options?: HandoffCallOptions) => Promise<DemonstrationResult>
@@ -949,6 +962,20 @@ export class ExecuteSandbox {
       ghostCursor: {
         show: showGhostCursor,
         hide: hideGhostCursor,
+        caption: async (title, captionOptions) => {
+          const { page: targetPage = page, ...rest } = captionOptions ?? {}
+          await setGhostCursorCaption({ page: targetPage, title, captionOptions: rest })
+        },
+        clearCaption: async (clearOptions) => {
+          await setGhostCursorCaption({ page: clearOptions?.page ?? page, title: null })
+        },
+        callout: async (target, label, calloutOptions) => {
+          const { page: targetPage = page, ...rest } = calloutOptions ?? {}
+          await showGhostCursorCallout({ page: targetPage, target, label, calloutOptions: rest })
+        },
+        clearCallouts: async (clearOptions) => {
+          await clearGhostCursorCallouts({ page: clearOptions?.page ?? page })
+        },
       },
       handoff,
       demonstrate,
