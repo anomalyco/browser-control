@@ -582,10 +582,17 @@ const status = Command.make(
       yield* Console.log("Sessions: none")
     } else {
       yield* Console.log("Sessions:")
-      yield* Effect.forEach(sessions, (item) => {
+      const activeSessions = sessions.filter((item) => item.id === current || item.connected || item.pageUrl !== null || item.stateKeys.length > 0 || item.readOnly)
+      const idleSessions = sessions.filter((item) => !activeSessions.includes(item))
+      const shownSessions = activeSessions.length > 0 ? activeSessions : idleSessions.slice(0, 5)
+      const omittedIdleCount = activeSessions.length > 0 ? idleSessions.length : Math.max(0, idleSessions.length - shownSessions.length)
+      yield* Effect.forEach(shownSessions, (item) => {
         const marker = item.id === current ? "*" : " "
         return Console.log(`${marker} ${item.id} ${item.pageUrl ?? "no page yet"}`)
       })
+      if (omittedIdleCount > 0) {
+        yield* Console.log(`  (${omittedIdleCount} idle session(s) with no page omitted; run browser-control session list to view all)`)
+      }
     }
     if (targets.length === 0) {
       yield* Console.log("Targets: none")
