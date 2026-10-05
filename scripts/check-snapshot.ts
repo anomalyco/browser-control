@@ -98,6 +98,40 @@ try {
     assert.equal(await ref("e1").count(), 1)
     assert.equal(await ref("e2").count(), 1)
   })
+  await check("inline code and React SSR comment nodes match Playwright getByRole", async () => {
+    await page.setContent(`
+      <main>
+        <a href="#open"><div>Open</div><span aria-hidden="true">183</span><span>&nbsp;(<!-- -->183<!-- -->)</span></a>
+        <a href="#issue"><span><code>@effect/atom-react</code>: <code>getServerSnapshot</code> mismatch, see <code>Atom</code></span></a>
+      </main>
+    `)
+    const { snapshot, ref } = createSnapshotHelpers(page, { selectors: new Map() })
+    const outline = await snapshot()
+    assert.match(outline, /link "Open \(183\)" \[ref=e1\]/)
+    assert.match(outline, /link "@effect\/atom-react: getServerSnapshot mismatch, see Atom" \[ref=e2\]/)
+    assert.equal(await ref("e1").count(), 1)
+    assert.equal(await ref("e2").count(), 1)
+  })
+  await check("display:contents main and table rows remain visible in snapshot", async () => {
+    await page.setContent(`
+      <nav><a href="#nav">Global Nav</a></nav>
+      <main style="display: contents">
+        <div>
+          <h1>ShadowRoot</h1>
+          <table>
+            <tr style="display: contents"><th style="display: block">Property</th><td style="display: block"><a href="#mode">ShadowRoot.mode</a></td></tr>
+          </table>
+        </div>
+      </main>
+    `)
+    const { snapshot, ref } = createSnapshotHelpers(page, { selectors: new Map() })
+    const outline = await snapshot()
+    assert.doesNotMatch(outline, /Global Nav/)
+    assert.match(outline, /heading "ShadowRoot" \[level=1\]/)
+    assert.match(outline, /row "Property: ShadowRoot\.mode"/)
+    assert.match(outline, /link "ShadowRoot\.mode" \[ref=e1\]/)
+    assert.equal(await ref("e1").count(), 1)
+  })
   await check("open Shadow DOM controls are captured and actionable via ref()", async () => {
     await page.setContent(`
       <main>

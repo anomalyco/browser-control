@@ -1498,9 +1498,17 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       }
       const quote = (value: string): string => value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
       const isVisible = (element: Element): boolean => {
-        const rect = element.getBoundingClientRect()
         const style = window.getComputedStyle(element)
-        return rect.width >= 1 && rect.height >= 1 && style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0"
+        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false
+        if (style.display === "contents") {
+          const children = [
+            ...Array.from(element.children ?? []),
+            ...Array.from(element.shadowRoot?.children ?? []),
+          ]
+          return children.some(isVisible)
+        }
+        const rect = element.getBoundingClientRect()
+        return rect.width >= 1 && rect.height >= 1
       }
       const explicitAriaName = (element: Element): string => {
         const ariaLabel = element.getAttribute("aria-label")
@@ -1518,6 +1526,16 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       const safeText = (element: Element): string => {
         const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT)
         const parts: string[] = []
+        const nearestBlock = (start: Element | null): Element => {
+          let current = start
+          while (current && current !== element && element.contains(current)) {
+            const display = window.getComputedStyle(current).display
+            if (display && display !== "inline" && display !== "contents") return current
+            current = current.parentElement
+          }
+          return element
+        }
+        let lastBlock: Element | undefined
         let node = walker.nextNode()
         while (node) {
           const parent = node instanceof Element ? node : node.parentElement
@@ -1533,12 +1551,32 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
             ancestor = ancestor.parentElement
           }
           if (!hidden && !parent?.closest("input, textarea, select, script, style, noscript, template")) {
-            if (node.nodeType === Node.TEXT_NODE) parts.push(node.textContent ?? "")
-            else if (node instanceof HTMLImageElement) parts.push(node.getAttribute("alt") ?? "")
+            if (node.nodeType === Node.TEXT_NODE) {
+              const block = nearestBlock(parent)
+              if (lastBlock && lastBlock !== block) parts.push(" ")
+              parts.push(node.textContent ?? "")
+              lastBlock = block
+            } else if (node instanceof HTMLImageElement) {
+              const alt = node.getAttribute("alt")
+              if (alt) parts.push(` ${alt} `)
+              lastBlock = undefined
+            } else if (typeof HTMLSlotElement !== "undefined" && node instanceof HTMLSlotElement) {
+              for (const assigned of node.assignedNodes({ flatten: true })) {
+                if (assigned.nodeType === Node.TEXT_NODE) {
+                  parts.push(assigned.textContent ?? "")
+                } else if (assigned instanceof Element) {
+                  parts.push(safeText(assigned))
+                }
+              }
+              lastBlock = undefined
+            } else if (node instanceof Element && node.tagName === "BR") {
+              parts.push(" ")
+              lastBlock = undefined
+            }
           }
           node = walker.nextNode()
         }
-        return normalize(parts.join(" "))
+        return normalize(parts.join(""))
       }
       const accessibleName = (element: Element): string => {
         const labelled = explicitAriaName(element)
@@ -1566,7 +1604,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         const explicit = element.getAttribute("role")
         if (explicit) return explicit
         if (/^H[1-6]$/.test(element.tagName)) return "heading"
-        if (element instanceof HTMLAnchorElement) return "link"
+        if (element instanceof HTMLAnchorElement || (element.tagName.toLowerCase() === "a" && element.hasAttribute("href"))) return "link"
         if (element instanceof HTMLButtonElement) return "button"
         // Chromium exposes native disclosure controls without an ARIA button role.
         if (element.tagName === "SUMMARY") return "summary"
@@ -1760,10 +1798,14 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       const headingDepth = (element: Element): number => {
         const ownLevel = /^H([1-6])$/.exec(element.tagName)?.[1]
         if (ownLevel) return Number(ownLevel) - 1
+        let treeTarget = element
+        while (isShadowRoot(treeTarget.getRootNode?.())) {
+          treeTarget = (treeTarget.getRootNode() as ShadowRoot).host
+        }
         const headings = Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6, [role='heading']"))
         let level = 0
         for (const heading of headings) {
-          if (heading === element || (heading.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING) === 0) continue
+          if (heading === treeTarget || (heading.compareDocumentPosition(treeTarget) & Node.DOCUMENT_POSITION_FOLLOWING) === 0) continue
           const candidate = /^H([1-6])$/.exec(heading.tagName)?.[1]
           level = candidate ? Number(candidate) : Number(heading.getAttribute("aria-level") ?? 1)
         }
@@ -1791,7 +1833,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       }
       const primaryLinks = new WeakMap<Element, Element | null>()
       const isPrimaryLink = (element: Element): boolean => {
-        const group = element.closest("article, li, tr, [role='listitem'], [role='row']")
+        const group = element.closest("article, li, tr, dt, [role='listitem'], [role='row']")
         if (!group || !root.contains(group)) return false
         if (!primaryLinks.has(group)) {
           const links = Array.from(group.querySelectorAll("a[href]")).filter(isVisible)
@@ -1928,17 +1970,33 @@ return (${capture.toString()})(rootOrSettings, locatorSettings)`,
     if (locator) {
       result = await locator.evaluate(browserCapture, settings, { timeout: timeoutMs })
     } else {
-      try {
-        result = await Effect.runPromise(runPlaywrightOperation({
-          label: "Compact snapshot",
-          timeoutMs,
-          run: () => page.evaluate(browserCapture, settings),
-        }))
-      } catch (error) {
-        if (withinSelector === undefined || !/not a valid selector|querySelectorAll/i.test(error instanceof Error ? error.message : String(error))) {
+      const deadline = Date.now() + timeoutMs
+      let captureAttempts = 0
+      while (true) {
+        navigatedDuringCapture = false
+        try {
+          result = await Effect.runPromise(runPlaywrightOperation({
+            label: "Compact snapshot",
+            timeoutMs: Math.max(100, deadline - Date.now()),
+            run: () => page.evaluate(browserCapture, settings),
+          }))
+          if (navigatedDuringCapture && !options.diff && ++captureAttempts < 3 && Date.now() + sessionPageHealthRetryDelayMs < deadline) {
+            await delay(sessionPageHealthRetryDelayMs)
+            continue
+          }
+          break
+        } catch (error) {
+          if (withinSelector !== undefined && /not a valid selector|querySelectorAll/i.test(error instanceof Error ? error.message : String(error))) {
+            result = await page.locator(withinSelector).evaluate(browserCapture, { ...settings, rootSelector: undefined }, { timeout: timeoutMs })
+            break
+          }
+          const kind = runtimeFailureKind(error)
+          if ((kind === "context-destroyed" || kind === "context-missing") && !options.diff && Date.now() + sessionPageHealthRetryDelayMs < deadline) {
+            await delay(sessionPageHealthRetryDelayMs)
+            continue
+          }
           throw error
         }
-        result = await page.locator(withinSelector).evaluate(browserCapture, { ...settings, rootSelector: undefined }, { timeout: timeoutMs })
       }
     }
 
