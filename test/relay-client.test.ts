@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { NodeHttpClient } from "@effect/platform-node"
 import { Effect, Predicate } from "effect"
-import { FetchHttpClient } from "effect/http"
 import http from "node:http"
 import * as RelayClient from "../src/relay-client.ts"
 import { AuthenticatedJsonOutcome, type RelayShutdownRequest } from "../src/relay-schema.ts"
@@ -53,7 +53,7 @@ const withClient = <A, E>(use: (client: RelayClient.Interface) => Effect.Effect<
   Effect.runPromise(
     RelayClient.make({ endpoint }).pipe(
       Effect.flatMap(use),
-      Effect.provide(FetchHttpClient.layer),
+      Effect.provide(NodeHttpClient.layerNodeHttp),
     ),
   )
 
@@ -133,7 +133,7 @@ describe("RelayClient", () => {
     const error = await Effect.runPromise(
       RelayClient.make({ endpoint: "http://127.0.0.1:1" }).pipe(
         Effect.flatMap((client) => client.version),
-        Effect.provide(FetchHttpClient.layer),
+        Effect.provide(NodeHttpClient.layerNodeHttp),
         Effect.flip,
       ),
     )

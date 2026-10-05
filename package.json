@@ -56,6 +56,7 @@
     "gauntlet:isolated": "tsx scripts/gauntlet-isolated.ts",
     "smoke:snapshot": "tsx scripts/check-snapshot.ts",
     "repro:screenshot-zoom": "tsx scripts/check-screenshot-zoom.ts",
+    "repro:page-preservation": "tsx scripts/check-page-preservation.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "smoke:debugger-ownership": "pnpm build:extension && tsx scripts/check-debugger-ownership.ts"

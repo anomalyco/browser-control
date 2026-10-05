@@ -548,6 +548,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     relayRequestHandler(request, response)
   })
+  // Handoffs and secrets run commands legitimately outlive Node's 5-minute default request timeout.
+  httpServer.requestTimeout = 0
+  httpServer.timeout = 0
 
   const debugEnabled = yield* Config.Boolean("BROWSER_CONTROL_DEBUG").pipe(Config.withDefault(false))
   const debugLog = debugEnabled ? (line: string) => console.error(`[bc ${new Date().toISOString().slice(11, 23)}] ${line}`) : undefined

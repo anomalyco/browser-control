@@ -323,7 +323,9 @@ diffs include visible page content: inspect for private information before shari
 
 Execute code can use `page`, `context`, `browser`, persistent `state`, selected
 Node modules through `modules` and aliases such as `fs` and `path`, plus the
-Browser Control helpers documented here. Single expressions auto-return;
+Browser Control helpers documented here. Execute code runs in Node. Use
+`page.evaluate` for `window`, `document`, storage, and same-origin `fetch`
+with page cookies. Single expressions auto-return;
 multi-statement scripts need `return`. Use `--file` for longer scripts:
 
 ```bash
@@ -543,8 +545,9 @@ Common diagnoses:
   `page.url()` read can still work; retry the page read after the page settles.
   Ordinary missing-locator timeouts do not receive this diagnostic.
 - `connected:false`: run a relay-backed command and allow the extension startup
-  or alarm wake-up to reconnect. Reload the unpacked extension only if that loop
-  does not recover.
+  or alarm wake-up to reconnect. A sleeping extension wakes on a 30-second
+  alarm, so the command waits up to 35 seconds. Reload the unpacked extension
+  only if that loop does not recover.
 - Incompatible extension protocol: update either the extension or npm package;
   exact extension and relay release versions do not need to match.
 - Competing browser/profile connections: the active browser is preserved and
@@ -573,9 +576,11 @@ Common diagnoses:
 - Repeated execution-context errors: run one short follow-up so Browser Control
   can health-check the page. A live page is kept: Browser Control reconnects and
   re-resolves the same tab once, then fails with a `session-page/*-unresponsive`
-  diagnosis if the page still does not answer. Only a crashed, `about:blank`, or
+  diagnosis if the page still does not answer. Blank or unknown URLs are preserved:
+  they can contain unsaved content. Only a crashed or
   `chrome-error://` relay-owned page is closed and recreated. It never replaces
-  an adopted user tab. When a page stays unresponsive (bot-protected sites can
+  an adopted user tab. Main-frame navigation clears an earlier crash diagnosis;
+  child-frame navigation does not. When a page stays unresponsive (bot-protected sites can
   stall the main world for automation while rendering normally for the human),
   open a fresh tab with `context.newPage()` or hand the tab to the user.
 - Handoff ends with "page execution context did not become available": the user

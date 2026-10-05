@@ -89,6 +89,27 @@ try {
     await page.setContent('<button><img alt="Ignore me" aria-hidden="true"> <img alt=""/> Save</button>')
     assert.match(await snapshot(), /button "Save"/)
   })
+  await check("button visible text beats title attribute while icon-only button falls back to title", async () => {
+    await page.setContent('<main><button title="Toggle annotation mode (A)">Annotate</button><button title="Close"><svg width="10" height="10"></svg></button></main>')
+    const { snapshot, ref } = createSnapshotHelpers(page, { selectors: new Map() })
+    const outline = await snapshot()
+    assert.match(outline, /button "Annotate" \[ref=e1\]/)
+    assert.match(outline, /button "Close" \[ref=e2\]/)
+    assert.equal(await ref("e1").count(), 1)
+    assert.equal(await ref("e2").count(), 1)
+  })
+  await check("snapshot tolerates document without body or documentElement", async () => {
+    await page.setContent("<main><button>Before</button></main>")
+    await page.evaluate(() => {
+      document.body?.remove()
+    })
+    const { snapshot } = createSnapshotHelpers(page, { selectors: new Map() })
+    assert.equal(await snapshot(), "")
+    await page.evaluate(() => {
+      document.documentElement?.remove()
+    })
+    assert.equal(await snapshot(), "")
+  })
 } finally {
   await browser.close()
 }

@@ -321,6 +321,8 @@ local Node relay.
   without overwriting a linked installation. The default build still writes
   checkout `dist`; never run it against an installation used by other agents.
 - Run `pnpm build:extension` after extension changes.
+  It builds in a staging directory and replaces `extension/dist` file by file;
+  never delete the directory a browser loads unpacked.
 - Extension shim changes require reloading the unpacked extension once in Brave.
 - Relay-only changes should not require reloading the extension.
 - Use `termctrl` for long-running relay sessions during testing.
@@ -378,6 +380,9 @@ browser-control skill
   heartbeat traffic every 20 seconds while its relay socket is open. Chrome may
   clear persisted alarms and retires idle extension workers even with an open
   socket.
+- Relay clients wait one reconnect alarm period plus a margin for the extension
+  after relay startup, because only the alarm wakes a sleeping worker. Derive
+  both from `extensionReconnectAlarmPeriodMs` in `src/protocol.ts`.
 - The relay dedupes target announcements per CDP client by targetId: a
   re-announce under a new sessionId emits `Target.detachedFromTarget` for the
   old session first. Never announce the same targetId twice to one client

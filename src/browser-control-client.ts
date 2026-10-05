@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url"
+import { NodeHttpClient } from "@effect/platform-node"
 import { Context, Effect, Layer, Match, Redacted, Schema } from "effect"
-import { FetchHttpClient } from "effect/http"
 import * as AuthenticatedOriginInternal from "./authenticated-origin.ts"
 import * as RelayClient from "./relay-client.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"
@@ -153,7 +153,7 @@ export class Service extends Context.Service<Service, Interface>()(
 
 export const make = Effect.fn("BrowserControlClient.make")(function* (options: MakeOptions = {}) {
   const relay = yield* RelayClient.make(options).pipe(
-    Effect.provide(FetchHttpClient.layer),
+    Effect.provide(NodeHttpClient.layerNodeHttp),
     Effect.mapError((error) => clientError("connect", error)),
   )
   const readiness = yield* RelayLifecycle.ensureRelay({

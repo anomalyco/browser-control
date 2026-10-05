@@ -1,5 +1,6 @@
+import { NodeHttpClient } from "@effect/platform-node"
 import { Config, Context, Effect, Layer, Option, Schema } from "effect"
-import { FetchHttpClient, HttpClient, HttpClientRequest, type HttpClientResponse } from "effect/http"
+import { HttpClient, HttpClientRequest, type HttpClientResponse } from "effect/http"
 import {
   type AuthProfileRequest,
   type AuthenticatedJsonRequest,
@@ -303,5 +304,5 @@ export const make = Effect.fn("RelayClient.make")(function* (options?: { readonl
 
 const layer: Layer.Layer<Service, RelayConfigInvalid, HttpClient.HttpClient> = Layer.effect(Service, make())
 
-/** RelayClient backed by the global `fetch`, for standalone CLI/MCP wiring. */
-export const layerFetch: Layer.Layer<Service, RelayConfigInvalid> = layer.pipe(Layer.provide(FetchHttpClient.layer))
+/** RelayClient backed by `node:http` (avoiding undici's 5-minute headersTimeout on long handoffs/commands), for standalone CLI/MCP wiring. */
+export const layerFetch: Layer.Layer<Service, RelayConfigInvalid> = layer.pipe(Layer.provide(NodeHttpClient.layerNodeHttp))

@@ -191,7 +191,9 @@ export const recoverSessionPage = Effect.fn("Execute.recoverSessionPage")(functi
 
 /** A relay-owned page whose document holds no user-produced state worth preserving. */
 export function isDisposableSessionPage(options: { readonly url: string; readonly crashed?: boolean }): boolean {
-  return options.crashed === true || options.url === "" || options.url === "about:blank" || options.url.startsWith("chrome-error://")
+  // Blank documents can hold setContent output, forms, and opener-written state.
+  // An unknown URL is not evidence that the document is safe to discard either.
+  return options.crashed === true || options.url.startsWith("chrome-error://")
 }
 
 export async function waitForPageContext(options: {
@@ -536,7 +538,11 @@ export class ExecuteSandbox {
   private readonly snapshotRefs: SnapshotRefRegistry = { selectors: new Map() }
   private readonly networkCapture = new NetworkCapture.Recorder()
   private pendingWarnings: string[] = []
-  private boundPageClose: { readonly page: Page; readonly listener: () => void } | undefined
+  private boundPageListeners: {
+    readonly page: Page
+    readonly close: () => void
+    readonly navigate: (frame: Frame) => void
+  } | undefined
 
   constructor(readonly options: ExecuteSandboxOptions) {}
 
@@ -588,6 +594,7 @@ export class ExecuteSandbox {
           const warnings = this.finalizeWarnings(
             logSummary,
             diagnostic === protectedExtensionUiDiagnostic ? protectedExtensionUiWarning : undefined,
+            error instanceof ExecuteCodeError ? formatNodeContextWarning(error.originalError) : undefined,
           )
           return {
             text: this.networkCapture.redactText(error instanceof ExecuteCodeError ? error.stack ?? error.message : error.message),
@@ -626,14 +633,14 @@ export class ExecuteSandbox {
     return warnings
   }
 
-  private finalizeWarnings(logSummary: ExecuteLogSummary, extraWarning?: string): string[] {
+  private finalizeWarnings(logSummary: ExecuteLogSummary, ...extraWarnings: Array<string | undefined>): string[] {
     const warnings = this.drainWarnings()
+    for (const warning of extraWarnings) {
+      if (warning) warnings.push(warning)
+    }
     const logCompactionWarning = formatLogCompactionWarning(logSummary)
     if (logCompactionWarning) {
       warnings.push(logCompactionWarning)
-    }
-    if (extraWarning) {
-      warnings.push(extraWarning)
     }
     return warnings.map((warning) => this.networkCapture.redactText(warning))
   }
@@ -985,7 +992,6 @@ export class ExecuteSandbox {
     if (this.defaultPageTargetId !== previousTargetId) return false
     this.unbindDefaultPage(targetId, {
       ownsPage: this.ownsPage,
-      pageCrashed: this.pageCrashed,
       rebind: "replaced",
     })
     return true
@@ -1014,8 +1020,7 @@ export class ExecuteSandbox {
     this.defaultPageTargetId = targetId
     this.ownsPage = ownsPage
     this.pendingTargetRebind = undefined
-    const listener = () => {
-      if (this.boundPageClose?.page === page) this.boundPageClose = undefined
+    const close = () => {
       if (this.page !== page) return
       this.unbindDefaultPage(undefined, {
         pageCrashed: this.pageCrashed,
@@ -1023,16 +1028,21 @@ export class ExecuteSandbox {
         notify: true,
       })
     }
-    this.boundPageClose = { page, listener }
-    page.once("close", listener)
+    const navigate = (frame: Frame) => {
+      if (this.page === page && frame === page.mainFrame()) this.pageCrashed = false
+    }
+    this.boundPageListeners = { page, close, navigate }
+    page.once("close", close)
+    page.on("framenavigated", navigate)
     if (notify) this.notifyDefaultTargetChange()
   }
 
-  private clearBoundPageClose(): void {
-    const bound = this.boundPageClose
+  private clearBoundPageListeners(): void {
+    const bound = this.boundPageListeners
     if (!bound) return
-    bound.page.off("close", bound.listener)
-    this.boundPageClose = undefined
+    bound.page.off("close", bound.close)
+    bound.page.off("framenavigated", bound.navigate)
+    this.boundPageListeners = undefined
   }
 
   private clearSnapshotRefs(): void {
@@ -1042,7 +1052,7 @@ export class ExecuteSandbox {
   }
 
   private clearPageListeners(): void {
-    this.clearBoundPageClose()
+    this.clearBoundPageListeners()
     this.clearSnapshotRefs()
   }
 
@@ -1169,11 +1179,14 @@ export class ExecuteSandbox {
    */
   private async checkSessionPage(page: Page, options: { readonly repaired: boolean }): Promise<Page | undefined> {
     const timeoutMs = this.options.pageHealthCheckTimeoutMs ?? sessionPageHealthCheckTimeoutMs
+    const sandbox = this
     const recovery = await Effect.runPromise(recoverSessionPage({
       ownsPage: this.ownsPage,
-      url: page.url(),
+      // Read these after the asynchronous probe: navigation may have recovered
+      // an error document or cleared the crash while its old context failed.
+      get url() { return page.url() },
       timeoutMs,
-      crashed: this.pageCrashed,
+      get crashed() { return sandbox.pageCrashed },
       repaired: options.repaired,
       healthCheck: () => waitForPageContext({
         timeoutMs,
@@ -1474,7 +1487,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         const style = window.getComputedStyle(element)
         return rect.width >= 1 && rect.height >= 1 && style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0"
       }
-      const labelledName = (element: Element): string => {
+      const explicitAriaName = (element: Element): string => {
         const ariaLabel = element.getAttribute("aria-label")
         if (ariaLabel) return normalize(ariaLabel)
         const labelledBy = element.getAttribute("aria-labelledby")
@@ -1482,8 +1495,10 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           const labelled = normalize(labelledBy.split(/\s+/).map((id) => document.getElementById(id)?.textContent ?? "").join(" "))
           if (labelled) return labelled
         }
-        return normalize(element.getAttribute("title") ?? "")
+        return ""
       }
+      const titleName = (element: Element): string => normalize(element.getAttribute("title") ?? "")
+      const labelledName = (element: Element): string => explicitAriaName(element) || titleName(element)
       const safeText = (element: Element): string => {
         const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT)
         const parts: string[] = []
@@ -1510,17 +1525,22 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         return normalize(parts.join(" "))
       }
       const accessibleName = (element: Element): string => {
-        const labelled = labelledName(element)
+        const labelled = explicitAriaName(element)
         if (labelled) return labelled
         if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
           const label = element.labels?.[0]
-          if (label) return safeText(label)
+          if (label) {
+            const labelText = safeText(label)
+            if (labelText) return labelText
+          }
+          const title = titleName(element)
+          if (title) return title
           const placeholder = element.getAttribute("placeholder")
           if (placeholder) return normalize(placeholder)
           return ""
         }
         const alt = element.getAttribute("alt")
-        return normalize(alt || safeText(element))
+        return normalize(alt || safeText(element) || titleName(element))
       }
       const roleFor = (element: Element): string => {
         const explicit = element.getAttribute("role")
@@ -1607,15 +1627,20 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
               }
               return matches[0] as Element
             }
+            const fallbackRoot = (document.body ?? document.documentElement) as Element | null
+            if (!fallbackRoot) return null
             const dialogs = Array.from(document.querySelectorAll("dialog, [role='dialog'], [role='alertdialog']")).filter(isVisible)
             const modals = dialogs.filter((dialog) => dialog.matches(":modal, [aria-modal='true']"))
             if (modals.length === 1) return modals[0] as Element
             // Portals commonly sit beside main. Keep them in scope even when
             // several dialogs are open or the dialog is non-modal.
-            if (dialogs.length > 0) return document.body
+            if (dialogs.length > 0) return fallbackRoot
             const mains = Array.from(document.querySelectorAll("main")).filter(isVisible)
-            return mains.length === 1 ? mains[0] as Element : document.body
+            return mains.length === 1 ? mains[0] as Element : fallbackRoot
           })()
+      if (!root) {
+        return { entries: [], truncated: false }
+      }
       if ((settings.rootRole && roleFor(root) !== settings.rootRole) || (settings.rootName && accessibleName(root) !== settings.rootName)) {
         throw new Error("Snapshot ref no longer identifies the captured element; call snapshot() again")
       }
@@ -2595,6 +2620,20 @@ function formatLogCompactionWarning(summary: ExecuteLogSummary): string | undefi
     return undefined
   }
   return `Captured ${summary.totalCount} console/page events: returned ${summary.returnedCount}, folded ${summary.repeatedCount} repeated page entries, and omitted ${summary.omittedCount} after limits (page=${maxCapturedPageLogs}, script=${maxCapturedScriptLogs}). Aftermath error counts include all events.`
+}
+
+const pageOnlyGlobalPattern = /^(window|document|localStorage|sessionStorage|location|navigator|getComputedStyle) is not defined$/
+
+/** Explain failures caused by treating Node-side execute code as page code. */
+export function formatNodeContextWarning(error: Error): string | undefined {
+  const pageGlobal = error.name === "ReferenceError" ? pageOnlyGlobalPattern.exec(error.message)?.[1] : undefined
+  if (pageGlobal) {
+    return `Execute code runs in Node, where \`${pageGlobal}\` is undefined. Read page globals inside page.evaluate(() => ...).`
+  }
+  if (error.name === "TypeError" && error.message.startsWith("Failed to parse URL from ")) {
+    return "Execute code runs in Node, so fetch has no page origin or cookies. Use page.evaluate(() => fetch(...)) for same-origin requests."
+  }
+  return undefined
 }
 
 export async function runUserCode({ code, globals }: { readonly code: string; readonly globals: SandboxGlobals }): Promise<{

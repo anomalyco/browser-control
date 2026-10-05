@@ -79,7 +79,7 @@ function decodeCliOperands(operands: ReadonlyArray<string>): ReadonlyArray<strin
 const readExecuteFile = Effect.fnUntraced(function* (filePath: string) {
   const fs = yield* FileSystem.FileSystem
   return yield* fs.readFileString(path.resolve(filePath)).pipe(
-    Effect.mapError((cause) => new Error(`read execute file ${filePath}`, { cause })),
+    Effect.mapError((cause) => new Error(`read execute file ${filePath}: ${cause.reason.message}`, { cause })),
   )
 })
 
@@ -98,7 +98,11 @@ const ensureCliRelay = Effect.fnUntraced(function* () {
 const ensureCliRelayAndExtension = Effect.fnUntraced(function* () {
   const relay = yield* RelayClient.Service
   const readiness = yield* ensureCliRelay()
-  yield* RelayLifecycle.ensureExtensionConnected({ relay, waitForReconnect: RelayLifecycle.shouldWaitForExtensionReconnect(readiness) })
+  yield* RelayLifecycle.ensureExtensionConnected({
+    relay,
+    waitForReconnect: RelayLifecycle.shouldWaitForExtensionReconnect(readiness),
+    onWait: Console.error(`Waiting up to ${RelayLifecycle.extensionReconnectWaitMs / 1_000}s for the Browser Control extension to reconnect`),
+  })
 })
 
 const resolveSelectedSessionId = Effect.fnUntraced(function* (explicitSessionId: string | undefined) {
