@@ -3,5 +3,5 @@ allowBuilds:
   msgpackr-extract: false
 minimumReleaseAgeExclude:
   - '@effect/platform-node-shared@4.0.0-rc.118'
-  - '@effect/platform-node@4.0.0-rc.118'
-  - effect@4.0.0-rc.118
+  - '@effect/platform-node@4.0.0-rc.118 || 4.0.1'
+  - effect@4.0.0-rc.118 || 4.0.1

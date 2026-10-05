@@ -62,10 +62,10 @@
     "smoke:debugger-ownership": "pnpm build:extension && tsx scripts/check-debugger-ownership.ts"
   },
   "dependencies": {
-    "@effect/platform-node": "4.0.0-rc.118",
-    "@effect/platform-node-shared": "4.0.0-rc.118",
+    "@effect/platform-node": "4.0.1",
+    "@effect/platform-node-shared": "4.0.1",
     "acorn": "^8.18.0",
-    "effect": "4.0.0-rc.118",
+    "effect": "4.0.1",
     "pixelmatch": "^7.2.0",
     "playwright-core": "^1.63.0",
     "pngjs": "^7.0.0",
@@ -73,16 +73,16 @@
   },
   "devDependencies": {
     "@changesets/cli": "^3.0.3",
-    "@types/chrome": "^0.3.0",
-    "@types/node": "^26.6.3",
+    "@types/chrome": "^0.3.4",
+    "@types/node": "^26.6.4",
     "@types/pngjs": "^6.0.5",
-    "@types/ws": "^8.18.1",
+    "@types/ws": "^8.18.2",
     "esbuild": "^0.28.2",
     "fflate": "^0.8.3",
-    "jscpd": "^5.3.2",
-    "knip": "^6.38.0",
+    "jscpd": "^5.4.0",
+    "knip": "^6.39.0",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.2"
+    "vitest": "^5.0.3"
   }
 }

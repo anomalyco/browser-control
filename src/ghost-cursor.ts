@@ -462,9 +462,14 @@ export const ghostCursorClientSource = `(() => {
       const ca = state.cameraAnim;
       const u = clamp((timestamp - ca.startTime) / ca.durationMs, 0, 1);
       const s = smootherstep(u);
-      state.camera.scale = ca.s0 + (ca.s1 - ca.s0) * s;
-      state.camera.tx = ca.tx0 + (ca.tx1 - ca.tx0) * s;
-      state.camera.ty = ca.ty0 + (ca.ty1 - ca.ty0) * s;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const scale = Math.exp(ca.logS0 + (ca.logS1 - ca.logS0) * s);
+      const fx = ca.fx0 + (ca.fx1 - ca.fx0) * s;
+      const fy = ca.fy0 + (ca.fy1 - ca.fy0) * s;
+      state.camera.scale = scale;
+      state.camera.tx = clamp(vw / 2 - fx * scale, vw * (1 - scale), 0);
+      state.camera.ty = clamp(vh / 2 - fy * scale, vh * (1 - scale), 0);
       applyCamera();
       // Keep an idle cursor anchored to its underlying page coordinate while the camera pans/zooms
       if (!state.flight && ca.cursorPageX !== undefined) {
@@ -472,6 +477,8 @@ export const ghostCursorClientSource = `(() => {
         state.renderedY = ca.cursorPageY * state.camera.scale + state.camera.ty;
         state.targetX = state.renderedX;
         state.targetY = state.renderedY;
+        state.vx = 0;
+        state.vy = 0;
       }
       if (u >= 1) {
         const resolve = ca.resolve;
@@ -890,24 +897,25 @@ export const ghostCursorClientSource = `(() => {
     return next;
   };
 
-  // Screen Studio-style smooth 60Hz camera zoom & pan
+  // Screen Studio-style smooth 60Hz camera zoom & pan (interpolating page-space focus + log-scale)
   const zoomTo = (payload) => {
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     const S = clamp(typeof payload?.scale === "number" ? payload.scale : 1, 1, 3.2);
-    const durationMs = clamp(typeof payload?.durationMs === "number" ? payload.durationMs : 320, 80, 1200);
-    let tx1 = 0;
-    let ty1 = 0;
+    const durationMs = clamp(typeof payload?.durationMs === "number" ? payload.durationMs : 360, 80, 1200);
+    const fx0 = (vw / 2 - state.camera.tx) / state.camera.scale;
+    const fy0 = (vh / 2 - state.camera.ty) / state.camera.scale;
+    let fx1 = vw / 2;
+    let fy1 = vh / 2;
     if (payload?.rect && S > 1.001) {
       const cx = payload.rect.x + payload.rect.width / 2;
       const cy = payload.rect.y + payload.rect.height / 2;
-      // Convert screen-space rect center to untransformed page-space coordinate
       const ux = (cx - state.camera.tx) / state.camera.scale;
       const uy = (cy - state.camera.ty) / state.camera.scale;
-      const rawTx = vw / 2 - ux * S;
-      const rawTy = vh / 2 - uy * S;
-      tx1 = clamp(rawTx, vw * (1 - S), 0);
-      ty1 = clamp(rawTy, vh * (1 - S), 0);
+      const halfVisW = (vw * 0.5) / S;
+      const halfVisH = (vh * 0.5) / S;
+      fx1 = clamp(ux, halfVisW, vw - halfVisW);
+      fy1 = clamp(uy, halfVisH, vh - halfVisH);
     }
     const cursorPageX = (state.renderedX - state.camera.tx) / state.camera.scale;
     const cursorPageY = (state.renderedY - state.camera.ty) / state.camera.scale;
@@ -915,12 +923,12 @@ export const ghostCursorClientSource = `(() => {
       state.cameraAnim = {
         startTime: performance.now(),
         durationMs,
-        s0: state.camera.scale,
-        tx0: state.camera.tx,
-        ty0: state.camera.ty,
-        s1: S,
-        tx1,
-        ty1,
+        logS0: Math.log(Math.max(1, state.camera.scale)),
+        logS1: Math.log(S),
+        fx0,
+        fy0,
+        fx1,
+        fy1,
         cursorPageX,
         cursorPageY,
         resolve,

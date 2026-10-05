@@ -5,844 +5,136 @@ description: Current product direction, architecture decisions, and prioritized 
 
 # Browser Control Plan
 
-## Standalone installation validation
-
-Debugger inventory must prove this extension owns each attachment with a
-read-only command; Chrome's global `attached` flag also includes DevTools.
-`page.title()` has a five-second read deadline because Playwright exposes no
-timeout for that method. This bounds the observed missing-context title hang;
-it is not a general cancellation mechanism for arbitrary user scripts.
-
-Runtime candidates constrain npm's Effect and shared Node adapter resolution to
-the checkout's pinned releases. Otherwise npm can install a newer prerelease peer
-beside the CLI's pinned Effect, causing missing services or missing module exports.
-Candidate CLI, SDK and MCP checks run before selecting the installation.
-
-September 14 field check: customized a restaurant item, verified its cart snapshot,
-removed it, and restarted/reconnected to the same browser tab successfully. Compact
-labels now include visible image alt text. Full accessible-name equivalence is not
-guaranteed; agents should use snapshot refs and refresh after virtualized DOM changes.
-
 Browser Control is a local driver that lets trusted agents automate the user's
-already-running Chromium-family browser. It provides browser control, session
-isolation, and diagnostics; it does not call models or decide what to do.
+already-running Chromium-family browser through a small MV3 extension shim and
+a persistent local Node daemon. It provides browser control, session isolation,
+inspection helpers, proof recording, and diagnostics; it never calls models or
+plans tasks.
 
 ```text
 Agent / MCP client / CLI
   -> relay-backed execute session
-  -> local relay
-  -> browser extension
+  -> local relay (Effect v4 + stock playwright-core)
+  -> browser extension shim (MV3)
   -> user's Chromium-family browser tabs
 ```
-
-The end-to-end path is working. Current work should simplify the relay and make
-recording robust. New features
-should not weaken the code-first interface or move behavior into the extension
-without a concrete browser-API reason.
-
-## Next Priorities
-
-Work these in order unless field evidence changes the priority. Every item
-should land with unit or smoke evidence appropriate to the behavior.
-
-September 6 fieldwork: resubmitted the existing Chrome Web Store item with shim
-0.0.24 and a real handoff demonstration replacing the old Example Domain media.
-The dashboard confirmed Pending Review, with Unlisted visibility. Await approval
-before advertising Store availability. Keep the independently versioned shim;
-snapshot corrections ship in the local driver, not the Store ZIP.
-See `docs/CHROME_WEB_STORE.md` for the prepared artifact.
-
-### 1. Verify isolated runtime upgrades
-
-Candidate preparation builds, packs, installs, and validates outside the live
-checkout. Installation selection changes one shared pointer for future CLI/MCP
-processes, not an existing daemon. Keep old complete installations until their
-processes retire. The loaded extension directory is separate from this workflow.
-
-Preparation also checks the packed Effect dependency cohort in a fresh isolated
-pnpm consumer, without checkout locks or user overrides. Keep all three Effect
-runtime packages exactly aligned; this is not a universal host-graph lock.
-
-Ordinary clients may start an absent daemon but never replace a running one.
-`browser-control relay restart` is the sole CLI replacement operation. It requires
-an exact managed instance with safe shutdown protocol 2, records bounded private
-attribution, drains accepted work, and refuses raw clients or active recordings.
-Failed or cancelled pre-commit drains reopen admission without a delayed stop.
-
-Verification:
-
-- Validate final installed artifacts, not only source imports or an earlier build.
-- Exercise old/new installed clients, explicit replacement, inventory restoration,
-  and forbidden tab-close commands on isolated ports with a fake extension.
-- Real physical-tab continuity still needs an explicitly authorized isolated
-  browser check. Another browser profile alone shares the extension's fixed port.
-
-### 2. Concentrate relay lifecycle invariants
-
-Extract cohesive modules from `makeRelay` without changing the protocol:
-
-- Deepen `CdpRouter` with command classification, guardrails, and compatibility
-  shims.
-- Keep root-generation preparation, verification, replacement, and bounded
-  reconciliation together. Extracting event decoding alone does not remove
-  ordering obligations.
-
-`CdpClientPool` owns client sockets, private per-client announcements and aliases,
-auto-attach settings, and connection generations. Attachment deduplication,
-descendant-first detach, and alias invalidation are complete transitions behind
-its interface, tested through an event sink without browser or websocket mocks.
-`CdpRouter` owns
-client-relative visibility, target inventory, target and alias resolution, and
-exact root-versus-child Chrome session routing.
-Named browser-context commands skip crashed owned roots without falling back to
-unrelated tabs. Raw-client ambiguity includes crashed roots; visibility and
-explicit target routing do not filter them out.
-
-`CdpRuntime` owns register-before-send context observation, bounded reset fallback,
-and idle reset targeting. Runtime recovery is tied to captured root/child and
-extension generations plus current client visibility, never just a physical tab
-id. HTTP and MCP retain validated target selections instead of flattening and
-reparsing them at successive layers.
-
-The goal is browser-free testing of routing and lifecycle behavior, not smaller
-files for their own sake. Keep composition and resource lifetime in `makeRelay`,
-but put ordering-sensitive transitions in their owning modules. Avoid exposing
-internal protocol details to the CLI or MCP server.
-
-Use Knip and TypeScript unused-local checks as CI gates for internal cleanup.
-Keep public SDK and dynamically loaded entry points explicit. Duplicate-code
-scans are advisory; consolidate identical rules without removing features or
-combining operations with different lifetime guarantees.
-
-`BrowserControlSessions` installs the sandbox's default-target callback itself.
-The callback is bound to the exact session instance, so late notifications from
-a retired sandbox cannot overwrite a reset or recreated session's catalog entry.
-The sandbox exposes only settled teardown; caller deadlines remain in the
-manager's tracked cleanup workers. Handoff readiness follows the selected page,
-with exact-target reacquisition retained for default-page replacement.
-
-`RootTargetLifecycle` owns per-tab preparation, staging, verification, commit,
-scoped reconciliation workers, and generation checks across asynchronous steps.
-Committed ownership and handoff/default-target rebinding precede retiring old
-client views; stale workers cannot tear down a successor generation.
-Committed and staged root probes retain exhausted RPC errors or reject malformed
-target info. A failed inventory readiness check closes the extension socket with
-1011 and clears live registry state through disconnect cleanup; this is not
-automatic debugger reattachment or full SPA recovery.
-
-Verification:
-
-- Extend reconnect, OOPIF, and multi-client smoke cases to cover root detach and
-  conflicting client auto-attach settings.
-- Preserve complete staged child subtrees through replacement, including nested
-  descendants and mixed insertion order, and reject stale-generation completion.
-
-### 3. Validate new agent surfaces in the real browser
-
-- Exercise snapshot search, automatic deltas, stable same-document refs,
-  contenteditable filling, WebMCP discovery/calls, and human demonstration code
-  generation against local fixtures and an adopted user tab.
-- Exercise MCP recording lifecycle parity and repeated flight-recorder
-  `save-last` clips without stopping the rolling buffer.
-
-Verification:
-
-- Confirm CLI and MCP recording behavior match and inspect encoded flight clips.
-
-## Recently Shipped
-
-### Agent inspection and page-native tools are more reusable
-
-`snapshot({ find, context })` returns bounded semantic snippets, while
-`snapshot({ delta: true })` establishes a baseline automatically and emits later
-changes. Compatible structural/accessibility identities retain ref ids across
-same-document captures; navigation still invalidates every ref. WebMCP-enabled
-pages are available through frame-aware `webmcp.list()` and `webmcp.call()`
-execute helpers that re-discover registrations before invoking them.
-
-### Human demonstrations become editable Playwright
-
-`demonstrate()` layers action recording onto the exact-tab handoff lifecycle.
-It records user clicks, edits, checkbox/select changes, and navigations, compacts
-successive text edits, and returns structured steps plus executable Playwright.
-Password values become explicit secret-source placeholders.
-
-### Recording covers MCP and recent-history capture
-
-MCP exposes ordinary recording start/stop/status/cancel operations. The rolling
-flight recorder keeps a bounded recent CDP compositor-frame window in memory,
-reports retention and drop counters, and can encode repeated WebM/MP4 `save-last`
-clips without stopping. It writes a sidecar receipt and cannot share a tab with
-an ordinary recording.
-
-### Windows tolerates unsupported directory sync
-
-Session catalog replacement and lifecycle logging retain file-level sync and
-attempt directory sync everywhere, but tolerate only platform/filesystem errors
-that explicitly mean directory handles cannot be synced.
-
-### Fill helpers support rich-text editors
-
-`fillInput` and `fillInputs` update contenteditable elements as well as input and
-textarea controls while preserving the existing no-focus DOM fallback behavior.
-
-### Session cleanup is safely repeatable
-
-Deleting a resolved session id is idempotent across HTTP, CLI, and MCP. The
-structured result reports whether a live session was deleted, while CLI cleanup
-retries no longer turn an already-absent session into a failure.
-
-### Handoffs return on a live destination context
-
-After a human completes a navigation-triggering handoff, Browser Control waits
-through transient execution-context replacement before returning to user code.
-The same execute can immediately inspect and verify the authenticated
-destination without repeating the human action.
-
-### Browser restarts wake extension reconnection
-
-The extension registers a global `runtime.onStartup` listener so restarting the
-browser profile wakes its MV3 worker, repairs the reconnect alarm, and opens a
-fresh relay socket. The existing 20-second heartbeat keeps that socket active
-after reconnection.
-
-When the relay is down, Chrome stops the idle worker and only the 30-second
-reconnect alarm wakes it. Relay clients therefore wait one alarm period plus a
-5-second margin for the extension after relay startup. Both values derive from
-`extensionReconnectAlarmPeriodMs` in `src/protocol.ts`, and the CLI prints one
-line when that wait begins.
-
-### Unpacked extension connectivity survives browser and path differences
-
-The unpacked manifest carries a stable public key, while Store packaging strips
-it before creating the review ZIP. Extension readiness waits only for debugger
-inventory: Arc tab-group queries and restored-tab presentation run afterward,
-cannot mutate from stale sockets, serialize ownership changes per tab, and
-report failures through relay diagnostics.
-
-### Public clients tolerate extension reconnect windows
-
-`BrowserControlClient.make` gives a matching pre-existing relay the same bounded
-extension reconnect grace used after relay startup. Session summaries report
-connected only when the Playwright transport and a live default page are both
-available.
-
-### Tab-capture recordings stream with intrinsic framing
-
-Extension protocol `2` sends each recording chunk as a sequenced `BCRD` binary
-frame containing its tab id. The relay validates framing and sequence, bounds
-pending writes, streams each tab to an adjacent temporary file, and atomically
-renames complete recordings. Interleaving, oversized queues, malformed frames,
-and output larger than a single frame have direct coverage.
-
-### Fill helpers traverse open shadow roots
-
-String selectors passed to `fillInput` and `fillInputs` now search recursively
-through open shadow roots. A zero-match error explains that closed roots remain
-unavailable and suggests `locator.fill()` when Playwright can resolve the field.
-
-### Session lifecycle selectors are consistent
-
-`session reset` and `session delete` accept positional ids, `--session`/`-s`,
-and `BROWSER_CONTROL_SESSION` before falling back to the saved current session.
-Smoke coverage verifies explicit missing flag and environment ids fail instead
-of falling back to the saved current session.
-
-### CDP routing fails closed
-
-Identity-free `Target.getTargetInfo` no longer returns an arbitrary tab, and
-otherwise-unhandled sessionless CDP commands require an explicit session. All
-explicit target and session routing now rechecks client visibility, including
-session-scoped auto-attach. Root teardown emits each announced child detach
-before detaching the root so clients cannot retain orphaned sessions. The
-browser-free `CdpRouter` module keeps these visibility, alias, and generation
-rules out of relay transport orchestration. Browser-context permission and
-cookie commands route through a session-owned root for named clients, including
-multi-page sessions and browser CDP aliases, or exactly one visible root for raw
-clients, without falling through from a named client to an unrelated tab.
-Explicit browser-context ids must match a healthy visible root. Raw clients may
-route through several visible roots only when every root proves the same
-Chromium context; crashed roots never satisfy context routing.
-
-### CDP client state is isolated per connection
-
-`CdpClientPool` now owns each CDP client's session identity, target
-announcements, aliases, auto-attach settings, and idle-reset generation. New
-targets use the originating client's auto-attach settings instead of global
-last-writer-wins state. Ownership visibility changes also invalidate target
-aliases, so a client cannot continue routing commands to a tab after it becomes
-hidden.
-
-### Wedged session pages recover or fail fast
-
-A 2026-07-09 field failure left a relay-owned page open but unusable after its
-execution context was destroyed. Later calls each consumed their full timeout,
-and the target remained at `chrome-error://chromewebdata/`.
-
-Browser Control now remembers context failures and browser crash events. Before
-the next normal execute, it gives the default page a bounded health check.
-Only a disposable relay-owned page (crashed renderer or a
-`chrome-error://` document) is closed and recreated with a stale-reference
-warning; if it cannot be closed, execute fails with reset guidance instead of
-leaking ownership. Any other live page is kept. An unhealthy adopted user tab
-is never closed or replaced; the execute fails quickly and tells the agent to
-reset or adopt another tab.
-
-Blank and unknown URLs are not disposable: `setContent` and opener-written
-documents can contain unsaved user state without changing `about:blank`.
-Recovery reads the current URL and crash state after the health probe, so a
-navigation during that probe does not authorize closing the new document.
-Replacing a target clears its predecessor's crash flag; recovery evidence is
-generation-local. `scripts/check-page-preservation.ts` exercises the blank-page
-case with a real isolated Chromium process and a synthetic draft.
-
-A main-frame navigation also retires document-local crash evidence. Child-frame
-navigation and crashes of unrelated targets cannot clear or set that evidence.
-Default-page close/navigation listeners share one binding lifetime and are
-removed together on replacement or disconnect.
-
-The recovery model check in `test/execute-sandbox.test.ts` enumerates all 341
-event traces of length zero through four over crash, main-frame navigation,
-child-frame navigation, and foreign-target crash. Across both ownership modes
-and both health outcomes it checks 1,364 cases against the production sandbox,
-including replacement count, unrelated-page isolation, and listener cleanup.
-This is exhaustive only for the stated finite event alphabet and bound; it
-does not prove Chrome/CDP behavior, network ordering, persistence, or all longer
-traces. Separate target-replacement regressions and the real-Chromium repro
-cover boundaries outside this model. Failures print the exact event trace.
-
-A 2026-09-19 field failure showed why a relay-owned page must not be treated as
-disposable: a page whose execution context went stale after a sign-in redirect
-(and one stalled by a bot-protected form) was closed and replaced with
-`about:blank`, discarding the login and form state the user had just produced.
-Playwright's stale context is a symptom of its view of the tab, not proof the
-tab is gone. Browser Control now drops its Playwright connection, reconnects,
-and re-resolves the same target once; the relay's `Runtime.enable` replay
-recovery then runs on the fresh connection. If the page still does not answer,
-execute fails with a `session-page/owned-unresponsive` diagnosis that names the
-kept tab and the likely causes (mid-navigation, bot protection stalling the main
-world for automation). A resolved handoff whose destination context never
-appears reports the same distinction instead of a bare Playwright error.
-
-`Inspector.targetCrashed` and `Target.targetCrashed` events mark the target,
-reject its pending debugger commands without disconnecting the extension, and
-appear as `crashed=true` in status and doctor data. `chrome-error://` targets are
-also unhealthy. Cross-extension navigation failures receive the bounded
-`target/cross-extension-page` diagnostic.
-
-The `execute-page-recovery` smoke crashes a relay-owned renderer, asserts prompt
-failure and status visibility, then verifies that the next execute receives a
-fresh page. Unit coverage verifies that adopted pages are preserved.
-
-### Extension child targets stay subordinate
-
-Unknown `Target.targetInfoChanged` events no longer overwrite a tab's root
-target. URL-less child pages are held until their destination is known, and a
-child that resolves to another extension is removed without changing the
-session-owned page. This prevents password-manager UI from becoming the
-session default or producing cross-extension navigation failures.
-
-### Downloads fail with an explicit capability boundary
-
-Chromium rejects both `Browser.setDownloadBehavior` and the legacy
-`Page.setDownloadBehavior` through a tab-scoped `chrome.debugger` attachment.
-Without either command, stock Playwright cannot retain the GUID-named artifact
-that backs `download.saveAs()`. Browser Control therefore rejects
-`page.waitForEvent("download")` immediately with the reason and a fetch-plus-`fs`
-workaround rather than allowing a 30-second timeout. A local blob/fetch fixture
-keeps this failure direct. Supporting native download artifacts later would
-require a new extension capture protocol and permission model.
 
 ## Product Boundaries
 
 - **Driver, not agent**: Browser Control never calls models or plans tasks.
 - **User browser first**: the primary target is an already-running
   Chromium-family browser with the extension installed.
-- **Trusted local execution**: `execute(code)` trusts the calling agent. It is
-  not an untrusted-code security boundary.
 - **Code-first control**: `execute(code)` is the primary interface. Dedicated
-  tools exist only for lifecycle operations that benefit from explicit command
-  semantics.
-- **Playwright first**: v1 uses stock `playwright-core`. Custom behavior should
-  not require a Playwright fork.
-- **Local by default**: the relay binds to trusted local interfaces. Remote
-  access requires an explicit authentication design before it is added.
-- **Stable extension shim**: Chrome API adaptation belongs in the extension;
-  orchestration belongs in the relay so most changes require only a relay
+  commands exist only for lifecycle operations (`session`, `recording`,
+  `flight-recorder`, `network`, `secrets`, `relay`, `status`, `doctor`).
+- **Stock Playwright**: uses stock `playwright-core` without a custom fork.
+- **Stable extension shim**: Chrome API adaptation lives in `extension/src/`;
+  orchestration lives in the Node relay so most changes require only a relay
   restart.
-- **Minimal extension UI**: the toolbar controls attachment, while subtle
-  in-page UI communicates attached, running, and waiting states. There is no
-  side panel.
-- **Concise self-description**: `browser-control skill` prints one short,
-  current workflow document. Do not split it into topic subcommands or require
-  agents to perform a reading ceremony.
+- **Concise self-description**: `browser-control skill` prints one current
+  workflow document (`skills/browser-control/SKILL.md`).
 
-## Distribution And Installation
+## Architecture & Core Invariants
 
-- The product, repository, CLI, and MCP server use the name `browser-control`.
-  The npm package is `@opencode-ai/browser-control`.
-- The package is published publicly on npm. Normal setup installs the npm
-  artifact. Development uses isolated `runtime:prepare` / `runtime:select`
-  installations rather than linking a mutable checkout into the live CLI/MCP.
-  Candidate builds never overwrite the loaded unpacked extension directory.
-- The CLI, MCP server, and source toolchain require Node.js 22.19 or newer,
-  matching the minimum runtime supported by the pinned Effect Platform stack.
-- Until the first Store review completes, the browser extension is loaded
-  unpacked from the npm package's `extension/dist` directory or a source build.
-  Its current shim version is `0.0.25`. A manifest public key gives unpacked
-  builds one stable extension id across install paths and operating systems;
-  Store packaging strips that key so the Store keeps its assigned id.
-- Extension and npm releases are independently versioned. The extension hello
-  reports an explicit protocol version, and compatibility rather than exact
-  package-version equality determines whether the local driver may use it.
-- Browser data crosses only the loopback connection unless an authorized local
-  caller sends returned data elsewhere.
-- Extension source changes require rebuilding and reloading the unpacked
-  extension. Relay-only changes do not.
-- `pnpm package:extension` produces the deterministic Chrome Web Store review
-  ZIP. Distribution starts as an unlisted beta before becoming public. A bundled
-  unpacked extension belongs to future managed-browser launch flows.
+### Relay & Runtime Lifecycle
 
-## Session And Tab Model
+- Node-side code uses Effect v4 (`4.0.1`), with `effect`, `@effect/platform-node`,
+  and `@effect/platform-node-shared` pinned to the exact same version.
+- Relay-backed CLI and MCP commands share one detached relay on `127.0.0.1:19989`
+  and auto-start it when needed. `status` and `doctor` are observational and
+  never auto-start the relay; `serve` is the foreground debugging entrypoint.
+- Ordinary CLI, MCP, and SDK calls never replace a running relay. Replacement
+  requires `browser-control relay restart` against an exact managed instance
+  speaking safe shutdown protocol 2 (`RelayShutdown`), which closes admission,
+  drains accepted work and persistence, and refuses raw CDP clients or active
+  recordings/captures.
+- Runtime candidates are built and validated outside the live checkout via
+  `pnpm runtime:prepare` and activated atomically for future CLI/MCP processes
+  via `pnpm runtime:select`.
 
-A relay serves one browser/profile connection at a time. The first compatible
-OPEN connection keeps ownership through inventory reconciliation and normal
-operation; another connection is rejected with close code 4004 instead of
-destroying existing targets, handoffs, or pending commands. Contention starts a
-bounded websocket liveness probe so a dead incumbent cannot hold ownership
-indefinitely. Genuine disconnect/reconnect still rebuilds the inventory.
-`status` and `doctor` report rejected connection attempts, not a browser count.
-This does not add simultaneous multi-browser routing or persistent browser
-selection: switching requires disconnecting the incumbent extension.
+### Sessions, Target Ownership & CDP Routing
 
-Password-manager extension UI is a Chromium permission boundary, not a missing
-page. A cross-extension failure keeps the session's page and returns an explicit
-human-action warning rather than scheduling automatic page replacement.
-Protected extension iframes/popups and native unlock/Touch ID prompts are not
-supported control surfaces; no browser security flags or vault access are added.
+- `TargetRegistry` is the sole live target-ownership authority. Session state
+  retains one durable default-target identity and owner (`relay` or `user`),
+  persisted per port under `~/.browser-control/relays/<port>/sessions.json`.
+- `CdpClientPool` owns per-client target announcements and aliases. Session-owned
+  tabs are visible only to that session's clients; unowned attached tabs are
+  visible to all clients (`src/cdp-visibility.ts`).
+- `CdpRouter` validates target and session visibility, browser-context routing
+  (skipping crashed roots for named clients), and root-versus-child Chrome
+  session routing.
+- `CdpRuntime` owns register-before-send `Runtime.enable` context observation
+  and bounded reset fallback.
+- `RootTargetLifecycle` owns per-tab debugger setup, verification, replacement
+  generations, and scoped reconciliation workers.
+- `ProtectedFrameTracker` (`src/protected-frames.ts`) retracts and suppresses
+  restricted child frames (such as password-manager `chrome-extension://` inline
+  menus), records `protectedUi` on the root target, and surfaces
+  `target/cross-extension-page` with a human-action warning instead of replacing
+  the page.
+- `session adopt` reserves, resolves, and commits user-tab ownership as a
+  serialized transaction. When exactly one user-attached tab is open,
+  `session adopt` auto-selects it without requiring `--target-url` or
+  `--target-index`. Adopted user tabs are never closed by `reset` or `delete`.
 
-Focusing a card or credential field is enough to trigger that boundary: the
-password manager injects a `chrome-extension://` inline-menu iframe into the
-webpage. Chrome reports it to the root session as an ordinary child frame, so
-stock Playwright kept an empty-URL phantom frame under the main frame, and from
-then on `chrome.debugger` rejected every command for the tab with "Cannot access
-a chrome-extension:// URL of different extension". Playwright rewrites that into
-"Execution context was destroyed" and retries locators to their 30 s timeout,
-which used to look like an unresponsive page and trigger the health check and
-repair path. The relay now tracks such protected frames per tab: it retracts the
-forwarded attach with a synthetic `Page.frameDetached`, suppresses the frame's
-later events, records the debugger block as `protectedUi` on the root target
-(visible in `status` and `doctor`), and lifts it when a command succeeds again
-or the last protected frame is removed. The sandbox turns masked
-destroyed-context and locator-timeout failures on a blocked tab into the
-`target/cross-extension-page` diagnostic with the human-action warning and skips
-the page health check, so the tab is never repaired or replaced for a prompt the
-user simply has to dismiss.
+### Execute Sandbox & Page Recovery
 
-An attached tab is a browser target exposed by the extension. An unowned
-attached tab remains visible to connected clients for explicit recovery and raw
-CDP workflows. A Browser Control session owns one default page and persistent
-JavaScript `state`; normal execute calls use that page instead of choosing an
-arbitrary tab from the attached pool.
+- Each session owns one persistent `ExecuteSandbox` with `page`, `context`,
+  `browser`, `state`, and selected Node built-ins (`fs`, `path`, `os`, `crypto`,
+  `url`, `util`, `events`, `stream`, `buffer`, `http`, `https`, `zlib`).
+- `page.title()` and `page.content()` carry a 5-second read watchdog
+  (`src/page-read-timeout.ts`) so missing execution contexts fail with a
+  `session-page/context-read-timeout` diagnostic instead of hanging for 30s.
+- `page.setViewportSize()` checks actual `window.innerWidth/innerHeight` after
+  resizing and warns when non-100% browser zoom scales the CSS viewport.
+- `page.emulateMedia({ colorScheme: "light" })` marks explicit light-mode
+  emulation (`__bc_explicit__`) so the relay preserves it across navigations
+  while still stripping Playwright's unrequested default light-mode override on
+  attach.
+- When a session page is closed externally and replaced with `about:blank`,
+  untouched `about:blank` locator timeouts fail in `2.5s` (instead of `30s`)
+  with a warning naming the previous closed URL until `page.goto()` or
+  `page.setContent()` is called.
 
-- Bare CLI execute atomically creates a fresh readable session and prints its
-  id.
-- `--session` or `BROWSER_CONTROL_SESSION` explicitly continues a CLI session.
-- One MCP server process owns one implicit execute session. Explicit MCP session
-  management remains available for lifecycle operations.
-- The CLI never infers an agent's session from human-shell current state.
-- Human session-management commands store their endpoint-scoped current id in
-  `~/.browser-control/session.json`.
-- The relay stores private session descriptors under
-  `~/.browser-control/relays/<port>/sessions.json`. Relay restart restores ids,
-  read-only mode, and exact target ownership when the tab reappears; JavaScript
-  `state` and snapshot refs reset with an explicit warning.
-- A session owns one default page. Relay-created pages persist across
-  short-lived CLI connections.
-- `session adopt` makes an attached user tab the session's default page and
-  closes the session's previous relay-created page.
-- Adoption is exclusive: one target can belong to only one Browser Control
-  session. `TargetRegistry` is the ownership authority; session state retains
-  only the adopted default-page pointer.
-- Adoption reserves target ownership before Playwright resolves the page, then
-  commits or rolls back as one serialized transaction. A caller timeout rolls
-  back visibility immediately while the worker retains the execute and adopt
-  permits until any uncancellable Playwright work settles.
-- Reset, delete, or detach releases an adopted tab without closing it.
-- Reset and delete acquire the execute permit before closing a sandbox, so they
-  cannot interrupt a running script.
-- Reset and delete give an absent persisted relay target a bounded opportunity
-  to re-announce. A completed protocol-v1 inventory, or expiry of the reconnect
-  grace, declares that identity dead so recovery cannot require catalog edits.
-  The relay never guesses a physical tab to close when the live target identity
-  is unavailable.
-- Corrupt session catalogs fail relay startup without being overwritten.
-- The relay wins the endpoint port before loading the catalog or enabling
-  catalog writes. Lifecycle responses wait for atomic file replacement, file
-  sync, and directory sync before acknowledging durable state.
-- Session-owned tabs share a purple `control` group within each browser window.
-  Merely attached, unowned tabs stay in their existing location.
-- Explicit URL selection must match exactly one page. URL and index selectors
-  cannot be combined.
+### Inspection, Handoffs & Proof Recording
 
-CDP target visibility is scoped per client. Session-owned tabs and their events
-are visible only to that session's clients; unowned tabs are visible to all
-clients. This prevents concurrent Playwright clients from double-initializing a
-page while retaining explicit attached-tab recovery. Every ownership change
-reconciles existing client announcements, browser grouping, and page status.
+- `snapshot(options?)` returns a bounded semantic tree with stable same-document
+  `ref("eN")` handles, `diff`/`delta` modes, and `find` search. It traverses
+  open Shadow DOM roots, `<slot>` assigned nodes, and `display: contents`
+  wrappers, strips React SSR comment boundaries when computing accessible names,
+  and retries once on transient mid-capture navigation.
+- `screenshotWithLabels()` renders visual `e1..eN` badges and registers those
+  refs in the session's `SnapshotRefRegistry` so `ref("e1")` works immediately.
+- `handoff(message, { timeoutMs?, start? })` and `demonstrate()` bind to the
+  exact page target and wait for human completion via the in-page control.
+- Allowed Playwright mouse actions reveal the on-page Ghost Cursor (`src/ghost-cursor.ts`),
+  defaulting to `distance-glide` motion (straight on short hops `< 50px`, curved
+  Bezier wrist-arc with bounded bank on longer sweeps, returning to `0°` before
+  contact) and `tactile-bloom` SVG variable-stroke click shockwaves.
+- Proof overlays (`ghostCursor.caption`, `ghostCursor.callout`,
+  `ghostCursor.spotlight`, `ghostCursor.zoom`, `ghostCursor.resetZoom`, and
+  `ghostCursor.keys`) and the native Rust 60fps Steadicam compositor
+  (`crates/bc-studio`) support high-craft proof recordings with $C^3$-continuous
+  camera motion and per-pixel line-integral motion blur.
 
-## Current Capabilities
+### Network Capture, Secret Profiles & Authenticated Origins
 
-### Execute
+- `NetworkCapture` records normalized exchanges with bounded body retention and
+  exports HAR artifacts using route-scoped `BC_SECRET_N` references.
+- `SecretProfile` stores lossless values in mode-`0600` local files and injects
+  them into child workers via `secrets run`, redacting known values (>= 4 chars
+  or non-boolean/non-digit tokens) from stdout/stderr.
+- `BrowserControlClient` provides schema-decoded, origin-pinned `window.fetch`
+  requests inside the session's live page, with `Redacted` support for sensitive
+  responses.
 
-- Navigate, inspect, click, fill, wait, evaluate, and capture screenshots with
-  stock Playwright APIs.
-- Create tabs through `context.newPage()` and preserve session `state` across
-  execute calls.
-- Run inline code or `--file <path>` scripts, with conservative auto-return for
-  single expressions such as `page.url()`.
-- Expose selected Node built-ins: `fs`, `path`, `os`, `crypto`, `url`, `util`,
-  `events`, `stream`, `buffer`, `http`, `https`, and `zlib`. `child_process` is
-  not exposed by default.
-- Return structured values, script and page logs, page errors, warnings,
-  diagnostics, session identity, and per-call aftermath.
-- Health-check a default page after execution-context failure or a crash event.
-  Recreate unhealthy relay-owned pages and preserve unhealthy adopted tabs.
-- Transfer returned PNG, JPEG, and WebP buffers through a dedicated media
-  channel. MCP emits native image attachments without temporary files or
-  duplicated base64 metadata.
+## Next Priorities
 
-### Authenticated Network Capture
-
-- Each Execute Sandbox owns one normalized network recorder that follows its
-  default or adopted page across execute calls and page recovery.
-- Playwright page events capture root-frame and child-frame exchanges. HAR is
-  an export adapter, not the recorder's domain model.
-- Request and response bodies have per-body and aggregate byte budgets;
-  truncation, failures, and dropped-entry counts remain visible in summaries.
-- Written artifacts always replace credential-bearing headers, cookies, query
-  parameters, and structured body fields with stable `BC_SECRET_N` references.
-- Named secret profiles retain lossless values in restrictive local files.
-  Cross-process locks serialize profile publication; repeated captures and
-  reload-based refresh preserve references by observed request source.
-- `secrets run` injects profile values into a child process and redacts known
-  values from bounded stdout and stderr before returning them.
-- The public `SecretProfile` SDK exposes metadata-only `status` and redacted
-  profile-worker `run`, so generated applications do not require a
-  user-authored `browser-control secrets run` wrapper or gain raw profile reads.
-- While capture is active, values observed in completed exchanges and
-  secret-shaped returned data are removed from execute results, URLs, logs,
-  and journal records before they leave the sandbox.
-- CLI, MCP, and execute-sandbox helpers call the same session-owned recorder.
-  Capture is cancelled on session reset, deletion, and relay shutdown.
-
-### Inspection And Interaction Helpers
-
-- `snapshot(options?)` provides a bounded semantic read-before-act view.
-  Its default root prefers a single visible modal, includes out-of-main portal
-  dialogs, and reserves only a bounded share of the budget for list wrappers.
-  Native input roles match Playwright; native disclosure controls use structural
-  summary refs instead of an incorrect button-role constraint.
-- `snapshot({ diff: true })` compares against the previous compatible snapshot
-  while `snapshot({ delta: true })` returns a full first baseline and automatic
-  later deltas. `snapshot({ find, context })` returns matching semantic snippets.
-- `ref(id)` resolves controls from the latest valid snapshot and fails closed
-  after navigation or incompatible DOM drift. Compatible ids survive repeated
-  same-document captures.
-- `ariaSnapshot()` and raw Playwright provide deeper inspection when compact
-  snapshots are insufficient. The helper omits native text-control values,
-  custom ARIA range values, and editable content across SVG and open-shadow
-  boundaries. Each isolated-world mask is scoped to its activation frame and a
-  module-unique token, so concurrent guarded snapshots restore safely without
-  depending on unrelated frames. It must be awaited separately from other page
-  operations while the mask is active.
-- `screenshotWithLabels({ page, path? })` annotates likely interactive elements
-  and returns label metadata.
-- `screenshotDiff({ baseline, path?, threshold?, fullPage? })` compares PNGs at
-  the same CSS-pixel scale and returns changed-pixel counts/ratio plus a
-  red-highlighted image. It rejects dimension mismatches instead of resizing,
-  counts antialiasing changes, bounds input size, and never overwrites an existing
-  output. It is an execute helper, not a new action-tool family.
-- `fillInput` and `fillInputs` provide a DOM-evaluation fallback for input,
-  textarea, and contenteditable fields when native Playwright filling hangs.
-- `webmcp.list()` and `webmcp.call()` discover and invoke frame-scoped page tools.
-- Allowed Playwright mouse actions can reveal a spring-animated cursor.
-  `showGhostCursor()`, `hideGhostCursor()`, and `ghostCursor.show/hide` provide
-  explicit cosmetic control.
-
-### Human Control And Safety
-
-- The extension toolbar attaches or detaches the active tab. A toolbar click
-  cannot detach a tab while its session is executing or waiting for a handoff.
-- `handoff(message, { timeoutMs, start? })` binds a waiter to the exact page target,
-  survives top-level navigation, and resumes only from the matching in-page
-  completion control. The relay ignores ambiguous `target_closed` events from
-  extension child targets, so the extension preserves the WAIT UI until the
-  relay confirms a root detach or the tab is removed.
-- `start` registers WAIT state before invoking a prompt-triggering action, so
-  native WebAuthn or payment UI cannot block the script before handoff exists.
-  It runs only after the extension acknowledges WAIT. Human completion waits
-  for the action to settle; timeout or target cancellation disconnects the
-  sandbox's Playwright connection before releasing the execute permit, so a
-  non-settling action cannot mutate the page later.
-- `demonstrate()` uses that same waiter while recording human interactions and
-  returns structured actions plus editable Playwright code.
-- Destructive browser-state CDP methods such as `Browser.close` and cookie or
-  cache clearing are always blocked.
-- Read-only sessions additionally reject `Input.*`. They reduce trusted
-  mistakes; they do not prevent mutation through `page.evaluate`.
-- Safe destructive UI scripts inspect the target first, validate confirmation
-  dialog text inside the approved action, and verify the result through an
-  independent read path.
-
-### Operations And Diagnostics
-
-- Relay-backed CLI and MCP commands share one detached relay and start it when
-  needed. The relay outlives the MCP process, so a CLI handoff is not coupled to
-  MCP lifecycle. `status` and `doctor` remain observational; `serve` is the
-  foreground debugging path.
-- MCP startup, discovery, `skill`, and `session_current` are relay-independent.
-  Operational calls ensure readiness on each use; the first pays any cold-start
-  cost. Relay-backed observational tools report unavailability without autostart.
-- Smoke commands have one attempt and one verdict. Timeouts remain failures;
-  explicit repetitions are separate results, not silent recovery retries.
-- A running daemon is replaced only by explicit `browser-control relay restart`,
-  never by ordinary CLI/MCP/SDK calls. Safe shutdown protocol 2 requires the
-  exact managed instance and bounded requester metadata. Legacy, foreground,
-  source, and newer relays are never killed speculatively. A legacy relay needs
-  a one-time coordinated manual stop before the new runtime starts.
-- Admission closes before drain; accepted operations retain their transports and
-  permits through real settlement, including late journal promises and retired
-  sandbox cleanup. Restart timeouts leave the daemon running. Endpoint-local
-  `lifecycle.jsonl` records requested, cancelled, stopping, closed, and successor-ready
-  events without browser/account data.
-- `doctor` reports relay and extension versions, build mismatches, sessions,
-  active targets, child targets, crashed/browser-error targets, and built
-  artifacts.
-- `browser-control skill` prints the concise, current agent workflow.
-- Each execute appends a best-effort bounded entry to
-  `~/.browser-control/sessions/<id>/journal.jsonl`.
-- Recording supports extension `chrome.tabCapture` WebM for user-owned tabs and
-  relay-owned CDP screencasting to WebM or MP4.
-- CLI and MCP expose recording lifecycle operations. A separate bounded flight
-  recorder can save recent WebM/MP4 clips repeatedly without stopping.
-
-## Architecture Decisions
-
-### The relay owns orchestration
-
-- Node-side code uses Effect v4 (`4.0.0-rc.118`), with matching
-  `@effect/platform-node`. The local `effect` checkout is the API and pattern
-  reference; the former `effect-smol` repository is archived.
-- Effect-returning functions prefer `Effect.fn` or `Effect.fnUntraced`.
-- Playwright and relay resources use scoped lifecycles.
-- Application configuration uses Effect `Config`; direct environment access is
-  limited to synchronous Node process adapters.
-- The extension remains plain TypeScript and browser-native.
-- The extension protocol remains custom JSON over websocket until schema or
-  versioning needs justify Effect RPC. Its shared pure validators reject
-  malformed commands and envelopes without pulling Effect into the MV3 shim.
-- Authenticated capture stays in the relay-backed session sandbox. The
-  extension forwards the CDP traffic Playwright already needs; Node handles
-  correlation, budgets, export, credential profiles, and refresh.
-
-### One schema and one client define the relay boundary
-
-- HTTP wire shapes live in `src/relay-schema.ts` as Effect Schemas.
-- Responders and clients derive types from those schemas rather than hand-written
-  JSON checks.
-- CLI and MCP relay access goes through `src/relay-client.ts`; neither maintains
-  an ad hoc HTTP client.
-- The public Effect client uses the same typed relay client. It atomically
-  ensures named sessions and exposes an origin-bound capability for structured
-  JSON requests in the live default page.
-- Authenticated-origin requests use page-context `window.fetch`, never exported
-  cookies or Secret Profiles. They pin an exact origin, accept relative paths,
-  block redirects, bound response bytes, and never retry mutations.
-- Sensitive authenticated responses bypass execute journals, return as Effect
-  `Redacted` values, set `Cache-Control: no-store`, and fail closed while a
-  session Network Capture is active.
-- The public client reveals sensitive responses through its own `reveal`
-  operation so package-manager layouts with multiple Effect instances do not
-  cross incompatible module-local Redacted registries.
-- Boundary failures use tagged schema errors and a shared coded error envelope.
-  The relay retains its message as the top-level human-readable message while
-  clients can branch on stable codes for invalid requests, missing resources,
-  ownership conflicts, lifecycle conflicts, and internal failures.
-- Each HTTP effect is interrupted when its response closes. Execute protects
-  the underlying uncancellable Playwright Promise so its session permit remains
-  held until browser work actually settles.
-- Corrupt current-session persistence fails visibly and remains untouched
-  rather than being interpreted as an empty store.
-
-### CDP relay invariants preserve reconnect correctness
-
-- Store a root page target before applying `Target.setAutoAttach`; Chrome can
-  emit child or OOPIF attachment events immediately.
-- Forward routable dedicated workers to Playwright. Resume and suppress paused
-  unsupported children, such as page-scoped service workers, so they cannot
-  block parent navigation.
-- Replay stored child attachments and current child-frame navigation when an
-  OOPIF reconnects.
-- Never announce one target id twice to the same client. Emit
-  `Target.detachedFromTarget` before re-announcing it with a new session id.
-- Treat a new root target/session generation for an existing physical tab as a
-  replacement transaction: preserve committed ownership, roll back provisional
-  adoption ownership, detach old clients and children, rebind handoffs, and
-  reacquire the new Playwright page by exact target id.
-- Await HTTP and websocket close callbacks during relay shutdown so tests and
-  smoke runs do not leak ports or listeners.
-- Relay shutdown closes the adoption gate and drains active or queued adoption
-  workers before session resources. It never interrupts a worker whose
-  underlying Playwright Promise may still mutate its sandbox.
-
-### A command timeout does not imply a dead extension
-
-A timed-out extension RPC fails only that command. The relay closes the
-extension socket only when a websocket ping also fails. This prevents one
-dialog-blocked tab from destroying every session's relay state.
-
-### Execute output describes one call
-
-Warnings and aftermath belong to the execute call that caused them. Aftermath
-tracks URL movement, main-frame navigation, console and page errors, and
-handoffs. The relay does not install a passive `page.on("dialog")` listener
-because that would suppress Playwright's auto-dismiss behavior and can hang the
-page.
-
-### Debug traces exclude user data
-
-With `BROWSER_CONTROL_DEBUG=1`, `[bc:ctx]` logs contain bounded target,
-ownership, context-lifecycle, loader, reset, and error-shape metadata. They do
-not contain expressions, arguments, results, headers, cookies, or form values.
-
-### Builds provide runtime identity
-
-`scripts/build-cli.ts` injects the package version and build id. Source runs use
-`0.0.0-dev` and a deterministic fingerprint of `src/*.ts`, `package.json`, and
-`pnpm-lock.yaml`; runtime code does not hardcode release versions. The
-relay reports both values so `doctor` can identify a stale long-running relay.
-It also reports an instance id, start time, and PID; bounded managed-relay
-process-fault diagnostics are retained locally so unexpected same-build
-restarts can be distinguished from session eviction.
-Explicit restart confirms the exact managed instance and safe shutdown protocol,
-then waits for that process to exit before starting the current build. Ordinary
-commands never replace a running relay.
-
-## Known Limitations
-
-- Browser Control does not expose custom `page.sessionId()`, `page.targetId()`,
-  `frame.frameId()`, or `locator.selector()` APIs.
-- Raw CDP behavior has no guarantees beyond stock Playwright and the relay's
-  documented guardrails.
-- Native `locator.fill()` can hang on login-style fields when installed browser
-  extensions inject focus handlers or overlays. `fillInput` is the explicit
-  fallback for input, textarea, and contenteditable elements.
-- `fillInput` cannot reach fields inside closed shadow roots.
-- OOPIF behavior is guaranteed only by the current reconnect smoke scenarios.
-- Clipboard automation on insecure origins is not guaranteed.
-- Playwright download events and `download.saveAs()` are unavailable in
-  extension-backed tabs because Chromium blocks download behavior commands from
-  `chrome.debugger`; download waits return a direct capability error.
-- CDP recording activates its tab to avoid background compositor throttling,
-   preserves the starting CSS viewport rather than downscaling to 720p, requires
-   `ffmpeg` on `PATH`, and does not capture audio. It captures uncapped JPEG100
-   compositor frames, normalizes device pixels using the first frame's surface
-   width, then crops at native CSS size (rounding odd output dimensions down to
-   even). Output defaults to 60 fps; actual motion depends on source frames.
-   The encoder starts on the first frame; a start-time ffmpeg probe preserves
-   missing-dependency errors. Keep viewport/emulation fixed during recording.
-- Recording start/stop/status expose JSON receipts. CDP quality metrics come from
-  the same counters as the sidecar: dimensions, configured rate, received/retained
-  source frames and rates, coalescing/drops, and stop-time screenshot fallback.
-  Compositor events are not distinct-motion measurements. Tab capture and older
-  relays omit unavailable quality data. All explicit frame rates must be integers
-  in 1..60; never silently clamp unsupported requests.
-- The flight recorder has the same tab-activation, viewport, ffmpeg, and no-audio
-  constraints as CDP recording. Its 128 MiB/7,200-frame bounds can shorten the
-  requested retention window on visually busy pages.
-- The trusted sandbox exposes selected Node built-ins, not unrestricted local
-  command execution.
-- Exact parity across third-party authentication remains a manual diagnostic.
-  Compare the same starting URL and browser profile in a fresh relay-owned tab
-  and an authenticated adopted tab without automating credentials, tokens, or
-  production account state.
-
-## Reliability
-
-Canonical CDP clients can replay validated execution-context descriptions after
-their frame-tree response and successful Runtime enable acknowledgment. Replay
-is requester-scoped and deduplicated; target, frame, extension generation and
-ownership changes invalidate it. Aliases and cache misses retain bounded reset
-recovery. A cached observation alone is never proof of client readiness.
-
-Adoption binds exact target identity independently of Playwright initialization.
-The first execute resolves the adopted page lazily with a bounded native connect
-timeout; failed setup retains ownership and never runs user code. Title-read
-watchdogs report an operation-specific context-read timeout without triggering
-page replacement or blocking cached URL reads. A timeout alone does not prove
-renderer unresponsiveness.
-
-`pnpm gauntlet:isolated` tests the current checkout through a disposable
-Chromium profile, the real MV3 shim and a private relay without touching the
-active runtime. Correctness failures are never retried into green. See
-`docs/RELIABILITY.md` for CI lanes, evidence boundaries and next work.
-
-Durable same-ID session lifecycle operations serialize publication and rollback;
-an existing in-flight identity is not a durable acknowledgment. Credential
-rotation preserves historical values for transient output redaction while secret
-profiles retain only the current reference values. Handoff completion retains its
-deadline and target-cancellation path until the start action settles.
-
-## Backlog
-
-These items are accepted directions but are not current priorities:
-
-- Harden extension reconnect handling with `addEventListener`, one source for
-  the `hello` message, and a bounded outbound event queue if lost debugger events
-  continue to matter in practice.
-- Add optional managed browser launch, including Brave and profile selection.
-- Scope the saved human-shell current session by browser profile, in addition to
-  relay endpoint, if multiple profiles become a supported workflow.
-- Add stricter workspace or session ownership only if the loose shared attached
-  tab pool causes concrete failures.
-- Promote the reviewed Chrome Web Store extension from unlisted beta to public
-  after one successful extension/relay compatibility cycle.
-- Bundle an unpacked extension for managed and development browser launch.
-- Add token-authenticated remote relay mode before allowing the relay to bind
-  beyond loopback.
-- Evaluate custom CDP or a smaller Playwright-compatible client only after stock
-  Playwright creates a concrete blocker.
-- Add richer compact snapshot semantics only in response to demonstrated agent
-  failures.
-- Add broader local execution behind an explicit capability only when an agent
-  workflow requires it.
-- Consider a right-click `send element to Browser Control` pin if handoff
-  evidence shows a recurring element-selection problem.
-- Add true mid-script cancellation. Toolbar clicks currently preserve active
-  executes and handoffs rather than interrupting them.
-
-Explicitly declined for now:
-
-- Dedicated observation commands such as `browser-control snapshot`,
-  `screenshot`, or `logs`; execute-level helpers are sufficient.
-- Topic-specific `skill` subcommands; the workflow should remain one concise
-  document.
-- A side panel.
-
-## Historical Milestone
-
-The first milestone proved the complete path from toolbar attachment through the
-extension and relay to stock Playwright. It also proved navigation,
-`context.newPage()`, reconnect, OOPIF replay, dedicated workers, concurrent
-session isolation, compact snapshots, handoffs, media returns, and local fixture
-checkout flows.
-
-The current smoke matrix covers local forms, cart and checkout, reconnect and
-redirect reconnect, explicit target selection, crashed- and detached-page
-recovery, fill helpers with string and Locator targets, snapshot refs, handoff
-navigation and cross-tab binding, OOPIF reconnect, dedicated workers, the
-download capability boundary, cursor behavior, session isolation,
-multi-client visibility, stale-client ordering, and raw-client checkout.
-Historical milestone scope is no longer used as the active backlog; `Next
-Priorities` is authoritative.
+1. **Automated Steadicam Post-Processing Integration**: Wire `crates/bc-studio`
+   directly into an optional `browser-control recording studio` / `--studio`
+   workflow so agents can produce 2x Retina Steadicam proof videos in one command.
+2. **Chrome Web Store Publication**: Complete review of the unlisted MV3 shim
+   (`0.0.25`, protocol `2`) before public Store listing.
+3. **Simultaneous Multi-Profile Support (`PR #72`)**: Rebase and land pinned
+   per-profile session isolation when simultaneous multi-profile workflows are
+   needed.
