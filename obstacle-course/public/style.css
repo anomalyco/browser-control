@@ -710,6 +710,36 @@ h2 {
   background: var(--accent);
 }
 
+.dot.teal {
+  background: var(--teal);
+}
+
+.mini-tabs {
+  position: absolute;
+  right: 0.45rem;
+  top: 0.35rem;
+  display: inline-flex;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 1px;
+}
+
+.mini-tab {
+  background: transparent;
+  border: 0;
+  padding: 0.14rem 0.42rem;
+  font-size: 0.68rem;
+  color: var(--muted);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.mini-tab.active {
+  background: var(--panel-2);
+  color: var(--fg);
+}
+
 .toggle-label {
   display: inline-flex;
   align-items: center;

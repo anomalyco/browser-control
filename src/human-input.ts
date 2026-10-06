@@ -26,6 +26,10 @@ export function getHumanModelProfile(): HumanModelProfile {
     return cachedProfile
   }
   cachedProfileCheckedAt = now
+  if (process.env.VITEST === "true" && !process.env.BROWSER_CONTROL_HUMAN_MODEL_PATH) {
+    cachedProfile = DEFAULT_HUMAN_MODEL_PROFILE
+    return cachedProfile
+  }
   const customPath =
     process.env.BROWSER_CONTROL_HUMAN_MODEL_PATH ??
     path.join(os.homedir(), ".browser-control", "human-model.json")
@@ -481,15 +485,26 @@ async function scrollToward(tab: TabState, params: JsonObject, send: Send): Prom
 export function glide(dx: number, dy: number, profile: HumanModelProfile = getHumanModelProfile()): Point[] {
   const distance = Math.hypot(dx, dy)
   if (distance < 40) return [{ x: round2(dx), y: round2(dy) }]
-  const { scroll } = profile
+  const { scroll, scrollCurve } = profile
   const frames = clamp(
     Math.round(((scroll.baseDurationMs + distance * scroll.durationPerPx) * random(0.9, 1.1)) / 16.7),
     scroll.minFrames,
     scroll.maxFrames,
   )
-  const ease = (t: number) => 1 - (1 - t) ** scroll.easePower
-  return Array.from({ length: frames }, (_, index) => {
-    const delta = ease((index + 1) / frames) - ease(index / frames)
+  const curve =
+    scrollCurve && scrollCurve.length >= 4
+      ? scrollCurve
+      : [0.38, 0.92, 1.48, 1.82, 1.74, 1.46, 1.16, 0.88, 0.64, 0.44, 0.28, 0.14]
+  const rawWeights = Array.from({ length: frames }, (_, index) => {
+    const pos = ((index + 0.5) / frames) * (curve.length - 1)
+    const lo = Math.floor(pos)
+    const hi = Math.ceil(pos)
+    const frac = pos - lo
+    return Math.max(0.05, curve[lo]! * (1 - frac) + curve[hi]! * frac)
+  })
+  const totalWeight = rawWeights.reduce((acc, w) => acc + w, 0)
+  return rawWeights.map((w) => {
+    const delta = w / totalWeight
     return { x: round2(dx * delta), y: round2(dy * delta) }
   })
 }

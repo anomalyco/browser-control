@@ -131,6 +131,7 @@ export type HumanModelProfile = {
     readonly rolloverRate: number
   }
   readonly velocityCurve: readonly number[]
+  readonly scrollCurve?: readonly number[]
 }
 
 export type ReachAnalysis = {
@@ -147,8 +148,10 @@ export type ReachAnalysis = {
   readonly overshootPx: number
   readonly undershootPx: number
   readonly splitU: number
+  readonly submovementPoint?: Point
   readonly tremorRmsPx: number
   readonly tremorFreqHz: number
+  readonly compactTarget: boolean
   readonly aimDx: number
   readonly aimDy: number
   readonly settleMs: number
@@ -272,19 +275,63 @@ export const DEFAULT_HUMAN_MODEL_PROFILE: HumanModelProfile = {
     0.12, 0.44, 0.88, 1.32, 1.68, 1.89, 1.94, 1.84, 1.64, 1.4,
     1.16, 0.94, 0.74, 0.57, 0.42, 0.3, 0.21, 0.14, 0.08, 0.03,
   ],
+  scrollCurve: [0.38, 0.92, 1.48, 1.82, 1.74, 1.46, 1.16, 0.88, 0.64, 0.44, 0.28, 0.14],
 }
 
 export function analyzeReach(reach: RecordedReach): ReachAnalysis | undefined {
-  const dx = reach.to.x - reach.from.x
-  const dy = reach.to.y - reach.from.y
+  if (reach.samples.length < 4) return undefined
+
+  // 1. Trim trailing stationary settle samples after the cursor arrives within 3.2px of `to`
+  let arriveIdx = reach.samples.length - 1
+  while (
+    arriveIdx > 3 &&
+    Math.hypot(reach.samples[arriveIdx - 1]!.x - reach.to.x, reach.samples[arriveIdx - 1]!.y - reach.to.y) <= 3.2
+  ) {
+    arriveIdx -= 1
+  }
+
+  // 2. Trim pre-departure stationary samples near `reach.from` (and any >=320ms scroll/typing pause on non-fitts stages)
+  let startIdx = 0
+  if (reach.stage === "scroll-acquire" || reach.stage === "form-focus" || reach.stage === "form-submit") {
+    for (let i = arriveIdx - 1; i >= 1; i -= 1) {
+      const curr = reach.samples[i]!
+      const prev = reach.samples[i - 1]!
+      if (
+        curr.t - prev.t >= 320 &&
+        Math.hypot(curr.x - prev.x, curr.y - prev.y) <= 8 &&
+        Math.hypot(reach.to.x - curr.x, reach.to.y - curr.y) >= 24
+      ) {
+        startIdx = i
+        break
+      }
+    }
+  }
+  while (
+    startIdx < arriveIdx - 3 &&
+    Math.hypot(
+      reach.samples[startIdx + 1]!.x - reach.from.x,
+      reach.samples[startIdx + 1]!.y - reach.from.y,
+    ) <= 6.0
+  ) {
+    startIdx += 1
+  }
+
+  const flightSamples = reach.samples.slice(startIdx, arriveIdx + 1)
+  if (flightSamples.length < 4) return undefined
+
+  const origin = flightSamples[0]!
+  const dx = reach.to.x - origin.x
+  const dy = reach.to.y - origin.y
   const distance = Math.hypot(dx, dy)
-  if (!Number.isFinite(distance) || distance < 18 || reach.samples.length < 4) {
+  if (!Number.isFinite(distance) || distance < 18) {
     return undefined
   }
-  const t0 = reach.samples[0]!.t
-  const tEnd = reach.samples[reach.samples.length - 1]!.t
-  const rawDuration = reach.durationMs > 0 ? reach.durationMs : tEnd - t0
-  const durationMs = clamp(rawDuration, 35, 2500)
+  const t0 = origin.t
+  const tArrive = flightSamples[flightSamples.length - 1]!.t
+  const tRawEnd = reach.samples[reach.samples.length - 1]!.t
+  const rawFlightDuration = tArrive - t0 > 25 ? tArrive - t0 : reach.durationMs
+  const durationMs = clamp(rawFlightDuration, 35, 1600)
+  const measuredSettleMs = clamp(Math.max(reach.settleMs, tRawEnd - tArrive), 6, 260)
   const targetWidth = Math.max(8, reach.targetWidth || 36)
   const indexOfDifficulty = Math.log2(distance / targetWidth + 1)
   const throughputBps = indexOfDifficulty / (durationMs / 1000)
@@ -297,20 +344,21 @@ export function analyzeReach(reach: RecordedReach): ReachAnalysis | undefined {
   let signedBow = 0
   let maxTangential = 0
   let maxTangentialU = 1
-  const projections: { readonly u: number; readonly par: number; readonly perp: number }[] = []
+  let maxTangentialPoint: Point | undefined
+  const projections: { readonly u: number; readonly par: number; readonly perp: number; readonly x: number; readonly y: number }[] = []
 
-  for (let i = 0; i < reach.samples.length; i += 1) {
-    const sample = reach.samples[i]!
+  for (let i = 0; i < flightSamples.length; i += 1) {
+    const sample = flightSamples[i]!
     if (i > 0) {
-      const prev = reach.samples[i - 1]!
+      const prev = flightSamples[i - 1]!
       pathLen += Math.hypot(sample.x - prev.x, sample.y - prev.y)
     }
-    const u = clamp((sample.t - t0) / Math.max(1, tEnd - t0), 0, 1)
-    const relX = sample.x - reach.from.x
-    const relY = sample.y - reach.from.y
+    const u = clamp((sample.t - t0) / Math.max(1, tArrive - t0), 0, 1)
+    const relX = sample.x - origin.x
+    const relY = sample.y - origin.y
     const par = relX * tangent.x + relY * tangent.y
     const perp = relX * normal.x + relY * normal.y
-    projections.push({ u, par, perp })
+    projections.push({ u, par, perp, x: sample.x, y: sample.y })
     if (u >= 0.12 && u <= 0.88 && Math.abs(perp) > maxAbsPerp) {
       maxAbsPerp = Math.abs(perp)
       signedBow = perp
@@ -318,6 +366,7 @@ export function analyzeReach(reach: RecordedReach): ReachAnalysis | undefined {
     if (par > maxTangential) {
       maxTangential = par
       maxTangentialU = u
+      maxTangentialPoint = { x: round(sample.x, 1), y: round(sample.y, 1) }
     }
   }
 
@@ -346,21 +395,33 @@ export function analyzeReach(reach: RecordedReach): ReachAnalysis | undefined {
     return round(0.25 * prev + 0.5 * v + 0.25 * next, 3)
   })
 
-  let peakBin = 6
+  let peakBin = 5
   let peakVal = -1
-  for (let b = 1; b < binCount - 2; b += 1) {
+  for (let b = 0; b < binCount - 2; b += 1) {
     if (velocityBins[b]! > peakVal) {
       peakVal = velocityBins[b]!
       peakBin = b
     }
   }
-  const peakVelocityU = clamp((peakBin + 0.5) / binCount, 0.22, 0.62)
+  // Compute continuous halfway-distance crossing fraction u50 (where minimumJerk(u^gamma) = 0.5)
+  let halfDistanceU = (peakBin + 0.5) / binCount
+  for (let i = 1; i < projections.length; i += 1) {
+    const prev = projections[i - 1]!
+    const curr = projections[i]!
+    if (curr.par >= distance * 0.5) {
+      const frac = clamp((distance * 0.5 - prev.par) / Math.max(1e-6, curr.par - prev.par), 0, 1)
+      halfDistanceU = prev.u + frac * (curr.u - prev.u)
+      break
+    }
+  }
+  const peakVelocityU = clamp(halfDistanceU * 0.65 + ((peakBin + 0.5) / binCount) * 0.35, 0.18, 0.56)
 
   // Submovement classification (Meyer's model)
   let mode: "overshoot" | "undershoot" | "direct" = "direct"
   let overshootPx = 0
   let undershootPx = 0
   let splitU = 1
+  let submovementPoint: Point | undefined
 
   if (distance >= 110) {
     // Also detect reversal hooks at the end of the reach (where tangential progress peaks and pulls back >= 2.2px)
@@ -369,6 +430,7 @@ export function analyzeReach(reach: RecordedReach): ReachAnalysis | undefined {
       mode = "overshoot"
       overshootPx = clamp(pullBackAmount, 2.2, 24)
       splitU = clamp(maxTangentialU, 0.68, 0.92)
+      submovementPoint = maxTangentialPoint
     } else {
       for (let b = Math.max(peakBin + 2, 7); b <= 16; b += 1) {
         const vDip = velocityBins[b]!
@@ -380,6 +442,10 @@ export function analyzeReach(reach: RecordedReach): ReachAnalysis | undefined {
           mode = "undershoot"
           undershootPx = clamp(remaining, 3.5, 42)
           splitU = clamp(uDip, 0.45, 0.86)
+          submovementPoint = {
+            x: round(origin.x + tangent.x * projDip.par + normal.x * projDip.perp, 1),
+            y: round(origin.y + tangent.y * projDip.par + normal.y * projDip.perp, 1),
+          }
           break
         }
       }
@@ -403,10 +469,11 @@ export function analyzeReach(reach: RecordedReach): ReachAnalysis | undefined {
   const tremorRmsPx = clamp(Math.sqrt(residualSqSum / Math.max(1, projections.length)), 0.15, 4.5)
   const tremorFreqHz = clamp((zeroCrossings / 2) / (durationMs / 1000), 1.0, 14.0)
 
+  const compactTarget = (reach.targetWidth || 40) <= 96 && (reach.targetHeight || 36) <= 72
   const scaleX = clamp(40 / Math.max(16, reach.targetWidth || 40), 0.5, 1.6)
   const scaleY = clamp(32 / Math.max(16, reach.targetHeight || 32), 0.5, 1.6)
-  const aimDx = clamp((reach.to.x - reach.targetCenter.x) * scaleX, -8, 8)
-  const aimDy = clamp((reach.to.y - reach.targetCenter.y) * scaleY, -6, 6)
+  const aimDx = clamp((reach.to.x - reach.targetCenter.x) * scaleX, -6, 6)
+  const aimDy = clamp((reach.to.y - reach.targetCenter.y) * scaleY, -5, 5)
 
   return {
     distance: round(distance, 1),
@@ -422,11 +489,13 @@ export function analyzeReach(reach: RecordedReach): ReachAnalysis | undefined {
     overshootPx: round(overshootPx, 2),
     undershootPx: round(undershootPx, 2),
     splitU: round(splitU, 3),
+    ...(submovementPoint ? { submovementPoint } : {}),
     tremorRmsPx: round(tremorRmsPx, 3),
     tremorFreqHz: round(tremorFreqHz, 2),
+    compactTarget,
     aimDx: round(aimDx, 2),
     aimDy: round(aimDy, 2),
-    settleMs: clamp(reach.settleMs, 4, 260),
+    settleMs: round(measuredSettleMs, 1),
     holdMs: clamp(reach.holdMs, 16, 260),
     velocityBins,
   }
@@ -534,12 +603,12 @@ export function fitHumanModel(
 
   // 2. Peak velocity timing & Woodworth/Meyer ballistic exponent
   const medianPeakU = clamp(
-    blend(quantile(reachAnalyses.map((r) => r.peakVelocityU), 0.5), prior.reach.peakVelocityU, nReaches),
-    0.28,
-    0.52,
+    blend(quantile(reachAnalyses.map((r) => r.peakVelocityU), 0.5), prior.reach.peakVelocityU, nReaches, 4),
+    0.20,
+    0.54,
   )
-  const empiricalExponent = clamp(Math.log(0.5) / Math.log(medianPeakU), 0.58, 0.94)
-  const ballisticExponent = round(blend(empiricalExponent, prior.reach.ballisticExponent, nReaches), 3)
+  const empiricalExponent = clamp(Math.log(0.5) / Math.log(medianPeakU), 0.45, 0.92)
+  const ballisticExponent = round(blend(empiricalExponent, prior.reach.ballisticExponent, nReaches, 4), 3)
 
   // 3. Curvature, path ratio, and wrist-pivot bias
   const bows = reachAnalyses.map((r) => r.bowRatio)
@@ -610,13 +679,15 @@ export function fitHumanModel(
     2,
   )
 
-  // 6. Click aim offset, settle & hold duration
-  const aimDxs = reachAnalyses.map((r) => r.aimDx)
-  const aimDys = reachAnalyses.map((r) => r.aimDy)
-  const aimBiasX = round(clamp(blend(mean(aimDxs), prior.click.aimBiasX, nReaches, 8), -1.8, 1.8), 2)
-  const aimBiasY = round(clamp(blend(mean(aimDys), prior.click.aimBiasY, nReaches, 8), -1.5, 1.5), 2)
-  const aimSigmaX = round(clamp(blend(stdDev(aimDxs), prior.click.aimSigmaX, nReaches), 0.9, 2.8), 2)
-  const aimSigmaY = round(clamp(blend(stdDev(aimDys), prior.click.aimSigmaY, nReaches), 0.8, 2.4), 2)
+  // 6. Click aim offset (on compact targets), settle & hold duration
+  const compactReaches = reachAnalyses.filter((r) => r.compactTarget)
+  const aimSource = compactReaches.length >= 2 ? compactReaches : reachAnalyses
+  const aimDxs = aimSource.map((r) => r.aimDx)
+  const aimDys = aimSource.map((r) => r.aimDy)
+  const aimBiasX = round(clamp(blend(mean(aimDxs), prior.click.aimBiasX, aimSource.length, 8), -1.8, 1.8), 2)
+  const aimBiasY = round(clamp(blend(mean(aimDys), prior.click.aimBiasY, aimSource.length, 8), -1.5, 1.5), 2)
+  const aimSigmaX = round(clamp(blend(stdDev(aimDxs), prior.click.aimSigmaX, aimSource.length), 0.9, 2.8), 2)
+  const aimSigmaY = round(clamp(blend(stdDev(aimDys), prior.click.aimSigmaY, aimSource.length), 0.8, 2.4), 2)
 
   const settles = reachAnalyses.map((r) => r.settleMs)
   const holds = reachAnalyses.map((r) => r.holdMs)
@@ -625,11 +696,30 @@ export function fitHumanModel(
   const holdMinMs = Math.round(clamp(blend(quantile(holds, 0.2), prior.click.holdMinMs, nReaches), 24, 65))
   const holdMaxMs = Math.round(clamp(blend(quantile(holds, 0.8), prior.click.holdMaxMs, nReaches), holdMinMs + 14, 115))
 
-  // 7. Scroll kinematics
+  // 7. Scroll kinematics & 12-bin empirical scroll curve
   const nScrolls = allScrolls.length
   const scrollFrameCounts = allScrolls.map((s) => s.frameCount)
   const minFrames = Math.round(clamp(blend(quantile(scrollFrameCounts, 0.2), prior.scroll.minFrames, nScrolls, 4), 4, 8))
   const maxFrames = Math.round(clamp(blend(quantile(scrollFrameCounts, 0.85), prior.scroll.maxFrames, nScrolls, 4), minFrames + 3, 16))
+  const priorScrollCurve = prior.scrollCurve ?? [0.38, 0.92, 1.48, 1.82, 1.74, 1.46, 1.16, 0.88, 0.64, 0.44, 0.28, 0.14]
+  const scrollBinsList: number[][] = []
+  for (const s of allScrolls) {
+    if (s.frames.length < 3) continue
+    const mags = s.frames.map((f) => Math.hypot(f.dx, f.dy))
+    const avgMag = Math.max(1e-3, mean(mags))
+    const bins12 = Array.from({ length: 12 }, (_, b) => {
+      const idx = Math.min(mags.length - 1, Math.floor(((b + 0.5) / 12) * mags.length))
+      return mags[idx]! / avgMag
+    })
+    scrollBinsList.push(bins12)
+  }
+  const scrollCurve = priorScrollCurve.map((priorVal, b) => {
+    const samples = scrollBinsList.map((bins) => bins[b] ?? priorVal)
+    const raw = blend(quantile(samples, 0.5), priorVal, scrollBinsList.length, 3)
+    // Preserve natural tail deceleration so the final frame is always smaller than frame 0
+    const tailDamp = b >= 8 ? 1 - (b - 7) * 0.14 : 1
+    return round(raw * tailDamp, 3)
+  })
 
   // 8. Keyboard cadence
   const ikis = allKeys.map((k) => k.ikiMs).filter((v) => v > 12 && v < 450)
@@ -735,5 +825,6 @@ export function fitHumanModel(
       rolloverRate,
     },
     velocityCurve,
+    scrollCurve,
   }
 }

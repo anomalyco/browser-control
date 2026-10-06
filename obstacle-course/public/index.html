@@ -87,10 +87,19 @@
               <div class="canvas-box">
                 <canvas id="paths-canvas"></canvas>
                 <span class="canvas-tag">Reach paths &amp; click scatter</span>
+                <div class="legend">
+                  <span class="legend-item"><i class="dot fitted"></i>Direct</span>
+                  <span class="legend-item"><i class="dot base"></i>Overshoot hook</span>
+                  <span class="legend-item"><i class="dot teal"></i>Re-clutch</span>
+                </div>
               </div>
               <div class="canvas-box small">
                 <canvas id="velocity-canvas"></canvas>
-                <span class="canvas-tag">Normalized speed v(u) · peak u = <strong id="peak-u-label">0.39</strong></span>
+                <span class="canvas-tag" id="subchart-tag">Normalized speed v(u) · peak u = <strong id="peak-u-label">0.39</strong></span>
+                <div class="mini-tabs">
+                  <button type="button" class="mini-tab active" data-subchart="velocity">Velocity</button>
+                  <button type="button" class="mini-tab" data-subchart="scroll-keys">Scroll &amp; Keys</button>
+                </div>
               </div>
             </div>
           </section>

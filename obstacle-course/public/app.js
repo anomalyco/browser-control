@@ -96,7 +96,19 @@ const clickRipples = []
 let serverState = null
 let selectedHandleFilter = "all"
 let inspectedReaches = []
+let inspectedReachAnalyses = []
+let inspectedKeys = []
 let inspectedRunLabel = "Current session"
+let activeSubchart = "velocity"
+
+for (const btn of document.querySelectorAll(".mini-tab")) {
+  btn.addEventListener("click", () => {
+    for (const b of document.querySelectorAll(".mini-tab")) b.classList.remove("active")
+    btn.classList.add("active")
+    activeSubchart = btn.dataset.subchart || "velocity"
+    drawVelocityProfile()
+  })
+}
 
 function clamp(v, min, max) {
   return Math.min(max, Math.max(min, v))
@@ -165,6 +177,9 @@ arena.addEventListener(
   "wheel",
   (event) => {
     const now = performance.now()
+    const pt = arenaPoint(event.clientX, event.clientY)
+    lastAnchor = pt
+    activeBuffer = [{ x: pt.x, y: pt.y, t: now }]
     if (Math.abs(event.deltaX) > 0 || !Number.isInteger(event.deltaY) || Math.abs(event.deltaY) < 40) {
       detectedDevice = "trackpad"
     }
@@ -593,6 +608,8 @@ function renderDragStage(index) {
   token.addEventListener("pointerdown", (e) => {
     dragging = true
     dragOrigin = arenaPoint(e.clientX, e.clientY)
+    recordTargetAcquisition(token, "drag-grab")
+    activeBuffer = [{ x: dragOrigin.x, y: dragOrigin.y, t: performance.now() }]
     token.setPointerCapture(e.pointerId)
   })
 
@@ -607,7 +624,16 @@ function renderDragStage(index) {
     if (!dragging) return
     dragging = false
     const pt = arenaPoint(e.clientX, e.clientY)
+    const now = e.timeStamp || performance.now()
     if (Math.hypot(pt.x - slotX, pt.y - slotY) <= 44) {
+      pendingDown = {
+        x: pt.x,
+        y: pt.y,
+        at: now,
+        upAt: now,
+        upPoint: pt,
+        bufferSnapshot: [...activeBuffer, { x: pt.x, y: pt.y, t: now }],
+      }
       recordTargetAcquisition(slot, "drag", dragOrigin)
       completedSteps += 1
       renderDragStage(index + 1)
@@ -830,6 +856,8 @@ async function inspectRunById(runId) {
   const data = await res.json()
   if (data.run?.reaches) {
     inspectedReaches = data.run.reaches
+    inspectedReachAnalyses = data.reachAnalyses || []
+    inspectedKeys = data.run.keys || []
     inspectedRunLabel = `@${data.run.handle} · ${data.run.device} · ${data.run.sampleRateHz}Hz`
     renderLabVisuals()
   }
@@ -907,26 +935,27 @@ function renderParameters(model) {
 function renderRoster(state) {
   rosterCountLabel.textContent = `${state.roster.length} people · ${state.totals.runs} runs`
   rosterList.innerHTML = ""
-  for (const run of state.recentRuns) {
+  state.roster.forEach((person, idx) => {
     const item = document.createElement("div")
-    item.className = "roster-item"
+    item.className = `roster-item ${selectedHandleFilter === person.handle ? "selected" : ""}`
     item.innerHTML = `
       <div>
-        <strong>@${run.handle}</strong>
-        <span class="meta-label"> · ${run.device} · ${run.sampleRateHz}Hz</span>
+        <strong>#${idx + 1} @${person.handle}</strong>
+        <span class="meta-label"> · ${person.device} (${person.runs})</span>
       </div>
       <div class="roster-meta">
-        <span>${run.throughputBps} bps</span>
-        <span>u=${run.peakVelocityU}</span>
-        <span>${(run.courseTimeMs / 1000).toFixed(1)}s</span>
+        <span>${person.throughputBps} bps</span>
+        <span>u=${person.peakVelocityU}</span>
+        <span>${(person.bestTimeMs / 1000).toFixed(1)}s</span>
       </div>
     `
     item.addEventListener("click", () => {
-      inspectRunById(run.id)
-      fetchState(run.handle)
+      const latestRun = state.recentRuns.find((r) => r.handle === person.handle)
+      if (latestRun) inspectRunById(latestRun.id)
+      fetchState(person.handle, "all")
     })
     rosterList.appendChild(item)
-  }
+  })
 }
 
 // Draw captured hand trajectories & click bullseye scatter
@@ -975,8 +1004,10 @@ function drawCapturedPaths() {
   const sx = (w - pad * 2) / Math.max(300, maxX * 1.05)
   const sy = (h - pad * 2) / Math.max(200, maxY * 1.05)
 
-  for (const r of inspectedReaches) {
-    if (!r.samples || r.samples.length < 2) continue
+  inspectedReaches.forEach((r, reachIdx) => {
+    if (!r.samples || r.samples.length < 2) return
+    const analysis = inspectedReachAnalyses[reachIdx]
+    const mode = analysis?.mode || "direct"
     // Straight reference chord
     ctx.strokeStyle = "rgba(236, 235, 227, 0.08)"
     ctx.lineWidth = 1
@@ -985,9 +1016,14 @@ function drawCapturedPaths() {
     ctx.lineTo(pad + r.to.x * sx, pad + r.to.y * sy)
     ctx.stroke()
 
-    // Actual hand path
-    ctx.strokeStyle = "rgba(240, 77, 48, 0.72)"
-    ctx.lineWidth = 1.6
+    // Actual hand path colored by submovement class
+    ctx.strokeStyle =
+      mode === "overshoot"
+        ? "rgba(229, 169, 60, 0.85)"
+        : mode === "undershoot"
+          ? "rgba(88, 184, 156, 0.85)"
+          : "rgba(240, 77, 48, 0.68)"
+    ctx.lineWidth = mode === "direct" ? 1.5 : 1.9
     ctx.beginPath()
     r.samples.forEach((s, idx) => {
       const px = pad + s.x * sx
@@ -997,14 +1033,36 @@ function drawCapturedPaths() {
     })
     ctx.stroke()
 
+    // Submovement apex / re-clutch marker
+    if (analysis?.submovementPoint) {
+      const mx = pad + analysis.submovementPoint.x * sx
+      const my = pad + analysis.submovementPoint.y * sy
+      if (mode === "overshoot") {
+        ctx.strokeStyle = "#e5a93c"
+        ctx.lineWidth = 1.5
+        ctx.beginPath()
+        ctx.arc(mx, my, 4.2, 0, Math.PI * 2)
+        ctx.stroke()
+      } else if (mode === "undershoot") {
+        ctx.fillStyle = "#58b89c"
+        ctx.beginPath()
+        ctx.moveTo(mx, my - 4.2)
+        ctx.lineTo(mx + 4.2, my)
+        ctx.lineTo(mx, my + 4.2)
+        ctx.lineTo(mx - 4.2, my)
+        ctx.closePath()
+        ctx.fill()
+      }
+    }
+
     // Landing point dot
     ctx.fillStyle = "#ecebe3"
     ctx.beginPath()
     ctx.arc(pad + r.to.x * sx, pad + r.to.y * sy, 2.2, 0, Math.PI * 2)
     ctx.fill()
-  }
+  })
 
-  // Bullseye inset in bottom-right showing click landing offsets relative to target center
+  // Bullseye inset in bottom-right showing click landing offsets relative to compact target centers
   const br = 30
   const bx = w - br - 14
   const by = h - br - 14
@@ -1022,6 +1080,7 @@ function drawCapturedPaths() {
   ctx.stroke()
 
   for (const r of inspectedReaches) {
+    if ((r.targetWidth || 40) > 96) continue
     const dx = clamp((r.to.x - r.targetCenter.x) * 3.2, -br + 3, br - 3)
     const dy = clamp((r.to.y - r.targetCenter.y) * 3.2, -br + 3, br - 3)
     ctx.fillStyle = "#f04d30"
@@ -1042,6 +1101,55 @@ function drawVelocityProfile() {
   ctx.clearRect(0, 0, w, h)
 
   const model = serverState?.model
+  const subchartTag = document.querySelector("#subchart-tag")
+  if (activeSubchart === "scroll-keys") {
+    if (subchartTag) {
+      subchartTag.innerHTML = `Scroll curve (left) · Keystroke IKI &amp; hold (right)`
+    }
+    const padT = 26
+    const padB = 16
+    const plotH = h - padT - padB
+    const leftW = Math.floor(w * 0.46) - 20
+    const scrollBins = model?.scrollCurve || [0.38, 0.92, 1.48, 1.82, 1.74, 1.46, 1.16, 0.88, 0.64, 0.44, 0.28, 0.14]
+    const maxS = Math.max(2.0, ...scrollBins)
+    const sBarW = leftW / scrollBins.length
+    ctx.fillStyle = "rgba(88, 184, 156, 0.28)"
+    scrollBins.forEach((v, idx) => {
+      const bh = (v / maxS) * plotH
+      ctx.fillRect(14 + idx * sBarW + 1, padT + plotH - bh, Math.max(2, sBarW - 2), bh)
+    })
+    ctx.strokeStyle = "#58b89c"
+    ctx.lineWidth = 1.8
+    ctx.beginPath()
+    scrollBins.forEach((v, idx) => {
+      const x = 14 + (idx + 0.5) * sBarW
+      const y = padT + plotH - (v / maxS) * plotH
+      if (idx === 0) ctx.moveTo(x, y)
+      else ctx.lineTo(x, y)
+    })
+    ctx.stroke()
+
+    // Right half: keystroke IKI (orange) + holdMs (teal)
+    const keys = (inspectedKeys.length > 0 ? inspectedKeys : [{ ikiMs: 85, holdMs: 68 }, { ikiMs: 74, holdMs: 62 }, { ikiMs: 92, holdMs: 71 }, { ikiMs: 68, holdMs: 58 }, { ikiMs: 110, holdMs: 80 }]).slice(0, 18)
+    const rightX = Math.floor(w * 0.52)
+    const rightW = w - rightX - 14
+    const kSlotW = rightW / Math.max(1, keys.length)
+    const maxK = Math.max(220, ...keys.map((k) => k.ikiMs || 0))
+    keys.forEach((k, idx) => {
+      const x = rightX + idx * kSlotW
+      const ikiH = (clamp(k.ikiMs || 80, 10, maxK) / maxK) * plotH
+      const holdH = (clamp(k.holdMs || 65, 10, maxK) / maxK) * plotH
+      ctx.fillStyle = "rgba(240, 77, 48, 0.65)"
+      ctx.fillRect(x + 1, padT + plotH - ikiH, Math.max(2, kSlotW * 0.44), ikiH)
+      ctx.fillStyle = "rgba(88, 184, 156, 0.75)"
+      ctx.fillRect(x + 1 + Math.max(2, kSlotW * 0.46), padT + plotH - holdH, Math.max(2, kSlotW * 0.42), holdH)
+    })
+    return
+  }
+
+  if (subchartTag) {
+    subchartTag.innerHTML = `Normalized speed v(u) · peak u = <strong id="peak-u-label">${model?.reach?.peakVelocityU ?? 0.39}</strong>`
+  }
   const bins = model?.velocityCurve || [
     0.12, 0.44, 0.88, 1.32, 1.68, 1.89, 1.94, 1.84, 1.64, 1.4,
     1.16, 0.94, 0.74, 0.57, 0.42, 0.3, 0.21, 0.14, 0.08, 0.03,
@@ -1138,9 +1246,16 @@ function synthesizePath(from, rawTo, profile) {
   const bow = (Math.random() < 0.5 ? -1 : 1) * bowRatio * dist + wristBias
 
   const overRate = p?.submovements?.overshootRate ?? 0.28
-  const overshoot = dist > 120 && Math.random() < overRate ? 6.5 : 0
-  const split = overshoot > 0 ? 0.8 : 1
-  const primaryEnd = overshoot > 0 ? { x: to.x + tx * overshoot, y: to.y + ty * overshoot } : to
+  const underRate = p?.submovements?.undershootRate ?? 0.22
+  const roll = dist > 120 ? Math.random() : 1
+  const mode = roll < overRate ? "overshoot" : roll < overRate + underRate ? "undershoot" : "direct"
+  const split = mode === "overshoot" ? 0.8 : mode === "undershoot" ? 0.74 : 1
+  const primaryEnd =
+    mode === "overshoot"
+      ? { x: to.x + tx * 6.5, y: to.y + ty * 6.5 }
+      : mode === "undershoot"
+        ? { x: to.x - tx * 11, y: to.y - ty * 11 }
+        : to
 
   const c1 = { x: from.x + (primaryEnd.x - from.x) * 0.28 + nx * bow, y: from.y + (primaryEnd.y - from.y) * 0.28 + ny * bow }
   const c2 = { x: from.x + (primaryEnd.x - from.x) * 0.71 + nx * bow * 0.52, y: from.y + (primaryEnd.y - from.y) * 0.71 + ny * bow * 0.52 }

@@ -42,6 +42,7 @@ type RosterMember = {
   peakVelocityU: number
   bowRatio: number
   overshootRate: number
+  undershootRate: number
   holdMedianMs: number
   ikiMedianMs: number
   lastActiveAt: number
@@ -323,20 +324,45 @@ export class ObstacleHub extends DurableObject<Env> {
   }
 
   private buildState(filter: { handle?: string | undefined; device?: string | undefined }) {
-    const summaryRows = this.ctx.storage.sql
-      .exec<RunSummaryRow>(
+    const rawRows = this.ctx.storage.sql
+      .exec<RunSummaryRow & { payload_json: string }>(
         `SELECT
           id, handle, device, sample_rate_hz, course_time_ms,
           reach_count, scroll_count, key_count,
           throughput_bps, peak_velocity_u, bow_ratio, overshoot_rate,
-          hold_median_ms, iki_median_ms, created_at
+          hold_median_ms, iki_median_ms, created_at, payload_json
          FROM runs
          ORDER BY created_at DESC
-         LIMIT 200`,
+         LIMIT 120`,
       )
       .toArray()
 
-    const byHandle = new Map<string, RunSummaryRow[]>()
+    const parsedRuns: ObstacleRunPayload[] = []
+    const summaryRows: (RunSummaryRow & { undershoot_rate: number })[] = []
+
+    for (const row of rawRows) {
+      try {
+        const parsed = JSON.parse(row.payload_json) as ObstacleRunPayload
+        parsedRuns.push(parsed)
+        const fitted = fitHumanModel([parsed], `${row.handle} · ${row.id}`)
+        const ikiList = parsed.keys.map((k) => k.ikiMs).filter((v) => v > 12 && v < 450)
+        const ikiMed = ikiList.length > 0 ? Math.round(median(ikiList)) : row.iki_median_ms
+        summaryRows.push({
+          ...row,
+          throughput_bps: fitted.reach.throughputBps,
+          peak_velocity_u: fitted.reach.peakVelocityU,
+          bow_ratio: round((fitted.reach.bowMinRatio + fitted.reach.bowMaxRatio) / 2, 4),
+          overshoot_rate: fitted.submovements.overshootRate,
+          undershoot_rate: fitted.submovements.undershootRate,
+          hold_median_ms: Math.round((fitted.click.holdMinMs + fitted.click.holdMaxMs) / 2),
+          iki_median_ms: ikiMed,
+        })
+      } catch {
+        summaryRows.push({ ...row, undershoot_rate: 0.22 })
+      }
+    }
+
+    const byHandle = new Map<string, (RunSummaryRow & { undershoot_rate: number })[]>()
     for (const row of summaryRows) {
       const list = byHandle.get(row.handle) ?? []
       list.push(row)
@@ -349,44 +375,33 @@ export class ObstacleHub extends DurableObject<Env> {
         const scrolls = rows.reduce((s, r) => s + r.scroll_count, 0)
         const keys = rows.reduce((s, r) => s + r.key_count, 0)
         const bestTimeMs = Math.min(...rows.map((r) => r.course_time_ms))
+        const devices = Array.from(new Set(rows.map((r) => r.device))).join(" + ")
         return {
           handle,
           runs: rows.length,
           reaches,
           scrolls,
           keys,
-          device: rows[0]?.device ?? "unknown",
+          device: devices || "unknown",
           bestTimeMs,
           throughputBps: round(median(rows.map((r) => r.throughput_bps)), 2),
           peakVelocityU: round(median(rows.map((r) => r.peak_velocity_u)), 3),
           bowRatio: round(median(rows.map((r) => r.bow_ratio)), 4),
           overshootRate: round(median(rows.map((r) => r.overshoot_rate)), 3),
+          undershootRate: round(median(rows.map((r) => r.undershoot_rate)), 3),
           holdMedianMs: Math.round(median(rows.map((r) => r.hold_median_ms))),
           ikiMedianMs: Math.round(median(rows.map((r) => r.iki_median_ms))),
           lastActiveAt: rows[0]?.created_at ?? 0,
         }
       })
-      .sort((a, b) => b.reaches - a.reaches || a.bestTimeMs - b.bestTimeMs)
+      .sort((a, b) => a.bestTimeMs - b.bestTimeMs || b.reaches - a.reaches)
 
-    const clauses: string[] = []
-    const bindings: (string | number)[] = []
-    if (filter.handle && filter.handle !== "all") {
-      clauses.push("handle = ?")
-      bindings.push(sanitizeHandle(filter.handle))
-    }
-    if (filter.device && (filter.device === "mouse" || filter.device === "trackpad")) {
-      clauses.push("device = ?")
-      bindings.push(filter.device)
-    }
-    const whereClause = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : ""
-    const payloadRows = this.ctx.storage.sql
-      .exec<{ payload_json: string }>(
-        `SELECT payload_json FROM runs ${whereClause} ORDER BY created_at DESC LIMIT 80`,
-        ...bindings,
-      )
-      .toArray()
+    const matchingRuns = parsedRuns.filter((run) => {
+      if (filter.handle && filter.handle !== "all" && run.handle !== sanitizeHandle(filter.handle)) return false
+      if (filter.device && (filter.device === "mouse" || filter.device === "trackpad") && run.device !== filter.device) return false
+      return true
+    })
 
-    const matchingRuns = payloadRows.map((r) => JSON.parse(r.payload_json) as ObstacleRunPayload)
     const distinctHandles = new Set(matchingRuns.map((r) => r.handle)).size
     const labelParts = [
       filter.handle && filter.handle !== "all" ? `@${sanitizeHandle(filter.handle)}` : "team-aggregate",
@@ -396,6 +411,10 @@ export class ObstacleHub extends DurableObject<Env> {
     ].filter(Boolean)
 
     const model: HumanModelProfile = fitHumanModel(matchingRuns, labelParts.join(" · "))
+    const mouseRuns = parsedRuns.filter((r) => r.device === "mouse")
+    const trackpadRuns = parsedRuns.filter((r) => r.device === "trackpad")
+    const mouseModel = mouseRuns.length > 0 ? fitHumanModel(mouseRuns, `mouse (${mouseRuns.length} runs)`) : undefined
+    const trackpadModel = trackpadRuns.length > 0 ? fitHumanModel(trackpadRuns, `trackpad (${trackpadRuns.length} runs)`) : undefined
 
     return {
       activeViewers: this.activeViewerCount(),
@@ -411,6 +430,8 @@ export class ObstacleHub extends DurableObject<Env> {
         keys: summaryRows.reduce((s, r) => s + r.key_count, 0),
       },
       model,
+      ...(mouseModel ? { mouseModel } : {}),
+      ...(trackpadModel ? { trackpadModel } : {}),
       baseline: DEFAULT_HUMAN_MODEL_PROFILE,
       roster,
       recentRuns: summaryRows.slice(0, 24).map((r) => ({
@@ -426,6 +447,7 @@ export class ObstacleHub extends DurableObject<Env> {
         peakVelocityU: r.peak_velocity_u,
         bowRatio: r.bow_ratio,
         overshootRate: r.overshoot_rate,
+        undershootRate: r.undershoot_rate,
         holdMedianMs: r.hold_median_ms,
         ikiMedianMs: r.iki_median_ms,
         createdAt: r.created_at,
