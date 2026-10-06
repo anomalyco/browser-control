@@ -1726,7 +1726,6 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       const safeText = (element: Element): string => {
         const cached = safeTextCache.get(element)
         if (cached !== undefined) return cached
-        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT)
         const parts: string[] = []
         const nearestBlock = (start: Element | null): Element => {
           let current = start
@@ -1738,53 +1737,56 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           return element
         }
         let lastBlock: Element | undefined
+        const rootStyle = styleOf(element)
+        if (element.hasAttribute("hidden") || element.getAttribute("aria-hidden") === "true" || rootStyle.display === "none" || rootStyle.visibility === "hidden" || rootStyle.opacity === "0") {
+          safeTextCache.set(element, "")
+          return ""
+        }
+        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
+          acceptNode(node) {
+            if (node instanceof Element) {
+              if (node.matches("input, textarea, select, script, style, noscript, template")) {
+                return NodeFilter.FILTER_REJECT
+              }
+              const style = styleOf(node)
+              if (node.hasAttribute("hidden") || node.getAttribute("aria-hidden") === "true" || style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+                return NodeFilter.FILTER_REJECT
+              }
+              if (node !== element && (node.hasAttribute("aria-label") || node.hasAttribute("aria-labelledby"))) {
+                const ariaText = explicitAriaName(node)
+                if (ariaText) {
+                  parts.push(` ${ariaText} `)
+                  lastBlock = undefined
+                }
+                return NodeFilter.FILTER_REJECT
+              }
+            }
+            return NodeFilter.FILTER_ACCEPT
+          },
+        })
         let node = walker.nextNode()
         while (node) {
-          const parent = node instanceof Element ? node : node.parentElement
-          let hidden = false
-          let replacedByAncestorAria = false
-          let ancestor = parent
-          while (ancestor && element.contains(ancestor)) {
-            const style = styleOf(ancestor)
-            if (ancestor.hasAttribute("hidden") || ancestor.getAttribute("aria-hidden") === "true" || style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
-              hidden = true
-              break
-            }
-            if (ancestor !== element && ancestor !== node && (ancestor.hasAttribute("aria-label") || ancestor.hasAttribute("aria-labelledby"))) {
-              replacedByAncestorAria = true
-            }
-            if (ancestor === element) break
-            ancestor = ancestor.parentElement
-          }
-          if (!hidden && !replacedByAncestorAria && !parent?.closest("input, textarea, select, script, style, noscript, template")) {
-            if (node instanceof Element && node !== element && (node.hasAttribute("aria-label") || node.hasAttribute("aria-labelledby"))) {
-              const ariaText = explicitAriaName(node)
-              if (ariaText) {
-                parts.push(` ${ariaText} `)
-                lastBlock = undefined
+          if (node.nodeType === Node.TEXT_NODE) {
+            const block = nearestBlock(node.parentElement)
+            if (lastBlock && lastBlock !== block) parts.push(" ")
+            parts.push(node.textContent ?? "")
+            lastBlock = block
+          } else if (node instanceof HTMLImageElement) {
+            const alt = node.getAttribute("alt")
+            if (alt) parts.push(` ${alt} `)
+            lastBlock = undefined
+          } else if (typeof HTMLSlotElement !== "undefined" && node instanceof HTMLSlotElement) {
+            for (const assigned of node.assignedNodes({ flatten: true })) {
+              if (assigned.nodeType === Node.TEXT_NODE) {
+                parts.push(assigned.textContent ?? "")
+              } else if (assigned instanceof Element) {
+                parts.push(safeText(assigned))
               }
-            } else if (node.nodeType === Node.TEXT_NODE) {
-              const block = nearestBlock(parent)
-              if (lastBlock && lastBlock !== block) parts.push(" ")
-              parts.push(node.textContent ?? "")
-              lastBlock = block
-            } else if (node instanceof HTMLImageElement) {
-              const alt = node.getAttribute("alt")
-              if (alt) parts.push(` ${alt} `)
-              lastBlock = undefined
-            } else if (typeof HTMLSlotElement !== "undefined" && node instanceof HTMLSlotElement) {
-              for (const assigned of node.assignedNodes({ flatten: true })) {
-                if (assigned.nodeType === Node.TEXT_NODE) {
-                  parts.push(assigned.textContent ?? "")
-                } else if (assigned instanceof Element) {
-                  parts.push(safeText(assigned))
-                }
-              }
-              lastBlock = undefined
-            } else if (node instanceof Element && node.tagName === "BR") {
-              parts.push(" ")
-              lastBlock = undefined
             }
+            lastBlock = undefined
+          } else if (node instanceof Element && node.tagName === "BR") {
+            parts.push(" ")
+            lastBlock = undefined
           }
           node = walker.nextNode()
         }
@@ -2141,7 +2143,12 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         const group = element.closest("article, li, tr, dt, [role='listitem'], [role='row']")
         if (!group || !root.contains(group)) return false
         if (!primaryLinks.has(group)) {
-          const links = Array.from(group.querySelectorAll("a[href]")).filter(isVisible)
+          const rawLinks = Array.from(group.querySelectorAll("a[href]"))
+          if (group.matches("article, [role='article']") && rawLinks.length > 12) {
+            primaryLinks.set(group, null)
+            return false
+          }
+          const links = rawLinks.filter(isVisible)
           let primary: Element | null = null
           let primaryScore = -1
           for (const link of links) {
@@ -2194,8 +2201,8 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         }
         const card = element.closest?.("article, [role='article']")
         if (card && (root.contains?.(card) ?? true)) {
-          const cardLinks = Array.from(card.querySelectorAll("a[href]")).filter(isVisible)
-          if (cardLinks.some((link) => accessibleName(link) === headingText)) {
+          const rawCardLinks = Array.from(card.querySelectorAll("a[href]"))
+          if (rawCardLinks.length <= 12 && rawCardLinks.filter(isVisible).some((link) => accessibleName(link) === headingText)) {
             return true
           }
         }
