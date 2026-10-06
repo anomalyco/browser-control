@@ -2278,7 +2278,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           truncated = true
           break
         }
-        if (settings.compact) {
+        if (settings.compact && !headerCandidateSet.has(element)) {
           const navigation = closestDeep(element, "nav, [role='navigation'], aside, [role='complementary'], [data-slot='sidebar'], [data-sidebar='sidebar']")
           if (navigation && collapsedNavigation.has(navigation)) {
             continue
