@@ -3120,11 +3120,11 @@ function formatLocatorFailurePageWarning(
 ): string | undefined {
   if (!(error instanceof Error) || !locatorFailurePattern.test(error.message)) return undefined
   const rawUrl = aftermath?.endUrl ?? aftermath?.startUrl
-  if (!rawUrl) return undefined
-  if (rawUrl === "about:blank" && recreatedFromClosedUrl) {
+  if (rawUrl !== "about:blank") return undefined
+  if (recreatedFromClosedUrl) {
     return `Locator failed on about:blank because the previous session page (${formatBoundedPageUrl(recreatedFromClosedUrl)}) was closed. Call page.goto(...) to reopen it before querying controls.`
   }
-  return `Locator failed on page ${formatBoundedPageUrl(rawUrl)}. Run snapshot() to inspect current controls.`
+  return "Locator failed on page about:blank. Navigate with page.goto(...) or adopt an attached tab before querying controls."
 }
 
 export async function runUserCode({ code, globals }: { readonly code: string; readonly globals: SandboxGlobals }): Promise<{
