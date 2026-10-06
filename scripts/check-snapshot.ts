@@ -169,10 +169,10 @@ try {
   })
   await check("custom button[role=combobox] and portal listbox/menu options outside main", async () => {
     await page.setContent(`
-      <aside data-slot="sidebar">
-        <ul>${Array.from({ length: 12 }, (_, i) => `<li><a href="#doc-${i}">Doc ${i}</a></li>`).join("")}</ul>
-      </aside>
       <main>
+        <aside data-slot="sidebar">
+          <ul>${Array.from({ length: 12 }, (_, i) => `<li><a href="#doc-${i}">Doc ${i}</a></li>`).join("")}</ul>
+        </aside>
         <h1>Select</h1>
         <button type="button" role="combobox" aria-expanded="false" id="fruit-trigger"><span>Select a fruit</span></button>
       </main>

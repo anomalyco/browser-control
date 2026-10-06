@@ -624,7 +624,9 @@ export class ExecuteSandbox {
             diagnostic === protectedExtensionUiDiagnostic ? protectedExtensionUiWarning : undefined,
             error instanceof ExecuteCodeError ? formatNodeContextWarning(error.originalError) : undefined,
             error instanceof ExecuteCodeError ? formatPointerInterceptionWarning(error.originalError) : formatPointerInterceptionWarning(error),
-            formatLocatorFailurePageWarning(error instanceof ExecuteCodeError ? error.originalError : error, aftermath, this.recreatedFromClosedUrl),
+            diagnostic === protectedExtensionUiDiagnostic
+              ? undefined
+              : formatLocatorFailurePageWarning(error instanceof ExecuteCodeError ? error.originalError : error, aftermath, this.recreatedFromClosedUrl),
           )
           return {
             text: this.networkCapture.redactText(error instanceof ExecuteCodeError ? error.stack ?? error.message : error.message),
