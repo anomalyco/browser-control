@@ -396,11 +396,29 @@ before accepting it.
 
 ## TypeScript Client
 
-Applications can import `BrowserControlClient` for schema-decoded,
-same-origin requests authenticated by a session page. Use `sensitive: true`
-for token-bearing responses and reveal them through Browser Control's API, not
-the application's own Effect `Redacted` import; package-manager layouts may
-resolve separate Effect runtimes.
+Applications and CLI tools can use `BrowserControlClient.origin()` for direct
+same-origin JSON requests authenticated by a session page (with optional default
+headers and automatic in-page `handoff` recovery when a session expires or
+redirects to login):
+
+```ts
+import { BrowserControlClient } from "@opencode-ai/browser-control"
+
+const ubereats = BrowserControlClient.origin("https://www.ubereats.com", {
+  session: "🥤 karma-cafe",
+  startUrl: "/feed",
+  headers: { "x-csrf-token": "x" },
+  handoffOnAuthFailure: true,
+})
+
+const store = await ubereats.post("/_p/api/getStoreV1", {
+  storeUuid: "78cb1602-9f58-57bb-ad08-f6b8f80bb788",
+  diningMode: "DELIVERY",
+})
+```
+
+For Effect-native applications with schema decoding or `sensitive: true`
+`Redacted` responses, use `BrowserControlClient.Service`:
 
 ```ts
 import { BrowserControlClient } from "@opencode-ai/browser-control"
