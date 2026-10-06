@@ -362,7 +362,7 @@ export function optionalSessionId(value: JsonObject[string] | undefined): string
 export function isValidSessionId(id: string): boolean {
   if (id.length < 1 || id.length > 63 || id === "." || id === "..") return false
   if (/[A-Z/\\:\0-\x1f\x7f]/.test(id)) return false
-  return /^[\p{Extended_Pictographic}\u200d\ufe0f\s_-]*[a-z0-9][a-z0-9\p{Extended_Pictographic}\u200d\ufe0f\s_-]*$/u.test(id)
+  return /^(?:[\p{Extended_Pictographic}\u200d\ufe0f]+\s*)?[a-z0-9][a-z0-9\p{Extended_Pictographic}\u200d\ufe0f\s_-]*$/u.test(id)
 }
 
 export function requiredSessionId(value: JsonObject[string] | undefined): string {
