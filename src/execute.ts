@@ -2459,25 +2459,25 @@ return (${capture.toString()})(rootOrSettings, locatorSettings)`,
           }
           if (result.needsSettle && !options.diff && captureAttempts === 0 && Date.now() + 120 < deadline) {
             captureAttempts++
-            await page.evaluate(() => new Promise<void>((resolve) => {
-              let quietTimer = window.setTimeout(done, 120)
-              const maxTimer = window.setTimeout(done, 550)
+            await page.evaluate(`new Promise((resolve) => {
+              let quietTimer = window.setTimeout(done, 120);
+              const maxTimer = window.setTimeout(done, 550);
               const observer = new MutationObserver(() => {
-                window.clearTimeout(quietTimer)
-                quietTimer = window.setTimeout(done, 55)
-              })
+                window.clearTimeout(quietTimer);
+                quietTimer = window.setTimeout(done, 55);
+              });
               function done() {
-                observer.disconnect()
-                window.clearTimeout(quietTimer)
-                window.clearTimeout(maxTimer)
-                resolve()
+                observer.disconnect();
+                window.clearTimeout(quietTimer);
+                window.clearTimeout(maxTimer);
+                resolve();
               }
               if (document.body) {
-                observer.observe(document.body, { childList: true, subtree: true, attributes: true })
+                observer.observe(document.body, { childList: true, subtree: true, attributes: true });
               } else {
-                done()
+                done();
               }
-            })).catch(() => {})
+            })`).catch(() => {})
             continue
           }
           break
