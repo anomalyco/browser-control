@@ -1997,16 +1997,26 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         const rootNode = node.getRootNode?.()
         return isShadowRoot(rootNode) ? rootNode.host : null
       }
+      const closestDeep = (element: Element, selector: string): Element | null => {
+        let current: Element | null = element
+        while (current) {
+          const match = current.closest?.(selector) ?? null
+          if (match) return match
+          const rootNode = current.getRootNode?.()
+          current = isShadowRoot(rootNode) ? rootNode.host : null
+        }
+        return null
+      }
       const querySelectorAllDeep = (scope: Element | Document | ShadowRoot, selector: string): Element[] => {
         if (!scope.children) {
           return Array.from(scope.querySelectorAll(selector))
         }
         const results: Element[] = []
         const visit = (node: Element | Document | ShadowRoot) => {
-          for (const child of Array.from(node.children ?? [])) {
+          for (let child = node.firstElementChild; child; child = child.nextElementSibling) {
             if (child.matches(selector)) results.push(child)
             if (child.shadowRoot) visit(child.shadowRoot)
-            visit(child)
+            if (child.firstElementChild) visit(child)
           }
         }
         if (scope instanceof Element && scope.shadowRoot) visit(scope.shadowRoot)
@@ -2260,6 +2270,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         ...querySelectorAllDeep(root, candidateSelector),
       ]
       const collapsedNavigation = new Set<Element>()
+      const nonCollapsibleNavigation = new WeakSet<Element>()
       let reservedLists = 0
 
       for (const element of candidates) {
@@ -2267,23 +2278,26 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           truncated = true
           break
         }
-        if (!isVisible(element)) continue
-        const navigation = element.closest?.("nav, [role='navigation'], aside, [role='complementary'], [data-slot='sidebar'], [data-sidebar='sidebar']") ?? null
-        const isCollapsibleNav = Boolean(
-          navigation &&
-          navigation !== root &&
-          !navigation.contains?.(root) &&
-          (navigation.matches("nav, [role='navigation']") ||
-            (navigation.querySelectorAll("a[href]").length >= 8 && !navigation.querySelector?.("h1, main, [role='main'], input, textarea, select"))),
-        )
-        if (settings.compact && isCollapsibleNav && navigation) {
-          if (!collapsedNavigation.has(navigation)) {
-            collapsedNavigation.add(navigation)
-            const count = navigation.querySelectorAll("a[href], button").length
-            add({ depth: headingDepth(navigation), role: "navigation", name: truncate(labelledName(navigation), 100) || "Navigation", details: `${count} controls`, priority: 0 })
+        if (settings.compact) {
+          const navigation = closestDeep(element, "nav, [role='navigation'], aside, [role='complementary'], [data-slot='sidebar'], [data-sidebar='sidebar']")
+          if (navigation && collapsedNavigation.has(navigation)) {
+            continue
           }
-          continue
+          if (navigation && navigation !== root && !navigation.contains?.(root) && !nonCollapsibleNavigation.has(navigation)) {
+            const isCollapsibleNav = isVisible(navigation) && (
+              navigation.matches("nav, [role='navigation']") ||
+              (querySelectorAllDeep(navigation, "a[href]").length >= 8 && !navigation.querySelector?.("h1, main, [role='main'], input, textarea, select"))
+            )
+            if (isCollapsibleNav) {
+              collapsedNavigation.add(navigation)
+              const count = querySelectorAllDeep(navigation, "a[href], button").length
+              add({ depth: headingDepth(navigation), role: "navigation", name: truncate(labelledName(navigation), 100) || "Navigation", details: `${count} controls`, priority: 0 })
+              continue
+            }
+            nonCollapsibleNavigation.add(navigation)
+          }
         }
+        if (!isVisible(element)) continue
         const role = roleFor(element)
         const isHeading = role === "heading"
         if (isHeading && isRedundantHeadingForLink(element)) continue
