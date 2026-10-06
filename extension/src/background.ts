@@ -27,14 +27,9 @@ let socketGeneration = 0
 let reloading = false
 const tabGroupingCommands = new Map<number, Promise<unknown>>()
 const sessionGroups = new Map<string, number>()
-const agentGroups = new Set<number>()
-const waitingTabs = new Set<number>()
-const runningTabs = new Set<number>()
 const attachedTabUrls = new Map<number, string>()
-let collapseDebounceTimer: ReturnType<typeof setTimeout> | undefined
 
 const STORAGE_ATTACHED_TABS_KEY = "browserControlAttachedTabs"
-const STORAGE_AGENT_GROUPS_KEY = "browserControlAgentGroups"
 let storageRestored: Promise<void> | undefined
 
 async function readStoredJson<T>(key: string, fallback: T): Promise<T> {
@@ -57,14 +52,11 @@ function writeStoredJson(key: string, value: unknown): void {
 }
 
 function restorePersistentState(): Promise<void> {
-  storageRestored ??= Promise.all([
-    readStoredJson<number[]>(STORAGE_AGENT_GROUPS_KEY, []),
-    readStoredJson<{ readonly tabId?: unknown; readonly url?: unknown }[]>(STORAGE_ATTACHED_TABS_KEY, []),
-  ])
-    .then(([savedGroups, savedTabs]) => {
-      for (const id of savedGroups) {
-        if (typeof id === "number") agentGroups.add(id)
-      }
+  storageRestored ??= readStoredJson<{ readonly tabId?: unknown; readonly url?: unknown }[]>(
+    STORAGE_ATTACHED_TABS_KEY,
+    [],
+  )
+    .then((savedTabs) => {
       for (const item of savedTabs) {
         if (typeof item?.tabId === "number" && typeof item?.url === "string" && !attachedTabUrls.has(item.tabId)) {
           attachedTabUrls.set(item.tabId, item.url)
@@ -73,11 +65,6 @@ function restorePersistentState(): Promise<void> {
     })
     .catch(() => {})
   return storageRestored
-}
-
-function saveAgentGroups(): void {
-  if (reloading) return
-  writeStoredJson(STORAGE_AGENT_GROUPS_KEY, Array.from(agentGroups))
 }
 
 function saveAttachedTabUrls(): void {
@@ -183,8 +170,6 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  waitingTabs.delete(tabId)
-  runningTabs.delete(tabId)
   forgetAttachedTab(tabId)
   void cleanupRecordingForTab(tabId)
   void guardedUngroupBrowserControlTab(tabId)
@@ -192,34 +177,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 })
 
 chrome.runtime.onStartup.addListener(() => {
-  agentGroups.clear()
   attachedTabUrls.clear()
-  writeStoredJson(STORAGE_AGENT_GROUPS_KEY, [])
   writeStoredJson(STORAGE_ATTACHED_TABS_KEY, [])
-})
-
-chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
-  if (collapseDebounceTimer) clearTimeout(collapseDebounceTimer)
-  collapseDebounceTimer = setTimeout(() => {
-    collapseDebounceTimer = undefined
-    if (tabGroupingCommands.size > 0) return
-    void restorePersistentState().then(async () => {
-      const activeTab = await chrome.tabs.get(tabId).catch(() => undefined)
-      for (const groupId of Array.from(agentGroups)) {
-        if (activeTab?.groupId === groupId) continue
-        const group = await chrome.tabGroups.get(groupId).catch(() => undefined)
-        if (!group) {
-          if (agentGroups.delete(groupId)) saveAgentGroups()
-        } else if (group.windowId === windowId && !group.collapsed && !(await isGroupWaiting(groupId))) {
-          await chrome.tabGroups.update(groupId, { collapsed: true }).catch(() => {})
-        }
-      }
-    })
-  }, 250)
-})
-
-chrome.tabGroups?.onRemoved.addListener((group) => {
-  if (agentGroups.delete(group.id)) saveAgentGroups()
 })
 
 chrome.tabs.onUpdated.addListener((tabId, change) => {
@@ -529,32 +488,18 @@ async function handleCommand(command: ShimCommand, currentSocket: WebSocket): Pr
     if (!status) {
       throw new Error("Invalid page status")
     }
-    if (status.state === "running") runningTabs.add(tabId)
-    else runningTabs.delete(tabId)
-    const wasWaiting = waitingTabs.has(tabId)
-    if (status.state === "waiting") {
-      waitingTabs.add(tabId)
-      void expandTabGroup(tabId)
-    } else if (wasWaiting) {
-      waitingTabs.delete(tabId)
-      void settleTabGroup(tabId)
-    }
     await sendPageStatusMessage(tabId, { action: "page-status.set", status }, true)
     return {}
   }
   if (command.method === "pageStatus.clear") {
     const tabId = numberParam(command.params, "tabId")
-    runningTabs.delete(tabId)
-    if (waitingTabs.delete(tabId)) {
-      void settleTabGroup(tabId)
-    }
     await sendPageStatusMessage(tabId, { action: "page-status.clear" })
     return {}
   }
   if (command.method === "runtime.reload") {
     reloading = true
     setTimeout(() => {
-      currentSocket.close(1001, "Extension reloading")
+      currentSocket.close(1000, "Extension reloading")
       chrome.runtime.reload()
     }, 50)
     return {}
@@ -686,6 +631,9 @@ async function reconcileBrowserControlGroups(currentGeneration: number): Promise
     if (!isBrowserControlGroupTitle(group.title)) {
       continue
     }
+    if (group.collapsed) {
+      await chrome.tabGroups.update(group.id, { collapsed: false }).catch(() => {})
+    }
     const tabs = await chrome.tabs.query({ groupId: group.id })
     assertCurrentGeneration(currentGeneration)
     for (const tab of tabs) {
@@ -701,45 +649,6 @@ async function reconcileBrowserControlGroups(currentGeneration: number): Promise
         preserveAttached: true,
       }))
     }
-  }
-}
-
-async function isGroupWaiting(groupId: number): Promise<boolean> {
-  if (waitingTabs.size === 0 && runningTabs.size === 0) return false
-  const tabs = await chrome.tabs.query({ groupId }).catch(() => [] as chrome.tabs.Tab[])
-  return tabs.some((tab) => typeof tab.id === "number" && (waitingTabs.has(tab.id) || runningTabs.has(tab.id)))
-}
-
-async function collapseGroupUnlessActive(groupId: number): Promise<void> {
-  const group = await chrome.tabGroups.get(groupId).catch(() => undefined)
-  if (!group) {
-    if (agentGroups.delete(groupId)) saveAgentGroups()
-    return
-  }
-  if (group.collapsed) return
-  const [active] = await chrome.tabs.query({ active: true, windowId: group.windowId }).catch(() => [] as chrome.tabs.Tab[])
-  if (active?.groupId === groupId || (await isGroupWaiting(groupId))) return
-  await chrome.tabGroups.update(groupId, { collapsed: true }).catch(() => {})
-}
-
-function adoptAgentGroup(groupId: number): void {
-  if (!agentGroups.has(groupId)) {
-    agentGroups.add(groupId)
-    saveAgentGroups()
-  }
-}
-
-async function expandTabGroup(tabId: number): Promise<void> {
-  const tab = await chrome.tabs.get(tabId).catch(() => undefined)
-  if (tab && tab.groupId !== undefined && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE && agentGroups.has(tab.groupId)) {
-    await chrome.tabGroups.update(tab.groupId, { collapsed: false }).catch(() => {})
-  }
-}
-
-async function settleTabGroup(tabId: number): Promise<void> {
-  const tab = await chrome.tabs.get(tabId).catch(() => undefined)
-  if (tab && tab.groupId !== undefined && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE && agentGroups.has(tab.groupId)) {
-    await collapseGroupUnlessActive(tab.groupId)
   }
 }
 
@@ -770,26 +679,26 @@ async function groupBrowserControlTab(
       if (tab.groupId !== knownGroup.id) {
         await chrome.tabs.group({ tabIds: [tabId], groupId: knownGroup.id })
       }
-      if (knownGroup.title !== desiredTitle || knownGroup.color !== tabGroupColor) {
-        await chrome.tabGroups.update(knownGroup.id, { title: desiredTitle, color: tabGroupColor })
+      if (knownGroup.title !== desiredTitle || knownGroup.color !== tabGroupColor || knownGroup.collapsed) {
+        await chrome.tabGroups.update(knownGroup.id, { title: desiredTitle, color: tabGroupColor, collapsed: false })
       }
-      adoptAgentGroup(knownGroup.id)
       return { groupId: knownGroup.id }
     }
   }
   if (tab.groupId !== undefined && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
     const currentGroup = await chrome.tabGroups.get(tab.groupId)
     if (currentGroup.title === desiredTitle && currentGroup.color === tabGroupColor) {
+      if (currentGroup.collapsed) {
+        await chrome.tabGroups.update(currentGroup.id, { collapsed: false }).catch(() => {})
+      }
       sessionGroups.set(sessionKey, currentGroup.id)
-      adoptAgentGroup(currentGroup.id)
       return { groupId: currentGroup.id }
     }
     if (isBrowserControlGroupTitle(currentGroup.title)) {
       const groupedTabs = await chrome.tabs.query({ groupId: currentGroup.id })
       if (groupedTabs.length === 1 && groupedTabs[0]?.id === tabId) {
-        await chrome.tabGroups.update(currentGroup.id, { title: desiredTitle, color: tabGroupColor })
+        await chrome.tabGroups.update(currentGroup.id, { title: desiredTitle, color: tabGroupColor, collapsed: false })
         sessionGroups.set(sessionKey, currentGroup.id)
-        adoptAgentGroup(currentGroup.id)
         return { groupId: currentGroup.id }
       }
     }
@@ -814,11 +723,10 @@ async function groupBrowserControlTab(
   })
   await finalizeBrowserControlGrouping({
     assertCurrent: () => assertCurrentSocket(currentSocket),
-    update: () => chrome.tabGroups.update(groupId, { title: desiredTitle, color: tabGroupColor }).then(() => {}),
+    update: () => chrome.tabGroups.update(groupId, { title: desiredTitle, color: tabGroupColor, collapsed: false }).then(() => {}),
     rollback: () => chrome.tabs.ungroup(tabId),
   })
   sessionGroups.set(sessionKey, groupId)
-  adoptAgentGroup(groupId)
   return { groupId }
 }
 

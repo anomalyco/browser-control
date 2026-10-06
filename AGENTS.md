@@ -68,6 +68,11 @@ local Node relay.
 - `session adopt` makes a user-attached tab the session's default page (and
   auto-selects when only one user-attached tab is open). Adopted tabs are never
   closed by `reset` or `delete`.
+- Never auto-collapse Browser Control tab groups (`collapsed: true`) in
+  `extension/src/background.ts`. Auto-collapsing hides the open tab titles and
+  favicons behind opaque group pills (making it hard for the user to see or find
+  what tab is inside) and causes Chromium to throttle `requestAnimationFrame`
+  and `IntersectionObserver` to 1 Hz inside collapsed groups.
 - CDP guardrails (`src/cdp-guardrails.ts`) block destructive browser-state
   commands and reject `Input.*` in read-only sessions.
 
