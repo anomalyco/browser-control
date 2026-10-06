@@ -338,6 +338,17 @@ export const AuthProfileSummary = Schema.Struct({
 })
 export interface AuthProfileSummary extends Schema.Schema.Type<typeof AuthProfileSummary> {}
 
+export const NetworkEndpointDigest = Schema.Struct({
+  method: Schema.String,
+  url: Schema.String,
+  status: Schema.optionalKey(Schema.Number),
+  count: Schema.Number,
+  requestHeaders: Schema.optionalKey(Schema.Array(Schema.String)),
+  requestKeys: Schema.optionalKey(Schema.Array(Schema.String)),
+  responseKeys: Schema.optionalKey(Schema.Array(Schema.String)),
+})
+export interface NetworkEndpointDigest extends Schema.Schema.Type<typeof NetworkEndpointDigest> {}
+
 export const NetworkStopResponse = NetworkStatusResponse.pipe(Schema.fieldsAssign({
   active: Schema.Literal(false),
   stoppedAt: Schema.String,
@@ -345,6 +356,7 @@ export const NetworkStopResponse = NetworkStatusResponse.pipe(Schema.fieldsAssig
   authProfile: Schema.optionalKey(AuthProfileSummary),
   updatedSecretRefs: Schema.Array(Schema.String),
   observedSecretRefs: Schema.Array(Schema.String),
+  endpoints: Schema.optionalKey(Schema.Array(NetworkEndpointDigest)),
 }))
 export interface NetworkStopResponse extends Schema.Schema.Type<typeof NetworkStopResponse> {}
 

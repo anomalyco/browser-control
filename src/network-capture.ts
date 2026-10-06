@@ -35,6 +35,16 @@ export type NetworkCaptureStatus = {
   readonly secrets?: string
 }
 
+export type NetworkEndpointDigest = {
+  readonly method: string
+  readonly url: string
+  readonly status?: number
+  readonly count: number
+  readonly requestHeaders?: readonly string[]
+  readonly requestKeys?: readonly string[]
+  readonly responseKeys?: readonly string[]
+}
+
 export type NetworkCaptureResult = NetworkCaptureStatus & {
   readonly active: false
   readonly stoppedAt: string
@@ -42,6 +52,7 @@ export type NetworkCaptureResult = NetworkCaptureStatus & {
   readonly authProfile?: AuthProfile.AuthProfileSummary
   readonly updatedSecretRefs: readonly string[]
   readonly observedSecretRefs: readonly string[]
+  readonly endpoints?: readonly NetworkEndpointDigest[]
 }
 
 export class NetworkCaptureError extends Schema.TaggedError<NetworkCaptureError>()(
@@ -250,6 +261,7 @@ export class Recorder {
           ...(finished.authProfile ? { authProfile: finished.authProfile } : {}),
           updatedSecretRefs: finished.updatedSecretRefs,
           observedSecretRefs: finished.observedSecretRefs,
+          ...(finished.endpoints.length > 0 ? { endpoints: finished.endpoints } : {}),
         }
       }).pipe(
         Effect.tapError(() => Effect.sync(() => {
@@ -485,19 +497,15 @@ function finishCapture(
   readonly updatedSecretRefs: readonly string[]
   readonly observedSecretRefs: readonly string[]
   readonly redactionOmissionCount: number
+  readonly endpoints: readonly NetworkEndpointDigest[]
 }, NetworkCaptureError | AuthProfile.AuthProfileError> {
   return Effect.gen(function* () {
     const existingProfile = secrets
       ? yield* AuthProfile.readOptional(secrets, profileOptions)
       : undefined
     const collector = new SecretCollector(existingProfile?.slots ?? [])
-    let protectedEntries: readonly CapturedEntry[] | undefined
-    if (options.outputPath) {
-      const structurallyProtected = active.entries.map((entry) => protectEntry(entry, collector))
-      protectedEntries = structurallyProtected.map((entry) => redactEntryKnownValues(entry, collector))
-    } else if (secrets) {
-      for (const entry of active.entries) protectEntry(entry, collector)
-    }
+    const structurallyProtected = active.entries.map((entry) => protectEntry(entry, collector))
+    const protectedEntries = structurallyProtected.map((entry) => redactEntryKnownValues(entry, collector))
     if (options.requireObservedSecrets && collector.observedRefs().length === 0) {
       return yield* new NetworkCaptureError({
         message: `Auth refresh did not observe credentials for profile ${secrets ?? "unknown"}`,
@@ -513,7 +521,7 @@ function finishCapture(
         log: {
           version: "1.2",
           creator: { name: "Browser Control", version: "1" },
-          entries: (protectedEntries ?? []).map(toHarEntry),
+          entries: protectedEntries.map(toHarEntry),
         },
       })
     }
@@ -521,9 +529,57 @@ function finishCapture(
       ...(authProfile ? { authProfile } : {}),
       updatedSecretRefs: collector.updatedRefs(),
       observedSecretRefs: collector.observedRefs(),
-      redactionOmissionCount: protectedEntries ? countRedactionOmissions(active.entries, protectedEntries) : 0,
+      redactionOmissionCount: options.outputPath ? countRedactionOmissions(active.entries, protectedEntries) : 0,
+      endpoints: summarizeEndpoints(protectedEntries),
     }
   })
+}
+
+function extractTopLevelJsonKeys(body: CapturedBody | undefined): readonly string[] | undefined {
+  if (!body?.text || !body.mimeType.toLowerCase().includes("json")) return undefined
+  try {
+    const parsed: unknown = JSON.parse(body.text)
+    if (Predicate.isObject(parsed) && !Array.isArray(parsed)) {
+      const keys = Object.keys(parsed).slice(0, 15)
+      return keys.length > 0 ? keys : undefined
+    }
+  } catch {}
+  return undefined
+}
+
+function summarizeEndpoints(entries: readonly CapturedEntry[]): readonly NetworkEndpointDigest[] {
+  const byRoute = new Map<string, NetworkEndpointDigest>()
+  for (const entry of entries) {
+    if (["image", "stylesheet", "font", "media"].includes(entry.request.resourceType)) continue
+    let routePath = entry.request.url
+    try {
+      const u = new URL(entry.request.url)
+      routePath = `${u.origin}${u.pathname}`
+    } catch {}
+    const key = `${entry.request.method} ${routePath}`
+    const existing = byRoute.get(key)
+    const notableHeaders = entry.request.headers
+      .filter((h) => {
+        const lower = h.name.toLowerCase()
+        if (lower === "x-client-data" || lower.startsWith("sec-ch-")) return false
+        return h.value.includes("${BC_SECRET_") || lower === "authorization" || lower.startsWith("x-")
+      })
+      .slice(0, 8)
+      .map((h) => `${h.name}: ${h.value.slice(0, 80)}`)
+    const requestKeys = extractTopLevelJsonKeys(entry.request.body)
+    const responseKeys = extractTopLevelJsonKeys(entry.response?.body)
+    byRoute.set(key, {
+      method: entry.request.method,
+      url: entry.request.url.slice(0, 240),
+      ...(entry.response ? { status: entry.response.status } : existing?.status !== undefined ? { status: existing.status } : {}),
+      count: (existing?.count ?? 0) + 1,
+      ...(notableHeaders.length > 0 ? { requestHeaders: notableHeaders } : existing?.requestHeaders ? { requestHeaders: existing.requestHeaders } : {}),
+      ...(requestKeys ? { requestKeys } : existing?.requestKeys ? { requestKeys: existing.requestKeys } : {}),
+      ...(responseKeys ? { responseKeys } : existing?.responseKeys ? { responseKeys: existing.responseKeys } : {}),
+    })
+    if (byRoute.size >= 30) break
+  }
+  return [...byRoute.values()]
 }
 
 function countRedactionOmissions(original: readonly CapturedEntry[], protectedEntries: readonly CapturedEntry[]): number {
