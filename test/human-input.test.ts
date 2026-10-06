@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { forgetTab, glide, prepareMouseParams, trajectory } from "../src/human-input.ts"
+import { decorateGhostCursorAction, forgetTab, glide, prepareMouseParams, trajectory } from "../src/human-input.ts"
 
 describe("human-input", () => {
   it("builds a fast curved trajectory bounded under 300ms", () => {
@@ -36,6 +36,9 @@ describe("human-input", () => {
       expect(up.y).toBe(move.y)
       expect(Math.abs(move.x - 240)).toBeLessThanOrEqual(2.5)
       expect(Math.abs(move.y - 180)).toBeLessThanOrEqual(2.0)
+      const decorated = decorateGhostCursorAction(42, { type: "move", x: move.x, y: move.y, button: "none" })
+      expect(decorated.path?.length).toBeGreaterThan(4)
+      expect(decorated.durationMs).toBeGreaterThan(90)
     } finally {
       forgetTab(42)
       if (previous === undefined) delete process.env.BROWSER_CONTROL_HUMAN_INPUT

@@ -42,6 +42,8 @@ export type GhostCursorMouseAction = {
   readonly x: number
   readonly y: number
   readonly button: "left" | "right" | "middle" | "none"
+  readonly durationMs?: number
+  readonly path?: readonly { readonly x: number; readonly y: number; readonly u: number }[]
 }
 
 type GhostCursorEvaluatePayload = {
@@ -102,7 +104,7 @@ export const ghostCursorClientSource = `(() => {
   if (window !== window.top) {
     return;
   }
-  if (globalThis.__browserControlGhostCursor?.version === 12) {
+  if (globalThis.__browserControlGhostCursor?.version === 14) {
     return;
   }
   globalThis.__browserControlGhostCursor?.hide?.();
@@ -149,6 +151,7 @@ export const ghostCursorClientSource = `(() => {
     scale: 1,
     vScale: 0,
     arcSign: 1,
+    hasMovedOnce: false,
     lastMoveDist: 0,
     flight: null,
     camera: { scale: 1, tx: 0, ty: 0 },
@@ -203,9 +206,11 @@ export const ghostCursorClientSource = `(() => {
   };
   const applyPosition = () => {
     if (!state.element) return;
-    state.element.style.transform = "translate3d(" + formatCoord(state.renderedX) + "px, " + formatCoord(state.renderedY) + "px, 0)";
+    const pressed = state.element.dataset.pressed === "true";
+    const pressOffsetX = pressed ? -0.25 : 0;
+    const pressOffsetY = pressed ? 0.65 : 0;
+    state.element.style.transform = "translate3d(" + formatCoord(state.renderedX + pressOffsetX) + "px, " + formatCoord(state.renderedY + pressOffsetY) + "px, 0)";
     if (state.arrow) {
-      const pressed = state.element.dataset.pressed === "true";
       const cameraBoost = Math.pow(Math.max(1, state.camera.scale), 0.32);
       state.arrow.style.transform = "rotate(" + formatCoord(state.deg) + "deg) scale(" + formatCoord(state.scale * cameraBoost) + ")";
       state.arrow.style.filter = pressed
@@ -221,6 +226,33 @@ export const ghostCursorClientSource = `(() => {
     const tx = 3 * inv * inv * (b.cx1 - b.x0) + 6 * inv * u * (b.cx2 - b.cx1) + 3 * u * u * (b.x1 - b.cx2);
     const ty = 3 * inv * inv * (b.cy1 - b.y0) + 6 * inv * u * (b.cy2 - b.cy1) + 3 * u * u * (b.y1 - b.cy2);
     return { x, y, heading: Math.atan2(ty, tx) };
+  };
+
+  const sampleWaypoints = (waypoints, u) => {
+    const n = waypoints.length;
+    if (n === 0) return { x: state.renderedX, y: state.renderedY, heading: 0 };
+    if (u <= 0 || n === 1) {
+      const p0 = waypoints[0];
+      const p1 = waypoints[Math.min(1, n - 1)];
+      return { x: p0.x, y: p0.y, heading: Math.atan2(p1.y - p0.y, p1.x - p0.x) };
+    }
+    if (u >= 1) {
+      const pLast = waypoints[n - 1];
+      const pPrev = waypoints[Math.max(0, n - 2)];
+      return { x: pLast.x, y: pLast.y, heading: Math.atan2(pLast.y - pPrev.y, pLast.x - pPrev.x) };
+    }
+    let idx = 0;
+    while (idx < n - 2 && waypoints[idx + 1].u < u) idx++;
+    const a = waypoints[idx];
+    const b = waypoints[idx + 1];
+    const span = Math.max(1e-4, b.u - a.u);
+    const localT = clamp((u - a.u) / span, 0, 1);
+    const s = localT * localT * (3 - 2 * localT);
+    return {
+      x: a.x + (b.x - a.x) * s,
+      y: a.y + (b.y - a.y) * s,
+      heading: Math.atan2(b.y - a.y, b.x - a.x),
+    };
   };
 
   const ensureStage = () => {
@@ -430,13 +462,25 @@ export const ghostCursorClientSource = `(() => {
     stepEffects(timestamp);
     const camActive = stepCameraAndSpotlight(timestamp);
     const pressed = state.element?.dataset.pressed === "true";
-    const pressDip = pressed ? -4.5 : 0;
+    const pressDip = pressed ? -2.2 : 0;
 
     if (state.flight) {
       const f = state.flight;
       const u = clamp((timestamp - f.startTime) / f.durationMs, 0, 1);
-      const s = smootherstep(u);
-      const sample = sampleBezier(f.bezier, s);
+      let sample;
+      if (f.path && f.path.length > 2) {
+        sample = sampleWaypoints(f.path, u);
+      } else {
+        const s = smootherstep(Math.pow(u, 0.74));
+        const base = sampleBezier(f.bezier, s);
+        const envelope = Math.sin(PI * u) * Math.pow(1 - u, 0.45);
+        const wave = (Math.sin(u * f.freq1 + f.phase1) * 0.68 + Math.sin(u * f.freq2 + f.phase2) * 0.32) * f.waveAmp * envelope;
+        sample = {
+          x: base.x + f.nx * wave,
+          y: base.y + f.ny * wave,
+          heading: base.heading,
+        };
+      }
       const prevX = state.renderedX;
       const prevY = state.renderedY;
       state.renderedX = sample.x;
@@ -444,22 +488,22 @@ export const ghostCursorClientSource = `(() => {
       state.vx = (state.renderedX - prevX) / dt;
       state.vy = (state.renderedY - prevY) / dt;
 
-      const bell = Math.pow(Math.sin(PI * Math.pow(u, 0.82)), 1.15);
+      const bell = Math.pow(Math.sin(PI * Math.pow(u, 0.78)), 1.15);
       const bankDir = clamp((f.bezier.x1 - f.bezier.x0) / Math.max(40, f.dist), -1, 1) * 0.72 + state.arcSign * 0.28;
-      const targetDeg = bankDir * 28 * f.farFactor * bell;
+      const targetDeg = clamp(bankDir * 5.2 * f.farFactor * bell, -5.5, 5.5);
       state.deg += (targetDeg + pressDip - state.deg) * Math.min(1, dt * 30);
 
       if (u >= 1) {
-        const endSample = sampleBezier(f.bezier, 1);
-        const overshootSpeed = clamp(f.dist * 0.14, 0, 85);
+        const endSample = f.path && f.path.length > 2 ? sampleWaypoints(f.path, 1) : sampleBezier(f.bezier, 1);
+        const overshootSpeed = f.path ? clamp(f.dist * 0.04, 0, 22) : clamp(f.dist * 0.10, 0, 55);
         state.vx = Math.cos(endSample.heading) * overshootSpeed;
         state.vy = Math.sin(endSample.heading) * overshootSpeed;
         state.flight = null;
         flushFlightResolvers();
       }
     } else {
-      const omega = 26;
-      const zeta = 0.88;
+      const omega = 28;
+      const zeta = 0.86;
       const k = omega * omega;
       const c = 2 * zeta * omega;
       const substeps = 4;
@@ -475,7 +519,7 @@ export const ghostCursorClientSource = `(() => {
 
       const distToTarget = Math.hypot(state.targetX - state.renderedX, state.targetY - state.renderedY);
       const speed = Math.hypot(state.vx, state.vy);
-      if (distToTarget < 1.2 && speed < 18) {
+      if (distToTarget < 0.8 && speed < 14) {
         state.renderedX = state.targetX;
         state.renderedY = state.targetY;
         state.vx = 0;
@@ -484,7 +528,7 @@ export const ghostCursorClientSource = `(() => {
       }
 
       const distScale = smoothstep(35, 190, state.lastMoveDist);
-      const velTilt = clamp((state.vx * 0.015 - state.vy * 0.005) * (0.3 + 0.7 * distScale), -16, 16);
+      const velTilt = clamp((state.vx * 0.006 - state.vy * 0.002) * (0.3 + 0.7 * distScale), -5.5, 5.5);
       const targetDeg = velTilt + pressDip;
       const rotAcc = -380 * (state.deg - targetDeg) - 35 * state.vDeg;
       state.vDeg += rotAcc * dt;
@@ -495,7 +539,7 @@ export const ghostCursorClientSource = `(() => {
       }
     }
 
-    const targetScale = pressed ? 0.80 : 1;
+    const targetScale = pressed ? 0.85 : 1;
     const scAcc = -680 * (state.scale - targetScale) - 32 * state.vScale;
     state.vScale += scAcc * dt;
     state.scale += state.vScale * dt;
@@ -626,7 +670,7 @@ export const ghostCursorClientSource = `(() => {
         state.removeTimer = undefined;
       }, 160);
       state.fadeTimer = undefined;
-    }, 620);
+    }, 12000);
   };
   const show = (options) => {
     clearIdleTimers();
@@ -717,6 +761,11 @@ export const ghostCursorClientSource = `(() => {
       return waitMs(45);
     }
 
+    if (!state.hasMovedOnce && Array.isArray(action.path) && action.path.length > 2) {
+      state.renderedX = action.path[0].x;
+      state.renderedY = action.path[0].y;
+    }
+    state.hasMovedOnce = true;
     const dx = action.x - state.renderedX;
     const dy = action.y - state.renderedY;
     const dist = Math.hypot(dx, dy);
@@ -766,20 +815,34 @@ export const ghostCursorClientSource = `(() => {
     }
 
     const farFactor = smoothstep(50, 220, dist);
-    const arcOffset = dist * 0.16 * farFactor * state.arcSign;
-    const durationMs = clamp(105 + Math.sqrt(dist) * 5.2, 105, 275);
+    const wristBias = -(dx / dist) * 0.045 * dist;
+    const arcOffset = dist * 0.11 * farFactor * state.arcSign + wristBias;
+    const durationMs = typeof action.durationMs === "number" && action.durationMs > 40
+      ? action.durationMs
+      : clamp(110 + Math.sqrt(dist) * 5.4, 110, 290);
+    const path = Array.isArray(action.path) && action.path.length > 2
+      ? [{ x: state.renderedX, y: state.renderedY, u: 0 }, ...action.path.slice(1)]
+      : null;
     state.flight = {
       startTime: performance.now(),
       durationMs,
       dist,
       farFactor,
+      nx,
+      ny,
+      phase1: (action.x * 0.13 + action.y * 0.07) % (PI * 2),
+      phase2: (action.x * 0.29 + action.y * 0.19) % (PI * 2),
+      freq1: 2.1 * PI * 2,
+      freq2: 4.3 * PI * 2,
+      waveAmp: clamp(dist * 0.012, 0.45, 2.0),
+      path,
       bezier: {
         x0: state.renderedX,
         y0: state.renderedY,
-        cx1: state.renderedX + dx * 0.3 + nx * arcOffset,
-        cy1: state.renderedY + dy * 0.3 + ny * arcOffset,
-        cx2: state.renderedX + dx * 0.72 + nx * arcOffset * 0.55,
-        cy2: state.renderedY + dy * 0.72 + ny * arcOffset * 0.55,
+        cx1: state.renderedX + dx * 0.28 + nx * arcOffset,
+        cy1: state.renderedY + dy * 0.28 + ny * arcOffset,
+        cx2: state.renderedX + dx * 0.70 + nx * arcOffset * 0.52,
+        cy2: state.renderedY + dy * 0.70 + ny * arcOffset * 0.52,
         x1: action.x,
         y1: action.y,
       },
@@ -1081,7 +1144,7 @@ export const ghostCursorClientSource = `(() => {
     stage.appendChild(container);
   };
   globalThis.__browserControlGhostCursor = {
-    version: 12,
+    version: 14,
     show,
     hide,
     restore,

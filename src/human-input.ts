@@ -1,6 +1,13 @@
+import type { GhostCursorMouseAction } from "./ghost-cursor.ts"
 import type { JsonObject } from "./protocol.ts"
 
 export type Point = { readonly x: number; readonly y: number }
+export type TrajectoryStep = {
+  readonly point: Point
+  readonly delay: number
+  readonly u: number
+}
+
 type Send = (method: string, params: JsonObject) => Promise<unknown>
 
 type TabState = {
@@ -9,6 +16,13 @@ type TabState = {
   arrivedAt: number
   pressedAt?: number
   lastKeyAt: number
+  lastMove?: {
+    readonly toX: number
+    readonly toY: number
+    readonly durationMs: number
+    readonly waypoints: readonly { readonly x: number; readonly y: number; readonly u: number }[]
+    readonly pending?: boolean
+  }
   queue: Promise<void>
 }
 
@@ -51,7 +65,17 @@ const round1 = (value: number): number => Math.round(value * 10) / 10
 const round2 = (value: number): number => Math.round(value * 100) / 100
 
 /** Minimum-jerk position profile: slow start, fast middle, soft arrival. */
-const minimumJerk = (t: number): number => t * t * t * (10 - 15 * t + 6 * t * t)
+const minimumJerk = (t: number): number => {
+  const u = clamp(t, 0, 1)
+  return u * u * u * (10 - 15 * u + 6 * u * u)
+}
+
+/**
+ * Asymmetric Woodworth/Meyer ballistic reach profile: peak velocity occurs
+ * around u ≈ 0.36, followed by a longer visual closed-loop homing phase.
+ */
+const ballisticProgress = (u: number): number =>
+  minimumJerk(Math.pow(clamp(u, 0, 1), 0.74))
 
 function bezier(p0: Point, p1: Point, p2: Point, p3: Point, t: number): Point {
   const u = 1 - t
@@ -62,63 +86,113 @@ function bezier(p0: Point, p1: Point, p2: Point, p3: Point, t: number): Point {
 }
 
 /**
- * Generates a curved ~60Hz trajectory from `from` to `to` timed to finish in
- * lockstep with the on-page Ghost Cursor glide (~95–260ms).
+ * Generates a realistic biomechanical trajectory from `from` to `to` (~115–285ms):
+ * - Wrist-pivot arc with natural upward sweep on horizontal reaches
+ * - Asymmetric ballistic acceleration (peak at ~36% of duration) + visual homing tail
+ * - Band-limited 8–12 Hz neuromuscular hand wave + micro-tremor that damps on arrival
+ * - Meyer secondary corrective submovement (overshoot hook or undershoot micro-glide)
  */
-export function trajectory(from: Point, to: Point): { readonly point: Point; readonly delay: number }[] {
+export function trajectory(from: Point, to: Point): TrajectoryStep[] {
   const dx = to.x - from.x
   const dy = to.y - from.y
   const distance = Math.hypot(dx, dy)
   if (distance < 4) return []
-  const duration = clamp((95 + Math.sqrt(distance) * 5.2) * random(0.9, 1.08), 95, 275)
-  const normal = { x: -dy / distance, y: dx / distance }
-  const bow = (Math.random() < 0.5 ? -1 : 1) * random(0.04, 0.16) * distance
+
+  const duration = clamp((110 + Math.sqrt(distance) * 5.4) * random(0.92, 1.08), 110, 290)
+  const tangent = { x: dx / distance, y: dy / distance }
+  const normal = { x: -tangent.y, y: tangent.x }
+
+  // Wrist-pivot bias: horizontal sweeps naturally arc slightly upward (-y).
+  const wristBias = -tangent.x * 0.045 * distance
+  const bowSign = Math.random() < 0.5 ? -1 : 1
+  const bow = bowSign * random(0.035, 0.13) * distance + wristBias
+
+  // Submovement classification (Meyer's optimized submovement model):
+  // - ~28% overshoot + corrective hook back onto target
+  // - ~22% undershoot hesitation + secondary micro-glide
+  // - ~50% single continuous asymmetric homing reach
+  const roll = distance > 135 ? Math.random() : 1
+  const mode: "overshoot" | "undershoot" | "direct" =
+    roll < 0.28 ? "overshoot" : roll < 0.50 ? "undershoot" : "direct"
+
+  const submovementSplit = mode === "overshoot" ? random(0.76, 0.83) : mode === "undershoot" ? random(0.72, 0.79) : 1
+  const primaryEnd: Point =
+    mode === "overshoot"
+      ? {
+          x: to.x + tangent.x * random(3.5, 8.5) + normal.x * random(-3.2, 3.2),
+          y: to.y + tangent.y * random(3.5, 8.5) + normal.y * random(-3.2, 3.2),
+        }
+      : mode === "undershoot"
+        ? {
+            x: to.x - tangent.x * random(6.0, 12.5) + normal.x * random(-2.8, 2.8),
+            y: to.y - tangent.y * random(6.0, 12.5) + normal.y * random(-2.8, 2.8),
+          }
+        : to
+
   const c1 = {
-    x: from.x + dx * random(0.22, 0.35) + normal.x * bow,
-    y: from.y + dy * random(0.22, 0.35) + normal.y * bow,
+    x: from.x + (primaryEnd.x - from.x) * random(0.22, 0.34) + normal.x * bow,
+    y: from.y + (primaryEnd.y - from.y) * random(0.22, 0.34) + normal.y * bow,
   }
   const c2 = {
-    x: from.x + dx * random(0.66, 0.8) + normal.x * bow * 0.55,
-    y: from.y + dy * random(0.66, 0.8) + normal.y * bow * 0.55,
+    x: from.x + (primaryEnd.x - from.x) * random(0.64, 0.78) + normal.x * bow * 0.52,
+    y: from.y + (primaryEnd.y - from.y) * random(0.64, 0.78) + normal.y * bow * 0.52,
   }
-  const overshoot = distance > 280 && Math.random() < 0.22
-  const end = overshoot
-    ? { x: to.x + (dx / distance) * random(3, 8), y: to.y + (dy / distance) * random(3, 8) }
-    : to
-  const points: { point: Point; delay: number }[] = []
+
+  // Band-limited physiological hand wave (2 oscillations + harmonic)
+  const phase1 = random(0, Math.PI * 2)
+  const phase2 = random(0, Math.PI * 2)
+  const freq1 = random(1.4, 2.6) * Math.PI * 2
+  const freq2 = random(3.2, 5.1) * Math.PI * 2
+  const waveAmp = clamp(distance * 0.012, 0.45, 2.1)
+
+  const steps: TrajectoryStep[] = []
   let elapsed = 0
   while (elapsed < duration) {
-    const step = random(13, 18)
-    elapsed = Math.min(duration, elapsed + step)
-    const s = minimumJerk(elapsed / duration)
-    const p = bezier(from, c1, c2, end, s)
-    const tremor = (1 - s) * 0.75
-    points.push({
-      point: { x: round1(p.x + noise(tremor)), y: round1(p.y + noise(tremor)) },
-      delay: step,
-    })
-  }
-  if (overshoot) {
-    const back = 3
-    for (let i = 1; i <= back; i += 1) {
-      const s = minimumJerk(i / back)
-      points.push({
-        point: {
-          x: round1(end.x + (to.x - end.x) * s),
-          y: round1(end.y + (to.y - end.y) * s),
-        },
-        delay: random(11, 16),
-      })
+    const delay = random(12.5, 16.8)
+    elapsed = Math.min(duration, elapsed + delay)
+    const u = elapsed / duration
+
+    let base: Point
+    if (mode === "direct" || u <= submovementSplit) {
+      const localU = mode === "direct" ? u : u / submovementSplit
+      const s = ballisticProgress(localU)
+      base = bezier(from, c1, c2, primaryEnd, s)
+    } else {
+      const localU = (u - submovementSplit) / (1 - submovementSplit)
+      const s = minimumJerk(localU)
+      base = {
+        x: primaryEnd.x + (to.x - primaryEnd.x) * s,
+        y: primaryEnd.y + (to.y - primaryEnd.y) * s,
+      }
     }
+
+    // Envelope is 0 at u=0 and u=1 so endpoints are exact, peaking in mid-flight.
+    const envelope = Math.sin(Math.PI * u) * Math.pow(1 - u, 0.45)
+    const perpWave =
+      (Math.sin(u * freq1 + phase1) * 0.68 + Math.sin(u * freq2 + phase2) * 0.32) * waveAmp * envelope +
+      noise(0.42 * envelope)
+    const tangWave = Math.cos(u * freq1 + phase2) * (waveAmp * 0.35) * envelope
+
+    const point: Point =
+      u >= 0.999
+        ? to
+        : {
+            x: round1(base.x + normal.x * perpWave + tangent.x * tangWave),
+            y: round1(base.y + normal.y * perpWave + tangent.y * tangWave),
+          }
+
+    steps.push({ point, delay, u: round2(u) })
   }
-  points.pop()
-  return points
+
+  // Drop the final sample since the caller's own command dispatches at `to`.
+  steps.pop()
+  return steps
 }
 
 /**
- * Applies a consistent small off-center aim offset per target before both
- * Ghost Cursor and CDP Input.dispatchMouseEvent run, so the visible cursor tip
- * and the DOM mouse event land on the exact same pixel.
+ * Applies a consistent off-center aim offset per target and precomputes the
+ * shared biomechanical trajectory so GhostCursor and CDP Input.dispatchMouseEvent
+ * follow the exact same path and land on the exact same pixel.
  */
 export function prepareMouseParams(tabId: number, method: string, params: JsonObject): void {
   if (!isHumanInputEnabled() || method !== "Input.dispatchMouseEvent") return
@@ -135,8 +209,45 @@ export function prepareMouseParams(tabId: number, method: string, params: JsonOb
     }
   }
   const target = params as Record<string, unknown>
-  target.x = round1(params.x + tab.aim.dx)
-  target.y = round1(params.y + tab.aim.dy)
+  const x = round1(params.x + tab.aim.dx)
+  const y = round1(params.y + tab.aim.dy)
+  target.x = x
+  target.y = y
+
+  const needsTravel = !tab.pointer || Math.hypot(tab.pointer.x - x, tab.pointer.y - y) >= 4
+
+  if (needsTravel) {
+    const from = tab.pointer ?? { x: round1(x + random(-220, 220)), y: round1(y + random(-140, 140)) }
+    const steps = trajectory(from, { x, y })
+    const durationMs = Math.round(steps.reduce((sum, step) => sum + step.delay, 0) + 16)
+    const waypoints = [
+      { x: from.x, y: from.y, u: 0 },
+      ...steps.map((step) => ({ x: step.point.x, y: step.point.y, u: step.u })),
+      { x, y, u: 1 },
+    ]
+    tab.lastMove = { toX: x, toY: y, durationMs, waypoints, pending: true }
+  }
+  tab.pointer = { x, y }
+}
+
+export function decorateGhostCursorAction(
+  tabId: number,
+  action: GhostCursorMouseAction,
+): GhostCursorMouseAction {
+  const lastMove = tabs.get(tabId)?.lastMove
+  if (
+    action.type === "move" &&
+    lastMove &&
+    lastMove.waypoints.length > 2 &&
+    Math.hypot(lastMove.toX - action.x, lastMove.toY - action.y) < 1
+  ) {
+    return {
+      ...action,
+      durationMs: lastMove.durationMs,
+      path: lastMove.waypoints,
+    }
+  }
+  return action
 }
 
 const pacedMethods = new Set([
@@ -172,6 +283,12 @@ async function paceMouse(tab: TabState, params: JsonObject, send: Send): Promise
   if (type === "mouseWheel") {
     const frames = glide(Number(params.deltaX ?? 0), Number(params.deltaY ?? 0))
     const last = frames.pop()
+    const driftX = round1(params.x + noise(1.4))
+    const driftY = round1(params.y + noise(1.4))
+    void send("Runtime.evaluate", {
+      expression: `globalThis.__browserControlGhostCursor?.applyMouseEvent(${JSON.stringify({ type: "move", x: driftX, y: driftY, button: "none", durationMs: 110 })})`,
+      awaitPromise: false,
+    }).catch(() => undefined)
     await sendFrames(frames, (frame) =>
       send("Input.dispatchMouseEvent", { ...params, deltaX: frame.x, deltaY: frame.y }),
     )
@@ -183,12 +300,8 @@ async function paceMouse(tab: TabState, params: JsonObject, send: Send): Promise
   }
   const x = params.x
   const y = params.y
-  if (
-    type === "mouseMoved" ||
-    ((type === "mousePressed" || type === "mouseReleased") &&
-      tab.pointer &&
-      Math.hypot(tab.pointer.x - x, tab.pointer.y - y) >= 2)
-  ) {
+  if (tab.lastMove?.pending && Math.hypot(tab.lastMove.toX - x, tab.lastMove.toY - y) < 1) {
+    tab.lastMove = { ...tab.lastMove, pending: false }
     await travel(tab, { x, y }, params, send)
   }
   if (type === "mousePressed") {
@@ -199,14 +312,30 @@ async function paceMouse(tab: TabState, params: JsonObject, send: Send): Promise
     await sleep(random(35, 72) - (Date.now() - tab.pressedAt))
     delete tab.pressedAt
   }
-  tab.pointer = { x, y }
 }
 
 async function travel(tab: TabState, to: Point, params: JsonObject, send: Send): Promise<void> {
-  const from = tab.pointer ?? { x: to.x + random(-220, 220), y: to.y + random(-140, 140) }
-  const path = trajectory(from, to)
-  for (const { point, delay } of path) {
-    const sent = Date.now()
+  const precomputed = tab.lastMove
+  const rawSteps =
+    precomputed && Math.hypot(precomputed.toX - to.x, precomputed.toY - to.y) < 1 && precomputed.waypoints.length > 2
+      ? precomputed.waypoints.slice(1, -1).map((wp, _idx, arr) => ({
+          point: { x: wp.x, y: wp.y },
+          delay: precomputed.durationMs / Math.max(1, arr.length + 1),
+          u: wp.u,
+        }))
+      : trajectory(tab.pointer ?? { x: to.x + random(-220, 220), y: to.y + random(-140, 140) }, to)
+
+  // Subsample to at most 8 CDP mouseMoved events so Chrome's main-thread hit-test
+  // queue never backs up while GhostCursor renders the full 60fps path in-page.
+  const stride = Math.max(1, Math.ceil(rawSteps.length / 8))
+  const steps = rawSteps.filter((_, index) => index % stride === 0 || index === rawSteps.length - 1)
+  const totalBudgetMs = clamp(precomputed?.durationMs ?? 210, 110, 280)
+  const stepDelayMs = totalBudgetMs / Math.max(1, steps.length + 1)
+  const startedAt = Date.now()
+
+  for (const { point } of steps) {
+    if (Date.now() - startedAt >= totalBudgetMs) break
+    const stepStarted = Date.now()
     await send("Input.dispatchMouseEvent", {
       type: "mouseMoved",
       x: point.x,
@@ -215,7 +344,8 @@ async function travel(tab: TabState, to: Point, params: JsonObject, send: Send):
       ...(typeof params.buttons === "number" ? { buttons: params.buttons } : {}),
       ...(typeof params.modifiers === "number" ? { modifiers: params.modifiers } : {}),
     }).catch(() => undefined)
-    await sleep(delay - (Date.now() - sent))
+    if (Date.now() - startedAt >= totalBudgetMs) break
+    await sleep(stepDelayMs - (Date.now() - stepStarted))
   }
   tab.arrivedAt = Date.now()
 }
@@ -227,19 +357,24 @@ async function scrollToward(tab: TabState, params: JsonObject, send: Send): Prom
     ...(params.backendNodeId === undefined ? {} : { backendNodeId: params.backendNodeId }),
   }
   const metrics = (await send("Page.getLayoutMetrics", {}).catch(() => undefined)) as
-    | { cssVisualViewport?: { clientWidth: number; clientHeight: number } }
+    | { cssVisualViewport?: { clientWidth: number; clientHeight: number; pageY?: number } }
     | undefined
   const viewport = metrics?.cssVisualViewport
   if (!viewport) return
   const offset = async (): Promise<number | undefined> => {
+    const layout = (await send("Page.getLayoutMetrics", {}).catch(() => undefined)) as
+      | { cssVisualViewport?: { clientHeight: number; pageY?: number } }
+      | undefined
+    const currentViewport = layout?.cssVisualViewport ?? viewport
+    const pageY = currentViewport.pageY ?? 0
     const result = (await send("DOM.getContentQuads", node).catch(() => undefined)) as { quads?: number[][] } | undefined
     const quad = result?.quads?.[0]
     if (!quad || quad.length < 8) return undefined
-    const ys = [quad[1]!, quad[3]!, quad[5]!, quad[7]!]
+    const ys = [quad[1]! - pageY, quad[3]! - pageY, quad[5]! - pageY, quad[7]! - pageY]
     const minY = Math.min(...ys)
     const maxY = Math.max(...ys)
-    if (minY >= 0 && maxY <= viewport.clientHeight) return 0
-    return (minY + maxY) / 2 - viewport.clientHeight * random(0.38, 0.5)
+    if (minY >= 16 && maxY <= currentViewport.clientHeight - 16) return 0
+    return (minY + maxY) / 2 - currentViewport.clientHeight * random(0.38, 0.5)
   }
   const first = await offset()
   if (!first || Math.abs(first) < 24) return
@@ -251,6 +386,12 @@ async function scrollToward(tab: TabState, params: JsonObject, send: Send): Prom
   let remaining = first
   for (let flick = 0; flick < 3 && Math.abs(remaining) > 12; flick += 1) {
     const amount = Math.sign(remaining) * Math.min(Math.abs(remaining), random(550, 1100))
+    const driftX = round1(pointer.x + noise(1.6))
+    const driftY = round1(pointer.y + noise(1.6))
+    void send("Runtime.evaluate", {
+      expression: `globalThis.__browserControlGhostCursor?.applyMouseEvent(${JSON.stringify({ type: "move", x: driftX, y: driftY, button: "none", durationMs: 120 })})`,
+      awaitPromise: false,
+    }).catch(() => undefined)
     await sendFrames(glide(0, amount), (frame) =>
       send("Input.dispatchMouseEvent", {
         type: "mouseWheel",
@@ -279,10 +420,12 @@ export function glide(dx: number, dy: number): Point[] {
 }
 
 async function sendFrames(frames: readonly Point[], send: (frame: Point) => Promise<unknown>): Promise<void> {
+  const startedAt = Date.now()
   for (const frame of frames) {
-    const sent = Date.now()
+    if (Date.now() - startedAt >= 260) break
+    const stepStarted = Date.now()
     await send(frame).catch(() => undefined)
-    await sleep(random(14, 17) - (Date.now() - sent))
+    await sleep(random(14, 16.5) - (Date.now() - stepStarted))
   }
 }
 

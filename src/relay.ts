@@ -42,7 +42,7 @@ import {
 } from "./relay-helpers.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
 import { ghostCursorMouseActionExpression, ghostCursorRestoreExpression, inputDispatchMouseEventToGhostCursorAction } from "./ghost-cursor.ts"
-import { beforeInput, forgetTab, prepareMouseParams } from "./human-input.ts"
+import { beforeInput, decorateGhostCursorAction, forgetTab, prepareMouseParams } from "./human-input.ts"
 import { guardCdpMethod } from "./cdp-guardrails.ts"
 import {
   awaitHandoffAction,
@@ -1444,15 +1444,16 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (options.message.method !== "Input.dispatchMouseEvent") {
       return
     }
-    const action = inputDispatchMouseEventToGhostCursorAction(options.message.params)
-    if (!action) {
+    const rawAction = inputDispatchMouseEventToGhostCursorAction(options.message.params)
+    if (!rawAction) {
       return
     }
+    const action = decorateGhostCursorAction(options.tabId, rawAction)
     ghostCursorPositionsByTab.set(options.tabId, { x: action.x, y: action.y })
     yield* sendDebuggerCommand({
       tabId: options.tabId,
       method: "Runtime.evaluate",
-      params: { expression: ghostCursorMouseActionExpression(action), awaitPromise: true },
+      params: { expression: ghostCursorMouseActionExpression(action), awaitPromise: action.path === undefined },
     }).pipe(Effect.timeout("2 seconds"), Effect.ignore)
   })
 

@@ -497,7 +497,7 @@ export class RecordingRelay {
         recording.lastFrame &&
         frameNumber === recording.lastFrame.frameNumber &&
         (rawFramePosition - recording.lastFrame.frameNumber >= 0.5 ||
-          (deltaRaw >= 0.55 && recording.lastFrame.frameNumber - rawFramePosition < 1.5))
+          (deltaRaw >= 0.30 && recording.lastFrame.frameNumber - rawFramePosition < 3.0))
       ) {
         frameNumber = recording.lastFrame.frameNumber + 1
       }
