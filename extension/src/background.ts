@@ -65,10 +65,24 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   if (!source.tabId) {
     return
   }
+  const tabId = source.tabId
+  const sessionId = (source as chrome.debugger.DebuggerSession).sessionId
+  if (reason === "target_closed" && sessionId === undefined) {
+    void (async () => {
+      const tab = await chrome.tabs.get(tabId).catch(() => undefined)
+      if (tab) {
+        await chrome.tabs.sendMessage(tabId, { action: "evict-extension-frames" }).catch(() => {})
+        await new Promise((resolve) => setTimeout(resolve, 45))
+        await chrome.debugger.attach({ tabId }, "1.3").catch(() => {})
+      }
+      sendMessage(debuggerDetachedEvent({ tabId, reason, sessionId }))
+    })()
+    return
+  }
   sendMessage(debuggerDetachedEvent({
-    tabId: source.tabId,
+    tabId,
     reason,
-    sessionId: (source as chrome.debugger.DebuggerSession).sessionId,
+    sessionId,
   }))
 })
 

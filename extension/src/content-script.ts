@@ -28,7 +28,7 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
   if (incoming.action === "page-status.set" && status) {
     currentStatus = status
     completingHandoffId = undefined
-    if (status.state === "running") {
+    if (status.state !== "waiting") {
       evictForeignExtensionFrames()
     }
     renderStatus()
@@ -313,9 +313,15 @@ function observeHost(): void {
     return
   }
   observer = new MutationObserver(() => {
-    if (currentStatus && !document.getElementById(hostId)) {
+    if (!currentStatus) {
+      return
+    }
+    if (currentStatus.state !== "waiting") {
+      evictForeignExtensionFrames()
+    }
+    if (!document.getElementById(hostId)) {
       renderStatus()
     }
   })
-  observer.observe(document.documentElement, { childList: true })
+  observer.observe(document.documentElement, { childList: true, subtree: true })
 }
