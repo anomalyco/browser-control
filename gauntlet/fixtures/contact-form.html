@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Contact fixture</title>
+<main>
+  <h1>Contact</h1>
+  <div id="result"></div>
+  <form action="/contact-form-submit" method="get">
+    <input type="hidden" name="outcome">
+    <label>Name <input name="name" autocomplete="name" required></label>
+    <label>Email <input name="email" type="email" autocomplete="email" required></label>
+    <label>Message <textarea name="message" required></textarea></label>
+    <button>Send</button>
+  </form>
+</main>
+<script>
+  window.__gauntlet = { events: [], submits: 0 }
+  for (const type of ['mousedown', 'mouseup', 'click']) document.addEventListener(type, event => {
+    window.__gauntlet.events.push({ type, tag: event.target.tagName, x: event.clientX, y: event.clientY })
+  }, true)
+  document.querySelector('form').addEventListener('submit', () => { window.__gauntlet.submits++ })
+  const query = new URLSearchParams(location.search)
+  const outcome = query.get('outcome') || 'accepted'
+  document.querySelector('[name=outcome]').value = outcome
+  if (query.has('result')) {
+    const result = document.getElementById('result')
+    if (outcome === 'accepted') {
+      result.setAttribute('role', 'status')
+      result.textContent = 'Message received. Receipt LOCAL-001.'
+    } else if (outcome === 'rejected') {
+      result.setAttribute('role', 'alert')
+      result.textContent = 'Submission blocked. Complete the form yourself.'
+    }
+  }
+  // Ordinary iframe churn stresses utility-world routing, without imitating
+  // protected extension UI or making input acceptance depend on human signals.
+  document.querySelector('textarea').addEventListener('focus', () => {
+    const frame = document.createElement('iframe')
+    frame.hidden = true
+    frame.srcdoc = '<p>Ordinary help frame</p>'
+    frame.addEventListener('load', () => frame.remove(), { once: true })
+    document.body.append(frame)
+  })
+</script>
+</html>

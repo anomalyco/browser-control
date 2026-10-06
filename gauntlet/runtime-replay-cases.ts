@@ -25,6 +25,8 @@ export const runtimeReplayCases: readonly GauntletCase[] = [{
     const actual = yield* playwright("evaluate reconnected main world", () => page.evaluate(() => document.documentElement.dataset.replay))
     assert(actual === marker, "Reconnected context does not refer to original document", { actual })
     const evaluateMs = performance.now() - started
+    yield* playwright("fill through reconnected utility world", () => page.getByLabel("Message").fill("Before navigation", { timeout: 3_000 }))
+    assert((yield* playwright("first client reads native fill", () => first.getByLabel("Message").inputValue())) === "Before navigation", "Second client's utility world did not update the original document")
     assert((yield* playwright("first client remains usable", () => first.evaluate(() => document.documentElement.dataset.replay))) === marker,
       "Reconnect disturbed first client")
     yield* playwright("navigate to a new document", () => page.goto(`${url}?next=1`))
@@ -32,7 +34,9 @@ export const runtimeReplayCases: readonly GauntletCase[] = [{
       "Reconnected client retained stale document")
     assert((yield* playwright("first client sees new document", () => first.evaluate(() => document.documentElement.dataset.replay))) === undefined,
       "First client retained stale context after navigation")
+    yield* playwright("fill utility world after navigation", () => page.getByLabel("Message").fill("After navigation", { timeout: 3_000 }))
+    assert((yield* playwright("first client reads navigated fill", () => first.getByLabel("Message").inputValue())) === "After navigation", "Utility world remained stale after navigation")
     ctx.note(`connectMs=${connectMs.toFixed(3)} connectAndEvaluateMs=${evaluateMs.toFixed(3)}`)
-    return { connectMs, connectAndEvaluateMs: evaluateMs, evaluationVerified: true }
+    return { connectMs, connectAndEvaluateMs: evaluateMs, evaluationVerified: true, nativeFillVerified: true }
   })),
 }]

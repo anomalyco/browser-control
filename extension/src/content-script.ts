@@ -48,22 +48,27 @@ const foreignExtensionSelector = [
   "embed[src^='chrome-extension://']",
 ].join(",")
 
-function evictForeignExtensionFrames(): number {
+function evictForeignExtensionNodesIn(root: Document | ShadowRoot | Element): number {
   let removed = 0
   const ownOrigin = `chrome-extension://${chrome.runtime.id}`
-  const visitRoot = (root: Document | ShadowRoot) => {
-    for (const el of root.querySelectorAll(foreignExtensionSelector)) {
-      const src = el.getAttribute("src") ?? el.getAttribute("data") ?? (el as HTMLIFrameElement).src ?? ""
-      if (src.startsWith(ownOrigin)) continue
-      el.remove()
-      removed += 1
-    }
-    for (const el of root.querySelectorAll("*")) {
-      if (el.shadowRoot) visitRoot(el.shadowRoot)
-    }
+  const removeIfForeign = (el: Element) => {
+    const src = el.getAttribute("src") ?? el.getAttribute("data") ?? (el as HTMLIFrameElement).src ?? ""
+    if (src.startsWith(ownOrigin)) return
+    el.remove()
+    removed += 1
   }
-  if (document.documentElement) visitRoot(document)
+  if (root instanceof Element && root.matches(foreignExtensionSelector)) {
+    removeIfForeign(root)
+    return removed
+  }
+  for (const el of root.querySelectorAll(foreignExtensionSelector)) {
+    removeIfForeign(el)
+  }
   return removed
+}
+
+function evictForeignExtensionFrames(): number {
+  return document.documentElement ? evictForeignExtensionNodesIn(document) : 0
 }
 
 chrome.runtime.sendMessage({ action: "page-status.ready" }).catch(() => {})
@@ -309,12 +314,18 @@ function observeHost(): void {
   if (observer || !document.documentElement) {
     return
   }
-  observer = new MutationObserver(() => {
+  observer = new MutationObserver((records) => {
     if (!currentStatus) {
       return
     }
     if (currentStatus.state !== "waiting") {
-      evictForeignExtensionFrames()
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          if (node instanceof Element) {
+            evictForeignExtensionNodesIn(node)
+          }
+        }
+      }
     }
     if (!document.getElementById(hostId)) {
       renderStatus()

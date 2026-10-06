@@ -4,7 +4,7 @@ import crypto from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { Clock, Config, Effect, Option } from "effect"
+import { Clock, Config, Effect, Option, Semaphore } from "effect"
 import { WebSocket, WebSocketServer, type RawData } from "ws"
 import {
   removeDefaultLightColorSchemeEmulation,
@@ -579,6 +579,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     ...(contextDebugLog ? { trace: contextDebugLog } : {}),
   })
   const mainFrameIdsByTab = new Map<number, string>()
+  const inputLocks = new Map<number, Semaphore.Semaphore>()
   const ghostCursorPositionsByTab = new Map<number, { readonly x: number; readonly y: number }>()
   const suppressedChildSessions = new Map<string, number>()
   const protectedFrames = new ProtectedFrameTracker()
@@ -1065,6 +1066,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         return
       }
       if (decision.kind === "restore") {
+        if (!protectedFrames.hasAny(tabId)) setProtectedUi(tabId, false)
         sendEventToTargetViewers(target.sessionId, { method: "Page.frameAttached", params: { frameId: decision.frameId, parentFrameId: decision.parentFrameId }, sessionId: target.sessionId })
       }
     }
@@ -1350,26 +1352,44 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     const sessionId = message.sessionId
     const announced = sessionId !== undefined && cdpClients.hasSession(socket, sessionId)
-    prepareMouseParams(tabId, command.method, command.params)
-    yield* Effect.all([
-      applyGhostCursorMouseEvent({ tabId, message: { ...message, params: command.params } }).pipe(Effect.ignore),
-      Effect.promise(() =>
-        beforeInput(tabId, command.method, command.params, route.chromeSessionId === undefined, (method, params) =>
-          Effect.runPromise(sendDebuggerCommand({ ...command, method, params })),
-        ).catch(() => undefined),
-      ),
-    ], { concurrency: "unbounded", discard: true })
-    const result = yield* (message.method === "Runtime.enable" && sessionId
-      ? cdpRuntime.enable(route, command.params, () => clientRoutesSession(socket, sessionId) && (!announced || cdpClients.hasSession(socket, sessionId)), announced ? socket : undefined)
-      : sendDebuggerCommand(command)).pipe(
-        // Chrome rejects every command for a tab while another extension's frame
-        // is open in it; clients only see the rejection, so record it per tab.
-        Effect.tapError((error) => Effect.sync(() => {
-          if (runtimeFailureKind(error) === "cross-extension-page") setProtectedUi(tabId, true)
-        })),
-        Effect.tap(() => Effect.sync(() => setProtectedUi(tabId, false))),
-      )
-    return result
+    const admittedGeneration = extensionGeneration
+    const isOrderedInput = command.method.startsWith("Input.") || command.method === "DOM.scrollIntoViewIfNeeded"
+    const inputTargetCurrent = () => admittedGeneration === extensionGeneration
+      && registry.routingRootTarget(tabId)?.sessionId === route.rootSessionId
+      && (sessionId === undefined || clientRoutesSession(socket, sessionId))
+    const dispatch = Effect.gen(function* () {
+      if (isOrderedInput && !inputTargetCurrent()) return yield* Effect.fail(new Error("CDP target changed while input command was queued"))
+      prepareMouseParams(tabId, command.method, command.params)
+      yield* Effect.all([
+        applyGhostCursorMouseEvent({ tabId, message: { ...message, params: command.params } }).pipe(Effect.ignore),
+        Effect.promise(() =>
+          beforeInput(tabId, command.method, command.params, route.chromeSessionId === undefined, (method, params) =>
+            Effect.runPromise(sendDebuggerCommand({ ...command, method, params })),
+          ).catch(() => undefined),
+        ),
+      ], { concurrency: "unbounded", discard: true })
+      if (isOrderedInput && !inputTargetCurrent()) return yield* Effect.fail(new Error("CDP target changed while input command was prepared"))
+      return yield* (message.method === "Runtime.enable" && sessionId
+        ? cdpRuntime.enable(route, command.params, () => clientRoutesSession(socket, sessionId) && (!announced || cdpClients.hasSession(socket, sessionId)), announced ? socket : undefined)
+        : sendDebuggerCommand(command))
+    })
+    // Playwright's default click sends move/down/up concurrently. Keep the
+    // entire input transaction ordered, including cursor ACK and final dispatch;
+    // queuing pacing alone lets a slow down overlay turn a click into up/down.
+    let ordered = dispatch
+    if (isOrderedInput) {
+      const lock = inputLocks.get(tabId) ?? Semaphore.makeUnsafe(1)
+      inputLocks.set(tabId, lock)
+      ordered = lock.withPermit(dispatch)
+    }
+    return yield* ordered.pipe(
+      // Chrome rejects every command for a tab while another extension's frame
+      // is open in it; clients only see the rejection, so record it per tab.
+      Effect.tapError((error) => Effect.sync(() => {
+        if (runtimeFailureKind(error) === "cross-extension-page") setProtectedUi(tabId, true)
+      })),
+      Effect.tap(() => Effect.sync(() => setProtectedUi(tabId, false))),
+    )
   })
 
   const toggleTab = Effect.fnUntraced(function* (tabId: number) {
@@ -1458,6 +1478,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   })
 
   function clearTabRuntimeState(tabId: number): void {
+    inputLocks.delete(tabId)
     mainFrameIdsByTab.delete(tabId)
     protectedFrames.forgetTab(tabId)
     ghostCursorPositionsByTab.delete(tabId)

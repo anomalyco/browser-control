@@ -2,6 +2,7 @@ import { Effect, Fiber, Option } from "effect"
 import type { Page } from "playwright-core"
 import { snapshotCases } from "./snapshot-cases.ts"
 import { runtimeReplayCases } from "./runtime-replay-cases.ts"
+import { formCases } from "./form-cases.ts"
 import type { ExpectedFailure } from "./report.ts"
 import {
   assert,
@@ -50,6 +51,7 @@ function valueObject(envelope: ExecuteEnvelope): Record<string, unknown> {
 export const cases: readonly GauntletCase[] = [
   ...snapshotCases,
   ...runtimeReplayCases,
+  ...formCases,
   {
     name: "stalled-main-world",
     summary: "Relay-owned page whose main world stalls for automation while the DOM stays painted",

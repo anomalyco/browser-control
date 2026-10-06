@@ -74,6 +74,12 @@ type RequestContext = {
 async function handleRequest(request: http.IncomingMessage, response: http.ServerResponse, context: RequestContext): Promise<void> {
   const url = new URL(request.url ?? "/", "http://gauntlet.invalid")
   try {
+    if (url.pathname === "/contact-form-submit") {
+      const outcome = url.searchParams.get("outcome") ?? "accepted"
+      response.writeHead(303, { location: `/contact-form.html?result=1&outcome=${encodeURIComponent(outcome)}`, "cache-control": "no-store" })
+      response.end()
+      return
+    }
     if (url.pathname === "/stalled-main-world.html") {
       await serveStalledMainWorld(url, response, context)
       return

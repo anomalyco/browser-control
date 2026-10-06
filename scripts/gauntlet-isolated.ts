@@ -66,6 +66,7 @@ const main = Effect.fn("Gauntlet.isolated")(function* () {
       BROWSER_CONTROL_ENDPOINT: endpoint,
       BROWSER_CONTROL_PORT: String(ports.relay),
       BROWSER_CONTROL_AUTOSTART: "false",
+      BROWSER_CONTROL_DEBUG: process.env.BROWSER_CONTROL_DEBUG,
       GAUNTLET_CLI: path.join(runtime, "cli.js"),
       GAUNTLET_PRIMARY_PORT: String(ports.primary),
       GAUNTLET_SECONDARY_PORT: String(ports.secondary),
@@ -105,6 +106,7 @@ const main = Effect.fn("Gauntlet.isolated")(function* () {
       const browserPath = Option.isSome(executable) ? executable.value : chromium.executablePath()
       const browser = yield* own("browser", browserPath, [
         "--no-first-run", "--no-default-browser-check", "--disable-background-networking",
+        "--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding",
         "--disable-component-update", "--disable-default-apps", "--disable-sync",
         "--password-store=basic", "--use-mock-keychain", "--site-per-process",
         // Chromium's normal test-runner flags; only this synthetic profile is affected.
