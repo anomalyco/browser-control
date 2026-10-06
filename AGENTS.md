@@ -101,8 +101,13 @@ local Node relay.
 
 - Run `pnpm check:locals` and `pnpm check:unused` (Knip) after TypeScript changes;
   run `pnpm audit:duplicates` during cleanups.
-- Run `pnpm test` (Vitest) for unit tests in `test/` (browser-free).
-- Prefer `pnpm gauntlet:isolated` for repeatable real-extension regressions.
+- Run `pnpm test` (Vitest) for unit tests in `test/` (browser-free) and
+  `pnpm exec tsx scripts/check-snapshot.ts` for real-DOM `snapshot()`/`ref()`
+  regressions.
+- Prefer `pnpm gauntlet:isolated` for repeatable real-extension regressions, and
+  use the project's `.opencode/skills/gauntlet/SKILL.md` workflow (**Gauntlet →
+  Autoresearch → Simplify → Harvest**) when dogfooding navigation and API
+  harvesting across live websites.
 - Use `pnpm runtime:prepare --staging <fresh-dir> --install <fresh-dir>` and
   `pnpm runtime:select --install <validated-dir> --active <shared-symlink>` to
   deploy changes to `/Users/kit/.browser-control/current-runtime`, followed by
