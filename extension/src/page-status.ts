@@ -1,4 +1,5 @@
 import { isJsonObject, type PageStatus } from "../../src/protocol.ts"
+import { formatSessionShortName, sessionEmoji } from "./tab-groups.ts"
 
 export type PageStatusView = {
   readonly label: string
@@ -12,9 +13,8 @@ export type PageStatusView = {
 }
 
 const stateLabels = {
-  attached: "ON",
-  running: "RUN",
-  waiting: "WAIT",
+  running: "running",
+  waiting: "waiting",
 } as const
 
 const stateTitles = {
@@ -24,13 +24,14 @@ const stateTitles = {
 } as const
 
 export function pageStatusView(status: PageStatus): PageStatusView {
+  const identity = `${sessionEmoji(status.sessionId)} ${formatSessionShortName(status.sessionId)}`
   const label = status.state === "waiting"
-    ? `BC · ${stateLabels.waiting}`
+    ? `${identity} · ${stateLabels.waiting}`
     : status.readOnly
-    ? "BC · RO"
+    ? `${identity} · read-only`
     : status.state === "running"
-    ? `BC · ${stateLabels.running}`
-    : "BC"
+    ? `${identity} · ${stateLabels.running}`
+    : identity
 
   const details = [
     stateTitles[status.state],

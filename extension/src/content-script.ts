@@ -63,32 +63,33 @@ function renderStatus(): void {
         box-sizing: border-box;
         max-width: min(360px, calc(100vw - 20px));
         overflow: hidden;
-        padding: 4px 7px;
+        padding: 5px 10px;
         border: 1px solid rgba(255, 255, 255, 0.14);
         border-radius: 999px;
-        background: rgba(24, 24, 27, 0.76);
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.16);
-        color: rgba(255, 255, 255, 0.86);
-        font: 650 9px/1.2 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-        letter-spacing: 0.06em;
+        background: rgba(18, 18, 17, 0.84);
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.24);
+        color: rgba(244, 243, 239, 0.92);
+        font: 550 11px/1.25 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+        letter-spacing: -0.01em;
         text-overflow: ellipsis;
         white-space: nowrap;
-        backdrop-filter: blur(8px);
-        opacity: 0.58;
+        backdrop-filter: blur(12px) saturate(140%);
+        -webkit-backdrop-filter: blur(12px) saturate(140%);
+        opacity: 0.78;
       }
       #__browser_control_status__::before {
         display: inline-block;
-        width: 5px;
-        height: 5px;
-        margin-right: 5px;
+        width: 5.5px;
+        height: 5.5px;
+        margin-right: 6px;
         border-radius: 50%;
-        background: #8b5cf6;
+        background: #a8ba96;
         content: "";
         vertical-align: 1px;
       }
-      #__browser_control_status__[data-tone="running"]::before { background: #f59e0b; }
-      #__browser_control_status__[data-tone="waiting"]::before { background: #3b82f6; }
-      #__browser_control_status__[data-tone="running"] { opacity: 0.92; }
+      #__browser_control_status__[data-tone="running"]::before { background: #e0b35a; }
+      #__browser_control_status__[data-tone="waiting"]::before { background: #60a5fa; }
+      #__browser_control_status__[data-tone="running"] { opacity: 0.96; }
       #__browser_control_status__[data-tone="waiting"] {
         position: absolute;
         right: 10px;

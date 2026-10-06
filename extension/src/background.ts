@@ -7,7 +7,7 @@ import type {
   OffscreenStatusRecordingResult,
   OffscreenStopRecordingResult,
 } from "./recording-types.ts"
-import { finalizeBrowserControlGrouping, isBrowserControlGroupTitle, tabGroupColor, tabGroupTitle } from "./tab-groups.ts"
+import { finalizeBrowserControlGrouping, formatTabGroupTitle, isBrowserControlGroupTitle, tabGroupColor } from "./tab-groups.ts"
 import { pageStatusFromJson } from "./page-status.ts"
 import { debuggerDetachedEvent } from "./debugger-detach.ts"
 import { getOwnedDebuggerTabIds } from "./debugger-ownership.ts"
@@ -299,7 +299,12 @@ async function handleCommand(command: ShimCommand, currentSocket: WebSocket): Pr
   }
   if (command.method === "tabs.group") {
     const tabId = numberParam(command.params, "tabId")
-    return await runTabGroupingCommand(tabId, () => groupBrowserControlTab(tabId, currentSocket))
+    const sessionId = typeof command.params?.sessionId === "string" ? command.params.sessionId : undefined
+    const url = typeof command.params?.url === "string" ? command.params.url : undefined
+    return await runTabGroupingCommand(tabId, () => groupBrowserControlTab(tabId, currentSocket, {
+      ...(sessionId ? { sessionId } : {}),
+      ...(url ? { url } : {}),
+    }))
   }
   if (command.method === "tabs.ungroup") {
     const tabId = numberParam(command.params, "tabId")
@@ -487,12 +492,28 @@ async function reconcileBrowserControlGroups(currentGeneration: number): Promise
   }
 }
 
-async function groupBrowserControlTab(tabId: number, currentSocket: WebSocket): Promise<JsonObject> {
+async function groupBrowserControlTab(
+  tabId: number,
+  currentSocket: WebSocket,
+  options?: { readonly sessionId?: string; readonly url?: string },
+): Promise<JsonObject> {
   const tab = await chrome.tabs.get(tabId)
+  const resolvedUrl = options?.url ?? tab.url
+  const desiredTitle = formatTabGroupTitle({
+    ...(options?.sessionId ? { sessionId: options.sessionId } : {}),
+    ...(resolvedUrl ? { url: resolvedUrl } : {}),
+  })
   if (tab.groupId !== undefined && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
     const currentGroup = await chrome.tabGroups.get(tab.groupId)
-    if (currentGroup.title === tabGroupTitle && currentGroup.color === tabGroupColor) {
+    if (currentGroup.title === desiredTitle && currentGroup.color === tabGroupColor) {
       return { groupId: currentGroup.id }
+    }
+    if (isBrowserControlGroupTitle(currentGroup.title)) {
+      const groupedTabs = await chrome.tabs.query({ groupId: currentGroup.id })
+      if (groupedTabs.length === 1 && groupedTabs[0]?.id === tabId) {
+        await chrome.tabGroups.update(currentGroup.id, { title: desiredTitle, color: tabGroupColor })
+        return { groupId: currentGroup.id }
+      }
     }
   }
   const groups = await chrome.tabGroups.query({ windowId: tab.windowId })
@@ -501,7 +522,7 @@ async function groupBrowserControlTab(tabId: number, currentSocket: WebSocket): 
   assertCurrentSocket(currentSocket)
   let existingGroup: chrome.tabGroups.TabGroup | undefined
   for (const group of groups) {
-    if (group.title !== tabGroupTitle || group.color !== tabGroupColor) continue
+    if (group.title !== desiredTitle || group.color !== tabGroupColor) continue
     const groupedTabs = await chrome.tabs.query({ groupId: group.id })
     if (groupedTabs.some((groupedTab) => typeof groupedTab.id === "number" && attachedTabIds.has(groupedTab.id))) {
       existingGroup = group
@@ -515,7 +536,7 @@ async function groupBrowserControlTab(tabId: number, currentSocket: WebSocket): 
   })
   await finalizeBrowserControlGrouping({
     assertCurrent: () => assertCurrentSocket(currentSocket),
-    update: () => chrome.tabGroups.update(groupId, { title: tabGroupTitle, color: tabGroupColor }).then(() => {}),
+    update: () => chrome.tabGroups.update(groupId, { title: desiredTitle, color: tabGroupColor }).then(() => {}),
     rollback: () => chrome.tabs.ungroup(tabId),
   })
   return { groupId }

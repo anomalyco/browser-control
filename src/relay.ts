@@ -474,7 +474,17 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         const next = pendingTabGrouping.get(tabId)
         if (!next) return
         pendingTabGrouping.delete(tabId)
-        await Effect.runPromise(Effect.ignore(sendToExtension({ method: next, params: { tabId } })))
+        const target = registry.tabTargets.get(tabId)
+        const sessionId = target ? pageStatusSessionId(target) : undefined
+        const url = target?.targetInfo.url
+        const params: JsonObject = next === "tabs.group"
+          ? {
+            tabId,
+            ...(sessionId ? { sessionId } : {}),
+            ...(url ? { url } : {}),
+          }
+          : { tabId }
+        await Effect.runPromise(Effect.ignore(sendToExtension({ method: next, params })))
       }
     })().finally(() => {
       if (tabGroupingWorkers.get(tabId) !== worker) return
@@ -1069,6 +1079,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         forgetProtectedFrames(tabId)
         contextDebugLog?.(`main-frame-navigated frame=${boundedToken(frameId)} loader=${boundedToken(getString(frame, "loaderId"))} ${targetDiagnosticIdentity(target)} ${summarizeDiagnosticUrl(frameUrl)}`)
         registry.updateTargetUrl(tabId, frameUrl)
+        if (extensionRpc.connected && pageStatusSessionId(target)) refreshTabGrouping(tabId)
       }
       if (frameId !== undefined && frameParentId !== undefined && params) {
         registry.rememberFrameEvent({ tabId, frameId, navigated: params })
@@ -1087,6 +1098,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         }
         contextDebugLog?.(`main-frame-same-document frame=${boundedToken(frameId)} ${targetDiagnosticIdentity(target)} ${summarizeDiagnosticUrl(url)}`)
         registry.updateTargetUrl(tabId, url)
+        if (extensionRpc.connected && pageStatusSessionId(target)) refreshTabGrouping(tabId)
       }
     }
     if (method === "Page.lifecycleEvent") {

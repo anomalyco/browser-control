@@ -1,10 +1,20 @@
 import { describe, expect, it, vi } from "vitest"
-import { finalizeBrowserControlGrouping, isBrowserControlGroupTitle, tabGroupTitle } from "../extension/src/tab-groups.ts"
+import {
+  finalizeBrowserControlGrouping,
+  formatTabGroupTitle,
+  isBrowserControlGroupTitle,
+  tabGroupTitle,
+} from "../extension/src/tab-groups.ts"
 
 describe("isBrowserControlGroupTitle", () => {
-  it("matches the current and legacy Browser Control group titles", () => {
+  it("matches the current semantic and legacy Browser Control group titles", () => {
     expect(tabGroupTitle.replace("\u2063", "")).toBe("control")
     expect(isBrowserControlGroupTitle(tabGroupTitle)).toBe(true)
+    expect(isBrowserControlGroupTitle(formatTabGroupTitle({ sessionId: "cosmic-otter-866", url: "https://elevenlabs.io/app/voice-lab" }))).toBe(true)
+    expect(formatTabGroupTitle({ sessionId: "cosmic-otter-866", url: "https://elevenlabs.io/app/voice-lab" }).replace("\u2063", "")).toBe("🦦 elevenlabs")
+    expect(formatTabGroupTitle({ sessionId: "clever-raven-628", url: "https://www.ubereats.com/checkout" }).replace("\u2063", "")).toBe("🐦‍⬛ ubereats")
+    expect(formatTabGroupTitle({ sessionId: "cosmic-otter-866", url: "about:blank" }).replace("\u2063", "")).toBe("🦦 cosmic otter")
+    expect(formatTabGroupTitle({ sessionId: "voice-audit", url: "https://elevenlabs.io/app/voice-lab" }).replace("\u2063", "")).toBe("🦦 voice audit")
     expect(isBrowserControlGroupTitle("control")).toBe(false)
     expect(isBrowserControlGroupTitle("browser-control")).toBe(true)
     expect(isBrowserControlGroupTitle("bc:cosmic-otter-866")).toBe(true)
