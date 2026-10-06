@@ -1,11 +1,51 @@
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
 import type { GhostCursorMouseAction } from "./ghost-cursor.ts"
+import { DEFAULT_HUMAN_MODEL_PROFILE, type HumanModelProfile, type Point } from "./human-model.ts"
 import type { JsonObject } from "./protocol.ts"
 
-export type Point = { readonly x: number; readonly y: number }
+export type { Point }
 export type TrajectoryStep = {
   readonly point: Point
   readonly delay: number
   readonly u: number
+}
+
+let cachedProfile: HumanModelProfile | undefined
+let cachedProfileCheckedAt = 0
+
+export function setHumanModelProfile(profile: HumanModelProfile | undefined): void {
+  cachedProfile = profile
+  cachedProfileCheckedAt = Date.now()
+}
+
+export function getHumanModelProfile(): HumanModelProfile {
+  const now = Date.now()
+  if (cachedProfile && now - cachedProfileCheckedAt < 15_000) {
+    return cachedProfile
+  }
+  cachedProfileCheckedAt = now
+  const customPath =
+    process.env.BROWSER_CONTROL_HUMAN_MODEL_PATH ??
+    path.join(os.homedir(), ".browser-control", "human-model.json")
+  try {
+    if (fs.existsSync(customPath)) {
+      const parsed = JSON.parse(fs.readFileSync(customPath, "utf8")) as {
+        readonly profile?: HumanModelProfile
+        readonly version?: number
+      }
+      const candidate = parsed.profile ?? (parsed.version === 1 ? (parsed as unknown as HumanModelProfile) : undefined)
+      if (candidate?.version === 1 && candidate.reach && candidate.click) {
+        cachedProfile = candidate
+        return candidate
+      }
+    }
+  } catch {
+    // Fall back to baseline profile if file is absent or malformed
+  }
+  cachedProfile = DEFAULT_HUMAN_MODEL_PROFILE
+  return cachedProfile
 }
 
 type Send = (method: string, params: JsonObject) => Promise<unknown>
@@ -74,8 +114,8 @@ const minimumJerk = (t: number): number => {
  * Asymmetric Woodworth/Meyer ballistic reach profile: peak velocity occurs
  * around u ≈ 0.36, followed by a longer visual closed-loop homing phase.
  */
-const ballisticProgress = (u: number): number =>
-  minimumJerk(Math.pow(clamp(u, 0, 1), 0.74))
+const ballisticProgress = (u: number, exponent = 0.74): number =>
+  minimumJerk(Math.pow(clamp(u, 0, 1), exponent))
 
 function bezier(p0: Point, p1: Point, p2: Point, p3: Point, t: number): Point {
   const u = 1 - t
@@ -92,58 +132,75 @@ function bezier(p0: Point, p1: Point, p2: Point, p3: Point, t: number): Point {
  * - Band-limited 8–12 Hz neuromuscular hand wave + micro-tremor that damps on arrival
  * - Meyer secondary corrective submovement (overshoot hook or undershoot micro-glide)
  */
-export function trajectory(from: Point, to: Point): TrajectoryStep[] {
+export function trajectory(
+  from: Point,
+  to: Point,
+  profile: HumanModelProfile = getHumanModelProfile(),
+): TrajectoryStep[] {
   const dx = to.x - from.x
   const dy = to.y - from.y
   const distance = Math.hypot(dx, dy)
   if (distance < 4) return []
 
-  const duration = clamp((110 + Math.sqrt(distance) * 5.4) * random(0.92, 1.08), 110, 290)
+  const { reach, submovements, tremor } = profile
+  const jitter = clamp(reach.durationJitter, 0.02, 0.25)
+  const duration = clamp(
+    (reach.baseMs + Math.sqrt(distance) * reach.sqrtScale) * random(1 - jitter, 1 + jitter),
+    reach.minDurationMs,
+    reach.maxDurationMs,
+  )
   const tangent = { x: dx / distance, y: dy / distance }
   const normal = { x: -tangent.y, y: tangent.x }
 
   // Wrist-pivot bias: horizontal sweeps naturally arc slightly upward (-y).
-  const wristBias = -tangent.x * 0.045 * distance
+  const wristBias = -tangent.x * reach.wristBias * distance
   const bowSign = Math.random() < 0.5 ? -1 : 1
-  const bow = bowSign * random(0.035, 0.13) * distance + wristBias
+  const bow = bowSign * random(reach.bowMinRatio, reach.bowMaxRatio) * distance + wristBias
 
   // Submovement classification (Meyer's optimized submovement model):
-  // - ~28% overshoot + corrective hook back onto target
-  // - ~22% undershoot hesitation + secondary micro-glide
-  // - ~50% single continuous asymmetric homing reach
   const roll = distance > 135 ? Math.random() : 1
   const mode: "overshoot" | "undershoot" | "direct" =
-    roll < 0.28 ? "overshoot" : roll < 0.50 ? "undershoot" : "direct"
+    roll < submovements.overshootRate
+      ? "overshoot"
+      : roll < submovements.overshootRate + submovements.undershootRate
+        ? "undershoot"
+        : "direct"
 
-  const submovementSplit = mode === "overshoot" ? random(0.76, 0.83) : mode === "undershoot" ? random(0.72, 0.79) : 1
+  const submovementSplit =
+    mode === "overshoot"
+      ? random(submovements.overshootSplitMin, submovements.overshootSplitMax)
+      : mode === "undershoot"
+        ? random(submovements.undershootSplitMin, submovements.undershootSplitMax)
+        : 1
+  const spread = submovements.lateralSpreadPx
   const primaryEnd: Point =
     mode === "overshoot"
       ? {
-          x: to.x + tangent.x * random(3.5, 8.5) + normal.x * random(-3.2, 3.2),
-          y: to.y + tangent.y * random(3.5, 8.5) + normal.y * random(-3.2, 3.2),
+          x: to.x + tangent.x * random(submovements.overshootMinPx, submovements.overshootMaxPx) + normal.x * random(-spread, spread),
+          y: to.y + tangent.y * random(submovements.overshootMinPx, submovements.overshootMaxPx) + normal.y * random(-spread, spread),
         }
       : mode === "undershoot"
         ? {
-            x: to.x - tangent.x * random(6.0, 12.5) + normal.x * random(-2.8, 2.8),
-            y: to.y - tangent.y * random(6.0, 12.5) + normal.y * random(-2.8, 2.8),
+            x: to.x - tangent.x * random(submovements.undershootMinPx, submovements.undershootMaxPx) + normal.x * random(-spread * 0.9, spread * 0.9),
+            y: to.y - tangent.y * random(submovements.undershootMinPx, submovements.undershootMaxPx) + normal.y * random(-spread * 0.9, spread * 0.9),
           }
         : to
 
   const c1 = {
-    x: from.x + (primaryEnd.x - from.x) * random(0.22, 0.34) + normal.x * bow,
-    y: from.y + (primaryEnd.y - from.y) * random(0.22, 0.34) + normal.y * bow,
+    x: from.x + (primaryEnd.x - from.x) * random(reach.c1TangentialMin, reach.c1TangentialMax) + normal.x * bow,
+    y: from.y + (primaryEnd.y - from.y) * random(reach.c1TangentialMin, reach.c1TangentialMax) + normal.y * bow,
   }
   const c2 = {
-    x: from.x + (primaryEnd.x - from.x) * random(0.64, 0.78) + normal.x * bow * 0.52,
-    y: from.y + (primaryEnd.y - from.y) * random(0.64, 0.78) + normal.y * bow * 0.52,
+    x: from.x + (primaryEnd.x - from.x) * random(reach.c2TangentialMin, reach.c2TangentialMax) + normal.x * bow * reach.c2NormalRatio,
+    y: from.y + (primaryEnd.y - from.y) * random(reach.c2TangentialMin, reach.c2TangentialMax) + normal.y * bow * reach.c2NormalRatio,
   }
 
   // Band-limited physiological hand wave (2 oscillations + harmonic)
   const phase1 = random(0, Math.PI * 2)
   const phase2 = random(0, Math.PI * 2)
-  const freq1 = random(1.4, 2.6) * Math.PI * 2
-  const freq2 = random(3.2, 5.1) * Math.PI * 2
-  const waveAmp = clamp(distance * 0.012, 0.45, 2.1)
+  const freq1 = random(tremor.freq1MinHz, tremor.freq1MaxHz) * Math.PI * 2
+  const freq2 = random(tremor.freq2MinHz, tremor.freq2MaxHz) * Math.PI * 2
+  const waveAmp = clamp(distance * tremor.waveAmpPerPx, tremor.waveAmpMinPx, tremor.waveAmpMaxPx)
 
   const steps: TrajectoryStep[] = []
   let elapsed = 0
@@ -155,7 +212,7 @@ export function trajectory(from: Point, to: Point): TrajectoryStep[] {
     let base: Point
     if (mode === "direct" || u <= submovementSplit) {
       const localU = mode === "direct" ? u : u / submovementSplit
-      const s = ballisticProgress(localU)
+      const s = ballisticProgress(localU, reach.ballisticExponent)
       base = bezier(from, c1, c2, primaryEnd, s)
     } else {
       const localU = (u - submovementSplit) / (1 - submovementSplit)
@@ -170,7 +227,7 @@ export function trajectory(from: Point, to: Point): TrajectoryStep[] {
     const envelope = Math.sin(Math.PI * u) * Math.pow(1 - u, 0.45)
     const perpWave =
       (Math.sin(u * freq1 + phase1) * 0.68 + Math.sin(u * freq2 + phase2) * 0.32) * waveAmp * envelope +
-      noise(0.42 * envelope)
+      noise(tremor.noiseScalePx * envelope)
     const tangWave = Math.cos(u * freq1 + phase2) * (waveAmp * 0.35) * envelope
 
     const point: Point =
@@ -199,13 +256,15 @@ export function prepareMouseParams(tabId: number, method: string, params: JsonOb
   const type = params.type
   if (type !== "mouseMoved" && type !== "mousePressed" && type !== "mouseReleased") return
   if (typeof params.x !== "number" || typeof params.y !== "number") return
+  const profile = getHumanModelProfile()
+  const { click } = profile
   const tab = state(tabId)
   if (!tab.aim || Math.hypot(tab.aim.x - params.x, tab.aim.y - params.y) >= 1) {
     tab.aim = {
       x: params.x,
       y: params.y,
-      dx: clamp(noise(1.8), -2.5, 2.5),
-      dy: clamp(noise(1.4), -2.0, 2.0),
+      dx: clamp(click.aimBiasX + noise(click.aimSigmaX), -click.aimMaxX, click.aimMaxX),
+      dy: clamp(click.aimBiasY + noise(click.aimSigmaY), -click.aimMaxY, click.aimMaxY),
     }
   }
   const target = params as Record<string, unknown>
@@ -218,7 +277,7 @@ export function prepareMouseParams(tabId: number, method: string, params: JsonOb
 
   if (needsTravel) {
     const from = tab.pointer ?? { x: round1(x + random(-220, 220)), y: round1(y + random(-140, 140)) }
-    const steps = trajectory(from, { x, y })
+    const steps = trajectory(from, { x, y }, profile)
     const durationMs = Math.round(steps.reduce((sum, step) => sum + step.delay, 0) + 16)
     const waypoints = [
       { x: from.x, y: from.y, u: 0 },
@@ -300,16 +359,17 @@ async function paceMouse(tab: TabState, params: JsonObject, send: Send): Promise
   }
   const x = params.x
   const y = params.y
+  const { click } = getHumanModelProfile()
   if (tab.lastMove?.pending && Math.hypot(tab.lastMove.toX - x, tab.lastMove.toY - y) < 1) {
     tab.lastMove = { ...tab.lastMove, pending: false }
     await travel(tab, { x, y }, params, send)
   }
   if (type === "mousePressed") {
-    await sleep(random(18, 45) - (Date.now() - tab.arrivedAt))
+    await sleep(random(click.settleMinMs, click.settleMaxMs) - (Date.now() - tab.arrivedAt))
     tab.pressedAt = Date.now()
   }
   if (type === "mouseReleased" && tab.pressedAt !== undefined) {
-    await sleep(random(35, 72) - (Date.now() - tab.pressedAt))
+    await sleep(random(click.holdMinMs, click.holdMaxMs) - (Date.now() - tab.pressedAt))
     delete tab.pressedAt
   }
 }
@@ -408,11 +468,16 @@ async function scrollToward(tab: TabState, params: JsonObject, send: Send): Prom
   }
 }
 
-export function glide(dx: number, dy: number): Point[] {
+export function glide(dx: number, dy: number, profile: HumanModelProfile = getHumanModelProfile()): Point[] {
   const distance = Math.hypot(dx, dy)
   if (distance < 40) return [{ x: round2(dx), y: round2(dy) }]
-  const frames = clamp(Math.round(((90 + distance * 0.18) * random(0.9, 1.1)) / 16.7), 4, 12)
-  const ease = (t: number) => 1 - (1 - t) ** 3
+  const { scroll } = profile
+  const frames = clamp(
+    Math.round(((scroll.baseDurationMs + distance * scroll.durationPerPx) * random(0.9, 1.1)) / 16.7),
+    scroll.minFrames,
+    scroll.maxFrames,
+  )
+  const ease = (t: number) => 1 - (1 - t) ** scroll.easePower
   return Array.from({ length: frames }, (_, index) => {
     const delta = ease((index + 1) / frames) - ease(index / frames)
     return { x: round2(dx * delta), y: round2(dy * delta) }
@@ -420,19 +485,21 @@ export function glide(dx: number, dy: number): Point[] {
 }
 
 async function sendFrames(frames: readonly Point[], send: (frame: Point) => Promise<unknown>): Promise<void> {
+  const { scroll } = getHumanModelProfile()
   const startedAt = Date.now()
   for (const frame of frames) {
     if (Date.now() - startedAt >= 260) break
     const stepStarted = Date.now()
     await send(frame).catch(() => undefined)
-    await sleep(random(14, 16.5) - (Date.now() - stepStarted))
+    await sleep(random(scroll.frameGapMinMs, scroll.frameGapMaxMs) - (Date.now() - stepStarted))
   }
 }
 
 async function paceKey(tab: TabState, params: JsonObject): Promise<void> {
   if (params.type !== "keyDown" && params.type !== "rawKeyDown") return
+  const { keyboard } = getHumanModelProfile()
   const elapsed = Date.now() - tab.lastKeyAt
-  const gap = random(18, 52) - elapsed
+  const gap = random(keyboard.gapMinMs, keyboard.gapMaxMs) - elapsed
   if (gap > 0 && tab.lastKeyAt > 0 && elapsed < 800) await sleep(gap)
   tab.lastKeyAt = Date.now()
 }

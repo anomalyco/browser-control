@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#121310" />
+    <title>motor calibration</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://rsms.me" />
+    <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div class="brand">
+          <h1>motor calibration</h1>
+          <div class="view-tabs" role="tablist" aria-label="Mode">
+            <button type="button" role="tab" id="tab-course" class="tab active" aria-selected="true">Course</button>
+            <button type="button" role="tab" id="tab-lab" class="tab" aria-selected="false">Model</button>
+          </div>
+        </div>
+
+        <div class="controls">
+          <label class="field">
+            <span>@</span>
+            <input id="handle-input" type="text" placeholder="handle" maxlength="24" spellcheck="false" autocomplete="off" />
+          </label>
+
+          <div class="segmented" role="group" aria-label="Input device">
+            <button type="button" data-device="auto" class="seg active">auto</button>
+            <button type="button" data-device="mouse" class="seg">mouse</button>
+            <button type="button" data-device="trackpad" class="seg">trackpad</button>
+          </div>
+
+          <div class="live-pill" aria-live="polite">
+            <span class="pulse" aria-hidden="true"></span>
+            <span id="live-count">1 online</span>
+          </div>
+        </div>
+      </header>
+
+      <main id="view-course" class="view active">
+        <div class="hud">
+          <div class="stages" id="stage-pills">
+            <span class="stage-pill active" data-stage="0">01 Reach</span>
+            <span class="stage-pill" data-stage="1">02 Menu</span>
+            <span class="stage-pill" data-stage="2">03 Scroll</span>
+            <span class="stage-pill" data-stage="3">04 Drag</span>
+            <span class="stage-pill" data-stage="4">05 Cadence</span>
+          </div>
+          <div class="telemetry-strip">
+            <span id="hud-step">0 / 22</span>
+            <span id="hud-hz">— Hz</span>
+            <span id="hud-device">mouse</span>
+            <span id="hud-timer">0.0s</span>
+            <button type="button" id="restart-btn" class="ghost-btn">Reset</button>
+          </div>
+        </div>
+
+        <section class="arena" id="arena" aria-label="Calibration arena">
+          <canvas id="arena-canvas"></canvas>
+          <div id="arena-stage" class="arena-stage"></div>
+        </section>
+      </main>
+
+      <main id="view-lab" class="view">
+        <div class="lab-toolbar">
+          <div class="profile-filters" id="profile-filters">
+            <button type="button" class="filter-chip active" data-handle="all">Team</button>
+          </div>
+          <div class="lab-actions">
+            <span id="model-sample-badge" class="meta-label">0 runs</span>
+            <button type="button" id="copy-cli-btn" class="ghost-btn">Copy CLI sync</button>
+            <button type="button" id="copy-json-btn" class="ghost-btn">Copy JSON</button>
+            <button type="button" id="new-run-btn" class="primary-btn">New run</button>
+          </div>
+        </div>
+
+        <div class="lab-grid">
+          <section class="card">
+            <header class="card-header">
+              <h2>Trajectories &amp; Velocity Profile</h2>
+              <span id="trace-caption" class="meta-label">Coalesced pointer samples</span>
+            </header>
+            <div class="canvas-stack">
+              <div class="canvas-box">
+                <canvas id="paths-canvas"></canvas>
+                <span class="canvas-tag">Reach paths &amp; click scatter</span>
+              </div>
+              <div class="canvas-box small">
+                <canvas id="velocity-canvas"></canvas>
+                <span class="canvas-tag">Normalized speed v(u) · peak u = <strong id="peak-u-label">0.39</strong></span>
+              </div>
+            </div>
+          </section>
+
+          <section class="card">
+            <header class="card-header">
+              <h2>Cursor Comparator</h2>
+              <div class="card-controls">
+                <label class="toggle-label">
+                  <input type="checkbox" id="auto-race-toggle" checked />
+                  <span>Auto</span>
+                </label>
+              </div>
+            </header>
+            <div class="canvas-box comparator-box" id="comparator-box">
+              <canvas id="comparator-canvas"></canvas>
+              <div class="legend">
+                <span class="legend-item"><i class="dot raw"></i>Playwright teleport</span>
+                <span class="legend-item"><i class="dot base"></i>Baseline v1</span>
+                <span class="legend-item"><i class="dot fitted"></i>Fitted model</span>
+              </div>
+            </div>
+          </section>
+
+          <section class="card">
+            <header class="card-header">
+              <h2>Fitted Parameters</h2>
+              <span id="model-source-label" class="meta-label">baseline</span>
+            </header>
+            <div class="params-list" id="params-list"></div>
+
+            <header class="card-header subheader">
+              <h2>Roster &amp; Runs</h2>
+              <span id="roster-count-label" class="meta-label">0 people</span>
+            </header>
+            <div class="roster-list" id="roster-list"></div>
+          </section>
+        </div>
+      </main>
+    </div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

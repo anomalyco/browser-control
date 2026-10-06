@@ -1,0 +1,36 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "browser-control-obstacle-course",
+  "main": "src/index.ts",
+  "account_id": "19d80aa432b86d110c8e1480cf895f5c",
+  "compatibility_date": "2026-09-07",
+  "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "mouse.kitlangton.dev",
+      "custom_domain": true
+    }
+  ],
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "./public",
+    "run_worker_first": ["/api/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "OBSTACLE_HUB",
+        "class_name": "ObstacleHub"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ObstacleHub"]
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
