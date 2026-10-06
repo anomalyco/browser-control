@@ -2153,7 +2153,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           let primaryScore = -1
           for (const link of links) {
             const name = accessibleName(link)
-            const headingBonus = link.closest("h1, h2, h3, h4, h5, h6, [role='heading'], .titleline") ? 1_000 : 0
+            const headingBonus = link.closest("h1, h2, h3, h4, h5, h6, [role='heading']") ? 1_000 : 0
             const commentBonus = /\b\d+\s+comments?\b/i.test(name) ? 500 : 0
             const score = name.length + headingBonus + commentBonus
             if (score > primaryScore) {
@@ -2413,7 +2413,19 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           ...rest,
           ...(interactiveElement ? { selector: cssPath(interactiveElement) } : {}),
         }))
-      return { entries: selected, truncated: truncated || selected.length < entries.length }
+      const needsSettle = Boolean(
+        !settings.rootSelector &&
+        typeof performance !== "undefined" &&
+        performance.now() < 2_500 &&
+        typeof MutationObserver !== "undefined" &&
+        document.body &&
+        (selected.length === 0 || document.querySelector?.("[aria-busy='true'], .skeleton:not(.no-skeleton)")),
+      )
+      return {
+        entries: selected,
+        truncated: truncated || selected.length < entries.length,
+        ...(needsSettle ? { needsSettle: true } : {}),
+      }
     }
     // tsx/esbuild can inject calls to its module-scoped __name helper into this
     // callback. Playwright serializes only the callback, so provide that helper
@@ -2442,6 +2454,29 @@ return (${capture.toString()})(rootOrSettings, locatorSettings)`,
           }))
           if (navigatedDuringCapture && !options.diff && ++captureAttempts < 3 && Date.now() + sessionPageHealthRetryDelayMs < deadline) {
             await delay(sessionPageHealthRetryDelayMs)
+            continue
+          }
+          if (result.needsSettle && !options.diff && captureAttempts === 0 && Date.now() + 120 < deadline) {
+            captureAttempts++
+            await page.evaluate(() => new Promise<void>((resolve) => {
+              let quietTimer = window.setTimeout(done, 120)
+              const maxTimer = window.setTimeout(done, 550)
+              const observer = new MutationObserver(() => {
+                window.clearTimeout(quietTimer)
+                quietTimer = window.setTimeout(done, 55)
+              })
+              function done() {
+                observer.disconnect()
+                window.clearTimeout(quietTimer)
+                window.clearTimeout(maxTimer)
+                resolve()
+              }
+              if (document.body) {
+                observer.observe(document.body, { childList: true, subtree: true, attributes: true })
+              } else {
+                done()
+              }
+            })).catch(() => {})
             continue
           }
           break

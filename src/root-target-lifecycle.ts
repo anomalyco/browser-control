@@ -256,6 +256,7 @@ export class RootTargetLifecycle {
     if (!options.alreadyAttached) yield* this.step(transition, this.options.extension.send({ method: "debugger.attach", params: { tabId } }))
     yield* this.command(transition, "Page.enable")
     yield* Effect.gen({ self: this }, function* () {
+      yield* this.command(transition, "Emulation.setFocusEmulationEnabled", { enabled: true })
       yield* this.command(transition, "Page.addScriptToEvaluateOnNewDocument", { source: ghostCursorClientSource })
       yield* this.command(transition, "Runtime.evaluate", { expression: ghostCursorClientSource })
     }).pipe(Effect.ignore)

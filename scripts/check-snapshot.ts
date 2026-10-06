@@ -283,6 +283,22 @@ try {
     assert.doesNotMatch(outline, /heading "elemen-ts — Build reactive UIs"/)
     assert.equal((outline.match(/link "elemen-ts — Build reactive UIs"/g) ?? []).length, 1)
   })
+  await check("adaptive hydration settle waits for async skeleton replacement without manual sleep", async () => {
+    await page.setContent('<main aria-busy="true"><div class="skeleton">Loading...</div></main>')
+    await page.evaluate(() => {
+      window.setTimeout(() => {
+        const main = document.querySelector("main")!
+        main.removeAttribute("aria-busy")
+        main.innerHTML = "<h1>Hydrated Dashboard</h1><button>Launch</button>"
+      }, 60)
+    })
+    const { snapshot, ref } = createSnapshotHelpers(page, { selectors: new Map() })
+    const outline = await snapshot()
+    assert.match(outline, /heading "Hydrated Dashboard" \[level=1\]/)
+    const btnRef = outline.match(/button "Launch" \[ref=(e\d+)\]/)?.[1]
+    assert.ok(btnRef, outline)
+    assert.equal(await ref(btnRef).count(), 1)
+  })
 } finally {
   await browser.close()
 }
