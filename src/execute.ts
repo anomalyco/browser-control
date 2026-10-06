@@ -2415,11 +2415,12 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         }))
       const needsSettle = Boolean(
         !settings.rootSelector &&
-        typeof performance !== "undefined" &&
-        performance.now() < 2_500 &&
         typeof MutationObserver !== "undefined" &&
         document.body &&
-        (selected.length === 0 || document.querySelector?.("[aria-busy='true'], .skeleton:not(.no-skeleton)")),
+        (
+          Boolean(document.querySelector?.("[aria-busy='true'], .skeleton:not(.no-skeleton)")) ||
+          (selected.length === 0 && typeof performance !== "undefined" && performance.now() < 2_500)
+        ),
       )
       return {
         entries: selected,
