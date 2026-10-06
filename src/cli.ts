@@ -1057,6 +1057,11 @@ const mainLayer = Layer.mergeAll(RelayClient.layerFetch, SessionStore.layer).pip
 )
 
 Command.runWith(browserControl, { version: browserControlVersion })(normalizeCliArguments(process.argv.slice(2))).pipe(
+  Effect.catchTags({
+    "RelayClient.RelayRejected": (error) => Console.error(error.message).pipe(Effect.andThen(failExit)),
+    "RelayClient.RelayUnreachable": (error) => Console.error(error.message).pipe(Effect.andThen(failExit)),
+    "RelayClient.RelayDecodeFailed": (error) => Console.error(error.message).pipe(Effect.andThen(failExit)),
+  }),
   Effect.provide(mainLayer),
   NodeRuntime.runMain,
 )

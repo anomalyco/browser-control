@@ -299,7 +299,7 @@ export class BrowserControlSessions {
         if (manager.sessions.get(id) !== session) {
           return false
         }
-        if (session.target?.owner === "relay") yield* manager.closeRelayTarget(session.target.id)
+        if (session.target?.owner === "relay") yield* manager.closeRelayTarget(session.target.id).pipe(Effect.ignore)
         manager.sessions.delete(id)
         yield* manager.commitPersistence(() => Effect.sync(() => {
           manager.sessions.set(id, session)
@@ -322,7 +322,7 @@ export class BrowserControlSessions {
         if (manager.sessions.get(id) !== existing) {
           return yield* sessionError("inactive", `Session is no longer active: ${id}`, id)
         }
-        if (existing.target?.owner === "relay") yield* manager.closeRelayTarget(existing.target.id)
+        if (existing.target?.owner === "relay") yield* manager.closeRelayTarget(existing.target.id).pipe(Effect.ignore)
         const session = manager.createBrowserControlSession(id, existing.readOnly)
         manager.sessions.set(id, session)
         yield* manager.commitPersistence(() => Effect.sync(() => {

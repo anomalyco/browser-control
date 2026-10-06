@@ -299,6 +299,30 @@ try {
     assert.ok(btnRef, outline)
     assert.equal(await ref(btnRef).count(), 1)
   })
+  await check("opacity:0 radio and checkbox inputs with visible associated labels are captured and clickable via ref()", async () => {
+    await page.setContent(`
+      <main>
+        <fieldset role="radiogroup">
+          <legend>Do you have a fever and rash?</legend>
+          <span style="position:relative;display:inline-block">
+            <input id="q-yes" type="radio" name="q1" style="opacity:0;position:absolute;inset:0" />
+            <label for="q-yes" style="display:inline-block;padding:8px 16px">Yes</label>
+          </span>
+          <span style="position:relative;display:inline-block">
+            <input id="q-no" type="radio" name="q1" style="opacity:0;position:absolute;inset:0" />
+            <label for="q-no" style="display:inline-block;padding:8px 16px">No</label>
+          </span>
+        </fieldset>
+      </main>
+    `)
+    const { snapshot, ref } = createSnapshotHelpers(page, { selectors: new Map() })
+    const outline = await snapshot()
+    const noRef = outline.match(/radio "No" \[ref=(e\d+) unchecked\]/)?.[1]
+    assert.ok(noRef, outline)
+    await ref(noRef).click()
+    const after = await snapshot()
+    assert.match(after, /radio "No" \[ref=e\d+ checked\]/)
+  })
 } finally {
   await browser.close()
 }

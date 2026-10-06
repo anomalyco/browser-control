@@ -10,11 +10,16 @@ let cursorAnimation: Animation | undefined
 let cursorFill: string | null | undefined
 let cursorFilter: string | undefined
 
-chrome.runtime.onMessage.addListener((message: unknown) => {
+chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
   if (!message || typeof message !== "object" || Array.isArray(message)) {
     return
   }
   const incoming = message as { readonly action?: unknown; readonly status?: unknown }
+  if (incoming.action === "evict-extension-frames") {
+    const removed = evictForeignExtensionFrames()
+    sendResponse({ removed })
+    return
+  }
   if (incoming.action === "page-status.clear") {
     clearStatus()
     return
@@ -23,9 +28,46 @@ chrome.runtime.onMessage.addListener((message: unknown) => {
   if (incoming.action === "page-status.set" && status) {
     currentStatus = status
     completingHandoffId = undefined
+    if (status.state === "running") {
+      evictForeignExtensionFrames()
+    }
     renderStatus()
   }
 })
+
+function evictForeignExtensionFrames(): number {
+  let removed = 0
+  const ownOrigin = `chrome-extension://${chrome.runtime.id}`
+  const visitRoot = (root: Document | ShadowRoot) => {
+    for (const frame of root.querySelectorAll("iframe, frame, object, embed")) {
+      const src = frame.getAttribute("src") ?? (frame as HTMLIFrameElement).src ?? ""
+      if (src.startsWith("chrome-extension://") && !src.startsWith(ownOrigin)) {
+        frame.remove()
+        removed += 1
+      }
+    }
+    for (const el of root.querySelectorAll("*")) {
+      const tag = el.tagName.toLowerCase()
+      if (
+        tag.startsWith("com-1password-") ||
+        el.hasAttribute("data-onepassword-extension") ||
+        el.hasAttribute("data-lastpass-root") ||
+        el.id.startsWith("bitwarden-")
+      ) {
+        el.remove()
+        removed += 1
+        continue
+      }
+      if (el.shadowRoot) {
+        visitRoot(el.shadowRoot)
+      }
+    }
+  }
+  if (document.documentElement) {
+    visitRoot(document)
+  }
+  return removed
+}
 
 chrome.runtime.sendMessage({ action: "page-status.ready" }).catch(() => {})
 

@@ -697,12 +697,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     socket.destroy()
   })
 
+  let currentAnnouncedRootTabIds: Set<number> | undefined
   websocketServer.on("connection", (socket, request) => {
     const requestUrl = new URL(request.url ?? "/", endpointUrl)
     if (requestUrl.pathname === "/extension") {
       let handshaken = false
       let socketGeneration = 0
       const announcedRootTabIds = new Set<number>()
+      currentAnnouncedRootTabIds = announcedRootTabIds
       socket.on("message", (data, isBinary) => {
         try {
           if (!handshaken) {
@@ -1364,6 +1366,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       yield* Effect.ignore(sendToExtension({ method: "action.setAttached", params: { tabId, attached: false } }))
       return
     }
+    currentAnnouncedRootTabIds?.add(tabId)
     yield* rootLifecycle.attach({ tabId, owner: "user" })
   })
 
@@ -1378,6 +1381,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (!tabId) {
       return yield* Effect.fail(new Error("tabs.create did not return a tabId"))
     }
+    currentAnnouncedRootTabIds?.add(tabId)
     return yield* rootLifecycle.attach({
       tabId,
       owner: "relay",

@@ -285,14 +285,26 @@ async function handleCommand(command: ShimCommand, currentSocket: WebSocket): Pr
       return toJsonObject(await chrome.debugger.sendCommand(debuggee, cdpMethod, params))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      if (
-        sessionId === undefined &&
-        cdpMethod === "Page.navigate" &&
-        typeof params?.url === "string" &&
-        /Cannot access a chrome-extension:\/\/ URL/i.test(message)
-      ) {
-        await chrome.tabs.update(tabId, { url: params.url })
-        return { frameId: String(tabId) }
+      if (/Cannot access a chrome-extension:\/\/ URL|Debugger is not attached to the tab/i.test(message)) {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          await chrome.tabs.sendMessage(tabId, { action: "evict-extension-frames" }).catch(() => {})
+          await new Promise((resolve) => setTimeout(resolve, 45))
+          if (sessionId === undefined) {
+            await chrome.debugger.attach({ tabId }, "1.3").catch(() => {})
+          }
+          try {
+            return toJsonObject(await chrome.debugger.sendCommand(debuggee, cdpMethod, params))
+          } catch (retryError) {
+            const retryMsg = retryError instanceof Error ? retryError.message : String(retryError)
+            if (!/Cannot access a chrome-extension:\/\/ URL|Debugger is not attached to the tab/i.test(retryMsg)) {
+              throw retryError
+            }
+          }
+        }
+        if (sessionId === undefined && cdpMethod === "Page.navigate" && typeof params?.url === "string") {
+          await chrome.tabs.update(tabId, { url: params.url })
+          return { frameId: String(tabId) }
+        }
       }
       throw error
     }

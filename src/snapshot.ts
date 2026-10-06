@@ -39,6 +39,7 @@ type SnapshotEntry = {
   readonly identityName?: string
   readonly details?: string
   readonly selector?: string
+  readonly selectorRole?: string
   readonly priority: number
 }
 
@@ -223,13 +224,21 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         return cached
       }
       const visibleCache = new WeakMap<Element, boolean>()
+      const visibleAssociatedLabel = (element: Element): HTMLLabelElement | undefined => {
+        if (!(element instanceof HTMLInputElement) || (element.type !== "radio" && element.type !== "checkbox")) {
+          return undefined
+        }
+        return Array.from(element.labels ?? []).find((label) => isVisible(label))
+      }
       const isVisible = (element: Element): boolean => {
         const cached = visibleCache.get(element)
         if (cached !== undefined) return cached
         const style = styleOf(element)
         let result = true
-        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+        if (style.display === "none" || style.visibility === "hidden") {
           result = false
+        } else if (style.opacity === "0") {
+          result = Boolean(visibleAssociatedLabel(element))
         } else if (style.display === "contents") {
           const children = [
             ...Array.from(element.children ?? []),
@@ -238,7 +247,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           result = children.some(isVisible)
         } else {
           const rect = element.getBoundingClientRect()
-          result = rect.width >= 1 && rect.height >= 1
+          result = (rect.width >= 1 && rect.height >= 1) || Boolean(visibleAssociatedLabel(element))
         }
         visibleCache.set(element, result)
         return result
@@ -635,7 +644,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         return level
       }
 
-      const structuralSelector = "fieldset, [role='group'], dialog, [role='dialog'], [role='alertdialog'], [role='listbox'], [role='menu'], [role='tablist'], details, table, [role='table'], tr, [role='row'], ul, ol, [role='list'], li, [role='listitem'], pre"
+      const structuralSelector = "fieldset, [role='group'], [role='radiogroup'], dialog, [role='dialog'], [role='alertdialog'], [role='listbox'], [role='menu'], [role='tablist'], details, table, [role='table'], tr, [role='row'], ul, ol, [role='list'], li, [role='listitem'], pre"
       const interactiveSelector = [
         "a[href]", "button", "input", "textarea", "select", "summary",
         "[role='button']", "[role='link']", "[role='tab']",
@@ -909,6 +918,9 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           overlayAncestor.getAttribute("aria-label") !== "slider" &&
           overlayAncestor.getAttribute("aria-roledescription") !== "carousel",
         )
+        const labelProxy = isInteractive && (styleOf(element).opacity === "0" || element.getBoundingClientRect().width < 1)
+          ? visibleAssociatedLabel(element)
+          : undefined
         add({
           depth: baseDepth + parentKeys.length,
           baseDepth,
@@ -916,8 +928,9 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           ...(parentKeys.length > 0 ? { parentKeys } : {}),
           role,
           name,
-          ...(isInteractive && identityName ? { identityName } : {}),
-          ...(isInteractive ? { interactiveElement: element } : {}),
+          ...(isInteractive && identityName && !labelProxy ? { identityName } : {}),
+          ...(labelProxy ? { selectorRole: "label" } : {}),
+          ...(isInteractive ? { interactiveElement: labelProxy ?? element } : {}),
           ...(details ? { details } : {}),
           priority: priorityFor({
             role: headerCandidateSet.has(element) ? "heading" : role,
@@ -948,7 +961,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         document.body &&
         (
           Boolean(document.querySelector?.("[aria-busy='true'], .skeleton:not(.no-skeleton)")) ||
-          (selected.length === 0 && typeof performance !== "undefined" && performance.now() < 2_500)
+          (!selected.some((entry) => Boolean(entry.selector)) && typeof performance !== "undefined" && performance.now() < 2_500)
         ),
       )
       return {
@@ -1046,7 +1059,7 @@ return (${capture.toString()})(rootOrSettings, locatorSettings)`,
       return {
         prefix: `${"  ".repeat(Math.max(0, resolvedDepth(entry) - depthOffset))}- ${entry.role} "${name}"`,
         ...(entry.details ? { details: entry.details } : {}),
-        ...(entry.selector ? { selector: entry.selector, role: entry.role } : {}),
+        ...(entry.selector ? { selector: entry.selector, role: entry.selectorRole ?? entry.role } : {}),
         ...(entry.identityName ? { identityName: entry.identityName } : {}),
       }
     })
