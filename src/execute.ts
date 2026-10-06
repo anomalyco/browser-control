@@ -570,7 +570,44 @@ export class ExecuteSandbox {
         return AuthenticatedJsonOutcome.cases.SensitiveCaptureActive.make({})
       }
       const page = yield* sandbox.ensureSessionPage("Set up authenticated origin page")
-      return yield* AuthenticatedOrigin.requestJson(page, request)
+      const firstOutcome = yield* AuthenticatedOrigin.requestJson(page, request)
+      const isAuthFailure =
+        firstOutcome._tag === "OriginMismatch" ||
+        (firstOutcome._tag === "HttpError" && (firstOutcome.status === 401 || firstOutcome.status === 403)) ||
+        (firstOutcome._tag !== "Success" && /\/(?:login|signin|sign-in|auth)\b/i.test(safePageUrl(page) ?? ""))
+      if (
+        request.handoffOnAuthFailure === true &&
+        sandbox.options.requestHandoff !== undefined &&
+        isAuthFailure
+      ) {
+        const requestHandoff = sandbox.options.requestHandoff
+        const targetId = yield* Effect.tryPromise(() => pageTargetId(page))
+        const message = request.handoffMessage?.trim() || `Sign in to ${request.origin}, then click Continue`
+        const outcome = yield* Effect.tryPromise(() =>
+          requestHandoff({
+            message,
+            timeoutMs: defaultHandoffTimeoutMs,
+            target: { targetId },
+          }),
+        )
+        yield* Effect.tryPromise(() =>
+          finishHandoff({
+            outcome,
+            message,
+            timeoutMs: defaultHandoffTimeoutMs,
+            contextTimeoutMs: handoffPageContextTimeoutMs,
+            evaluate: async () => {
+              await page.evaluate(() => true)
+            },
+          }),
+        )
+        const retryPage = yield* sandbox.ensureSessionPage("Re-verify authenticated origin page after handoff")
+        return yield* AuthenticatedOrigin.requestJson(retryPage, {
+          ...request,
+          startUrl: request.startUrl ?? "/",
+        })
+      }
+      return firstOutcome
     }).pipe(Effect.uninterruptible)
   }
 

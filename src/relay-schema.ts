@@ -182,6 +182,8 @@ export const AuthenticatedJsonRequest = Schema.Struct({
   headers: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
   body: Schema.optionalKey(Schema.Json),
   sensitive: Schema.optionalKey(Schema.Boolean),
+  handoffOnAuthFailure: Schema.optionalKey(Schema.Boolean),
+  handoffMessage: Schema.optionalKey(Schema.String),
   timeoutMs: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 120_000 }))),
   maxResponseBytes: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 10_000_000 }))),
 })

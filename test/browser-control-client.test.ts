@@ -148,4 +148,16 @@ describe("BrowserControlClient", () => {
     }).pipe(Effect.flip))
     expect(error).toBeInstanceOf(BrowserControlClient.RequestOutcomeUnknown)
   })
+
+  it("provides direct Promise-based origin.get and origin.post with default headers", async () => {
+    authenticatedOutcome = AuthenticatedJsonOutcome.cases.Success.make({ status: 200, value: { added: "Purple Magic" } })
+    const client = BrowserControlClient.origin("https://www.ubereats.com", {
+      session: session.id,
+      endpoint,
+      headers: { "x-csrf-token": "x" },
+      handoffOnAuthFailure: true,
+    })
+    const result = await client.post("/_p/api/createDraftOrderV2", { item: "Purple Magic" })
+    expect(result).toEqual({ added: "Purple Magic" })
+  })
 })

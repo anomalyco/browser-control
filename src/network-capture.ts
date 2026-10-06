@@ -635,9 +635,13 @@ function captureBuffer(buffer: Buffer | null, mimeType: string | undefined, acti
 }
 
 function bodyCanFit(headers: readonly Header[], limit: number): boolean {
+  if (limit <= 0) return false
   const length = declaredBodySize(headers)
   const encoding = header(headers, "content-encoding")?.trim().toLowerCase()
-  return length !== undefined && length <= Math.max(0, limit) && (!encoding || encoding === "identity")
+  const supportedEncoding = !encoding || encoding === "identity" || encoding === "gzip" || encoding === "br" || encoding === "deflate" || encoding === "zstd"
+  if (!supportedEncoding) return false
+  if (length !== undefined) return length <= limit
+  return Boolean(encoding && isTextualMimeType(contentType(headers)))
 }
 
 function declaredBodySize(headers: readonly Header[]): number | undefined {
