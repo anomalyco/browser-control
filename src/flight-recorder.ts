@@ -204,7 +204,7 @@ export class FlightRecorderRelay {
     const recorder = this.active.get(options.tabId)
     if (!recorder) return false
     const frameSessionId = getNumber(options.params, "sessionId")
-    if (frameSessionId !== undefined) {
+    if (frameSessionId !== undefined && options.params?.acked !== true) {
       void this.options.sendDebuggerCommand({
         tabId: recorder.tabId,
         method: "Page.screencastFrameAck",

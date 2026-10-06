@@ -513,6 +513,20 @@ export const ghostCursorClientSource = `(() => {
     return moving || state.effects.length > 0 || timestamp < state.activeUntil;
   };
 
+  const scheduleNextTick = (delayMs) => {
+    if (state.tickTimer !== undefined) return;
+    let rafId = 0;
+    const run = () => {
+      if (rafId && typeof window.cancelAnimationFrame === "function") window.cancelAnimationFrame(rafId);
+      if (state.tickTimer !== undefined) window.clearTimeout(state.tickTimer);
+      state.tickTimer = undefined;
+      onTick();
+    };
+    state.tickTimer = window.setTimeout(run, Math.max(4, delayMs));
+    if (typeof window.requestAnimationFrame === "function" && document.visibilityState === "visible") {
+      rafId = window.requestAnimationFrame(run);
+    }
+  };
   const onTick = () => {
     state.tickTimer = undefined;
     if (!state.element && !state.cameraAnim && !state.spotlightAnim) {
@@ -530,7 +544,7 @@ export const ghostCursorClientSource = `(() => {
     applyPosition();
     if (active) {
       state.nextTickDue = Math.max(timestamp + 4, (state.nextTickDue || timestamp) + FRAME_MS);
-      state.tickTimer = window.setTimeout(onTick, Math.max(4, Math.round(state.nextTickDue - performance.now())));
+      scheduleNextTick(Math.round(state.nextTickDue - performance.now()));
     } else {
       state.previousFrameTime = undefined;
       state.nextTickDue = 0;
@@ -539,7 +553,7 @@ export const ghostCursorClientSource = `(() => {
   const startLoop = () => {
     if (state.tickTimer === undefined) {
       state.nextTickDue = performance.now();
-      state.tickTimer = window.setTimeout(onTick, 0);
+      scheduleNextTick(0);
     }
   };
   const applyVisualOptions = () => {
@@ -753,7 +767,7 @@ export const ghostCursorClientSource = `(() => {
 
     const farFactor = smoothstep(50, 220, dist);
     const arcOffset = dist * 0.16 * farFactor * state.arcSign;
-    const durationMs = clamp(125 + Math.sqrt(dist) * 6.2, 125, 315);
+    const durationMs = clamp(105 + Math.sqrt(dist) * 5.2, 105, 275);
     state.flight = {
       startTime: performance.now(),
       durationMs,

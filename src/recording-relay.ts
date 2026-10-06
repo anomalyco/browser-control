@@ -19,7 +19,7 @@ const maxRecordingFrameRate = 60
 const maxPendingCdpFrames = 30
 const fallbackCdpWidth = 1_280
 const fallbackCdpHeight = 720
-const cdpJpegQuality = 100
+const cdpJpegQuality = 85
 const maxPendingTabCaptureBytes = 16 * 1024 * 1024
 const maxTabCaptureOutputBytes = 1024 * 1024 * 1024
 
@@ -133,6 +133,8 @@ type CdpRecording = ActiveRecordingBase & {
   stopped: boolean
   stopping: boolean
   startedMonotonicAt: number
+  lastRawFramePosition?: number
+  lastMetadataTimestamp?: number
   stopPromise?: Promise<RecordingStopResult>
   writePromise: Promise<void>
   writeError?: Error
@@ -449,7 +451,7 @@ export class RecordingRelay {
       return false
     }
     const frameSessionId = getNumber(options.params, "sessionId")
-    if (frameSessionId !== undefined) {
+    if (frameSessionId !== undefined && options.params?.acked !== true) {
       void this.options.sendDebuggerCommand({
         tabId: recording.tabId,
         method: "Page.screencastFrameAck",
@@ -470,19 +472,35 @@ export class RecordingRelay {
     }
     const deviceWidth = getNumber(metadata, "deviceWidth")
     const deviceHeight = getNumber(metadata, "deviceHeight")
+    const metadataTimestamp = getNumber(metadata, "timestamp")
     if (deviceWidth !== undefined) recording.sourceWidth = deviceWidth
     if (deviceHeight !== undefined) recording.sourceHeight = deviceHeight
     const buffer = Buffer.from(frameData, "base64")
     const receivedAt = this.monotonicNow()
+    const isFirstFrame = recording.sourceFrameCount === 1
     const rawFramePosition = ((receivedAt - recording.startedMonotonicAt) / 1_000) * recording.frameRate
-    let frameNumber = recording.sourceFrameCount === 1
-      ? 0
-      : Math.max(0, Math.floor(rawFramePosition))
-    if (recording.lastFrame && frameNumber === recording.lastFrame.frameNumber && rawFramePosition - frameNumber >= 0.5) {
-      frameNumber = recording.lastFrame.frameNumber + 1
-    }
     recording.pendingFrameCount += 1
     recording.writePromise = recording.writePromise.then(async () => {
+      const floorFrame = isFirstFrame ? 0 : Math.max(0, Math.floor(rawFramePosition))
+      const deltaWall = recording.lastRawFramePosition === undefined ? 1 : rawFramePosition - recording.lastRawFramePosition
+      const deltaMeta =
+        metadataTimestamp !== undefined && recording.lastMetadataTimestamp !== undefined
+          ? Math.min(2, Math.max(0, (metadataTimestamp - recording.lastMetadataTimestamp) * recording.frameRate))
+          : 0
+      const deltaRaw = Math.max(deltaWall, deltaMeta)
+      recording.lastRawFramePosition = rawFramePosition
+      if (metadataTimestamp !== undefined) recording.lastMetadataTimestamp = metadataTimestamp
+      let frameNumber = recording.lastFrame
+        ? Math.max(recording.lastFrame.frameNumber, floorFrame)
+        : floorFrame
+      if (
+        recording.lastFrame &&
+        frameNumber === recording.lastFrame.frameNumber &&
+        (rawFramePosition - recording.lastFrame.frameNumber >= 0.5 ||
+          (deltaRaw >= 0.55 && recording.lastFrame.frameNumber - rawFramePosition < 1.5))
+      ) {
+        frameNumber = recording.lastFrame.frameNumber + 1
+      }
       if (recording.lastFrame && frameNumber !== recording.lastFrame.frameNumber) {
         await this.writeSourceFrame(recording, recording.lastFrame, frameNumber)
       } else if (recording.lastFrame) {
@@ -749,6 +767,8 @@ export class RecordingRelay {
         params: {
           format: "jpeg",
           quality: cdpJpegQuality,
+          maxWidth: size.width,
+          maxHeight: size.height,
           everyNthFrame: 1,
         },
       })
@@ -1064,7 +1084,7 @@ async function createFfmpegVideoEncoder(options: {
   const temporaryOutputPath = `${options.outputPath}.partial-${process.pid}-${crypto.randomUUID()}`
   const outputArgs = options.artifactType === "webm"
     ? ["-c:v", "libvpx", "-crf", "4", "-deadline", "good", "-cpu-used", "4", "-b:v", "6M", "-threads", "2"]
-    : ["-c:v", "libx264", "-preset", "fast", "-crf", "14", "-tune", "animation", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
+    : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "15", "-tune", "animation", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
   const child = spawn("ffmpeg", [
     "-hide_banner",
     "-loglevel",
@@ -1086,7 +1106,7 @@ async function createFfmpegVideoEncoder(options: {
     "-fps_mode",
     "cfr",
     "-vf",
-    `scale=min(iw\\,${options.surfaceWidth}):-1:flags=lanczos,pad=ceil(max(iw\\,${options.width})/2)*2:ceil(max(ih\\,${options.height})/2)*2:0:0:gray,crop=${options.width}:${options.height}:0:0`,
+    `scale=min(iw\\,${options.surfaceWidth}):-1:flags=fast_bilinear,pad=ceil(max(iw\\,${options.width})/2)*2:ceil(max(ih\\,${options.height})/2)*2:0:0:gray,crop=${options.width}:${options.height}:0:0`,
     ...outputArgs,
     "-f",
     options.artifactType,

@@ -1,3 +1,4 @@
+import type { JsonObject } from "./protocol.ts"
 import http from "node:http"
 import { Effect, Match, Predicate, Schema } from "effect"
 import * as AuthProfile from "./auth-profile.ts"
@@ -57,6 +58,7 @@ export function createHttpRequestHandler(options: {
   readonly flightRecorder: FlightRecorderRelay
   readonly registry: TargetRegistry
   readonly sessions: BrowserControlSessions
+  readonly reloadExtension?: () => Effect.Effect<JsonObject, Error>
 }): (request: http.IncomingMessage, response: http.ServerResponse) => void {
   options.sessions.setUserAttachedPageUrlsProvider(() =>
     options.registry.listRootTargets()
@@ -76,7 +78,7 @@ export function createHttpRequestHandler(options: {
     }
     const requestUrl = new URL(request.url ?? "/", `http://${formatHostForUrl(options.host)}:${options.port}`)
     const pathname = requestUrl.pathname.replace(/\/$/, "") || "/"
-    const observational = request.method === "GET" || pathname === "/network/status" || pathname === "/auth/status"
+    const observational = request.method === "GET" || pathname === "/network/status" || pathname === "/auth/status" || pathname === "/extension/reload"
     const run = (effect: Effect.Effect<void, Error>, settle = false): void => {
       runRequestEffect(response, observational ? effect : options.shutdown.track(settle ? Effect.uninterruptible(effect) : effect))
     }
@@ -115,6 +117,13 @@ export function createHttpRequestHandler(options: {
     }
     if (pathname === "/json/list") {
       sendJson(response, targetSummaries(options.registry))
+      return
+    }
+    if (pathname === "/extension/reload" && request.method === "POST") {
+      run(Effect.gen(function* () {
+        const result = options.reloadExtension ? yield* options.reloadExtension() : {}
+        sendJson(response, result)
+      }))
       return
     }
     if (pathname === "/extension/status") {

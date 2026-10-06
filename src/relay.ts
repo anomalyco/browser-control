@@ -42,6 +42,7 @@ import {
 } from "./relay-helpers.ts"
 import type { ChildTarget, ConnectedTarget } from "./relay-types.ts"
 import { ghostCursorMouseActionExpression, ghostCursorRestoreExpression, inputDispatchMouseEventToGhostCursorAction } from "./ghost-cursor.ts"
+import { beforeInput, forgetTab, prepareMouseParams } from "./human-input.ts"
 import { guardCdpMethod } from "./cdp-guardrails.ts"
 import {
   awaitHandoffAction,
@@ -532,6 +533,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     recordingRelay,
     flightRecorder,
     sessions,
+    reloadExtension: () => sendToExtension({ method: "runtime.reload" }).pipe(
+      Effect.timeout("1 second"),
+      Effect.orElseSucceed(() => ({ reloaded: true })),
+    ),
     extensionStatus: () => {
       return {
         connected: extensionRpc.connected,
@@ -1345,7 +1350,15 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     }
     const sessionId = message.sessionId
     const announced = sessionId !== undefined && cdpClients.hasSession(socket, sessionId)
-    yield* applyGhostCursorMouseEvent({ tabId, message }).pipe(Effect.ignore)
+    prepareMouseParams(tabId, command.method, command.params)
+    yield* Effect.all([
+      applyGhostCursorMouseEvent({ tabId, message: { ...message, params: command.params } }).pipe(Effect.ignore),
+      Effect.promise(() =>
+        beforeInput(tabId, command.method, command.params, route.chromeSessionId === undefined, (method, params) =>
+          Effect.runPromise(sendDebuggerCommand({ ...command, method, params })),
+        ).catch(() => undefined),
+      ),
+    ], { concurrency: "unbounded", discard: true })
     const result = yield* (message.method === "Runtime.enable" && sessionId
       ? cdpRuntime.enable(route, command.params, () => clientRoutesSession(socket, sessionId) && (!announced || cdpClients.hasSession(socket, sessionId)), announced ? socket : undefined)
       : sendDebuggerCommand(command)).pipe(
@@ -1447,6 +1460,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     mainFrameIdsByTab.delete(tabId)
     protectedFrames.forgetTab(tabId)
     ghostCursorPositionsByTab.delete(tabId)
+    forgetTab(tabId)
     for (const [sessionId, childTabId] of suppressedChildSessions) {
       if (childTabId === tabId) {
         suppressedChildSessions.delete(sessionId)
