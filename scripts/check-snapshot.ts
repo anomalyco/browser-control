@@ -249,6 +249,40 @@ try {
     assert.ok(crabRef, outline)
     assert.equal(await ref(crabRef).count(), 1)
   })
+  await check("layout tables, markdown listitem paragraphs, and duplicate article card links", async () => {
+    await page.setContent(`
+      <main>
+        <table id="layout-outer">
+          <tr><td>
+            <table id="layout-inner">
+              ${Array.from({ length: 22 }, (_, i) => `
+                <tr class="athing"><td>${i + 1}.</td><td class="titleline"><a href="#story-${i}">Story title ${i}</a> <span class="sitebit">(<a href="#site-${i}">example.com</a>)</span></td></tr>
+                <tr><td></td><td>10 points by user <a href="#comments-${i}">${i + 5} comments</a></td></tr>
+              `).join("")}
+            </table>
+          </td></tr>
+        </table>
+        <ul>
+          <li><p>Node.js 18 or newer when running Effect on Node.js.</p></li>
+        </ul>
+        <article>
+          <h2>elemen-ts — Build reactive UIs</h2>
+          <a href="#post-1">elemen-ts — Build reactive UIs</a>
+          <a href="#post-1">elemen-ts — Build reactive UIs</a>
+          <a href="#post-1-comments">8 Go to comments</a>
+        </article>
+      </main>
+    `)
+    const { snapshot } = createSnapshotHelpers(page, { selectors: new Map() })
+    const outline = await snapshot({ maxItems: 60 })
+    assert.doesNotMatch(outline, /table "Table"/)
+    assert.match(outline, /link "Story title 0" \[ref=e\d+\]/)
+    assert.match(outline, /link "5 comments" \[ref=e\d+\]/)
+    assert.match(outline, /listitem "Node\.js 18 or newer when running Effect on Node\.js\."/)
+    assert.doesNotMatch(outline, /- p "Node\.js 18 or newer/)
+    assert.doesNotMatch(outline, /heading "elemen-ts — Build reactive UIs"/)
+    assert.equal((outline.match(/link "elemen-ts — Build reactive UIs"/g) ?? []).length, 1)
+  })
 } finally {
   await browser.close()
 }

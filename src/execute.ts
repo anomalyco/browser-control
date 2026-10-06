@@ -1679,18 +1679,35 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         return `${prefix.slice(0, boundary >= Math.floor(maxLength * 0.6) ? boundary : maxLength).trimEnd()}...`
       }
       const quote = (value: string): string => value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
+      const styleCache = new WeakMap<Element, CSSStyleDeclaration>()
+      const styleOf = (element: Element): CSSStyleDeclaration => {
+        let cached = styleCache.get(element)
+        if (!cached) {
+          cached = window.getComputedStyle(element)
+          styleCache.set(element, cached)
+        }
+        return cached
+      }
+      const visibleCache = new WeakMap<Element, boolean>()
       const isVisible = (element: Element): boolean => {
-        const style = window.getComputedStyle(element)
-        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false
-        if (style.display === "contents") {
+        const cached = visibleCache.get(element)
+        if (cached !== undefined) return cached
+        const style = styleOf(element)
+        let result = true
+        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+          result = false
+        } else if (style.display === "contents") {
           const children = [
             ...Array.from(element.children ?? []),
             ...Array.from(element.shadowRoot?.children ?? []),
           ]
-          return children.some(isVisible)
+          result = children.some(isVisible)
+        } else {
+          const rect = element.getBoundingClientRect()
+          result = rect.width >= 1 && rect.height >= 1
         }
-        const rect = element.getBoundingClientRect()
-        return rect.width >= 1 && rect.height >= 1
+        visibleCache.set(element, result)
+        return result
       }
       const explicitAriaName = (element: Element): string => {
         const ariaLabel = element.getAttribute("aria-label")
@@ -1705,13 +1722,16 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       }
       const titleName = (element: Element): string => normalize(element.getAttribute("title") ?? "")
       const labelledName = (element: Element): string => explicitAriaName(element) || titleName(element)
+      const safeTextCache = new WeakMap<Element, string>()
       const safeText = (element: Element): string => {
+        const cached = safeTextCache.get(element)
+        if (cached !== undefined) return cached
         const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT)
         const parts: string[] = []
         const nearestBlock = (start: Element | null): Element => {
           let current = start
           while (current && current !== element && element.contains(current)) {
-            const display = window.getComputedStyle(current).display
+            const display = styleOf(current).display
             if (display && display !== "inline" && display !== "contents") return current
             current = current.parentElement
           }
@@ -1725,7 +1745,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           let replacedByAncestorAria = false
           let ancestor = parent
           while (ancestor && element.contains(ancestor)) {
-            const style = window.getComputedStyle(ancestor)
+            const style = styleOf(ancestor)
             if (ancestor.hasAttribute("hidden") || ancestor.getAttribute("aria-hidden") === "true" || style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
               hidden = true
               break
@@ -1768,7 +1788,9 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           }
           node = walker.nextNode()
         }
-        return normalize(parts.join(""))
+        const result = normalize(parts.join(""))
+        safeTextCache.set(element, result)
+        return result
       }
       const authorAccessibleName = (element: Element): string => {
         const labelled = explicitAriaName(element)
@@ -1795,15 +1817,23 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         if (placeholder) return normalize(placeholder)
         return ""
       }
+      const accessibleNameCache = new WeakMap<Element, string>()
       const accessibleName = (element: Element): string => {
+        const cached = accessibleNameCache.get(element)
+        if (cached !== undefined) return cached
+        let result = ""
         const labelled = explicitAriaName(element)
-        if (labelled) return labelled
-        if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
-          return authorAccessibleName(element)
+        if (labelled) {
+          result = labelled
+        } else if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+          result = authorAccessibleName(element)
+        } else {
+          const alt = element.getAttribute("alt")
+          const childAria = element.querySelector?.("[aria-label]")?.getAttribute("aria-label") || element.querySelector?.("svg title")?.textContent || ""
+          result = normalize(alt || safeText(element) || titleName(element) || childAria)
         }
-        const alt = element.getAttribute("alt")
-        const childAria = element.querySelector?.("[aria-label]")?.getAttribute("aria-label") || element.querySelector?.("svg title")?.textContent || ""
-        return normalize(alt || safeText(element) || titleName(element) || childAria)
+        accessibleNameCache.set(element, result)
+        return result
       }
       const roleFor = (element: Element): string => {
         const explicit = element.getAttribute("role")
@@ -1983,36 +2013,47 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         visit(scope)
         return results
       }
+      const localCssCache = new WeakMap<Element, string>()
       const localCssPath = (element: Element, scope: Document | ShadowRoot): string => {
-        const id = element.getAttribute("id")
-        if (id) {
-          const candidate = `#${CSS.escape(id)}`
-          if (scope.querySelectorAll(candidate).length === 1) return candidate
-        }
-        for (const attribute of ["data-testid", "data-test-id", "data-test", "name", "aria-label", "placeholder"]) {
-          const value = element.getAttribute(attribute)
-          if (value) {
-            const candidate = `[${attribute}="${CSS.escape(value)}"]`
+        const cached = localCssCache.get(element)
+        if (cached !== undefined) return cached
+        const compute = (): string => {
+          const id = element.getAttribute("id")
+          if (id) {
+            const candidate = `#${CSS.escape(id)}`
             if (scope.querySelectorAll(candidate).length === 1) return candidate
           }
-        }
-        const tag = element.tagName.toLowerCase()
-        const role = element.getAttribute("role")
-        const roleSuffix = role ? `[role="${quote(role)}"]` : ""
-        for (const className of element.classList) {
-          const candidate = `${tag}.${CSS.escape(className)}${roleSuffix}`
-          if (scope.querySelectorAll(candidate).length === 1) return candidate
-        }
-        const parent = element.parentElement
-        if (!parent) {
-          if (isShadowRoot(scope)) {
-            const siblings = Array.from(scope.children).filter((sibling) => sibling.tagName === element.tagName)
-            return `${tag}:nth-of-type(${siblings.indexOf(element) + 1})`
+          for (const attribute of ["data-testid", "data-test-id", "data-test", "name", "aria-label", "placeholder"]) {
+            const value = element.getAttribute(attribute)
+            if (value) {
+              const candidate = `[${attribute}="${CSS.escape(value)}"]`
+              if (scope.querySelectorAll(candidate).length === 1) return candidate
+            }
           }
-          return tag
+          const tag = element.tagName.toLowerCase()
+          const role = element.getAttribute("role")
+          const roleSuffix = role ? `[role="${quote(role)}"]` : ""
+          let checkedClasses = 0
+          for (const className of element.classList ?? []) {
+            if (className.includes(":") || className.includes("[") || className.includes("/")) continue
+            if (++checkedClasses > 4) break
+            const candidate = `${tag}.${CSS.escape(className)}${roleSuffix}`
+            if (scope.querySelectorAll(candidate).length === 1) return candidate
+          }
+          const parent = element.parentElement
+          if (!parent) {
+            if (isShadowRoot(scope)) {
+              const siblings = Array.from(scope.children).filter((sibling) => sibling.tagName === element.tagName)
+              return `${tag}:nth-of-type(${siblings.indexOf(element) + 1})`
+            }
+            return tag
+          }
+          const siblings = Array.from(parent.children).filter((sibling) => sibling.tagName === element.tagName)
+          return `${localCssPath(parent, scope)} > ${tag}:nth-of-type(${siblings.indexOf(element) + 1})`
         }
-        const siblings = Array.from(parent.children).filter((sibling) => sibling.tagName === element.tagName)
-        return `${localCssPath(parent, scope)} > ${tag}:nth-of-type(${siblings.indexOf(element) + 1})`
+        const result = compute()
+        localCssCache.set(element, result)
+        return result
       }
       const cssPath = (element: Element): string => {
         const rootNode = element.getRootNode?.()
@@ -2021,20 +2062,33 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         }
         return localCssPath(element, document)
       }
+      const rootHeadings = Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6, [role='heading']")).map((heading) => {
+        const candidate = /^H([1-6])$/.exec(heading.tagName)?.[1]
+        return {
+          heading,
+          level: candidate ? Number(candidate) : Number(heading.getAttribute("aria-level") ?? 1),
+        }
+      })
+      const headingDepthCache = new WeakMap<Element, number>()
       const headingDepth = (element: Element): number => {
+        const cached = headingDepthCache.get(element)
+        if (cached !== undefined) return cached
         const ownLevel = /^H([1-6])$/.exec(element.tagName)?.[1]
-        if (ownLevel) return Number(ownLevel) - 1
+        if (ownLevel) {
+          const depth = Number(ownLevel) - 1
+          headingDepthCache.set(element, depth)
+          return depth
+        }
         let treeTarget = element
         while (isShadowRoot(treeTarget.getRootNode?.())) {
           treeTarget = (treeTarget.getRootNode() as ShadowRoot).host
         }
-        const headings = Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6, [role='heading']"))
         let level = 0
-        for (const heading of headings) {
+        for (const { heading, level: candidateLevel } of rootHeadings) {
           if (heading === treeTarget || (heading.compareDocumentPosition(treeTarget) & Node.DOCUMENT_POSITION_FOLLOWING) === 0) continue
-          const candidate = /^H([1-6])$/.exec(heading.tagName)?.[1]
-          level = candidate ? Number(candidate) : Number(heading.getAttribute("aria-level") ?? 1)
+          level = candidateLevel
         }
+        headingDepthCache.set(element, level)
         return level
       }
 
@@ -2082,7 +2136,9 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           let primaryScore = -1
           for (const link of links) {
             const name = accessibleName(link)
-            const score = name.length + (link.closest("h1, h2, h3, h4, h5, h6, [role='heading']") ? 1_000 : 0)
+            const headingBonus = link.closest("h1, h2, h3, h4, h5, h6, [role='heading'], .titleline") ? 1_000 : 0
+            const commentBonus = /\b\d+\s+comments?\b/i.test(name) ? 500 : 0
+            const score = name.length + headingBonus + commentBonus
             if (score > primaryScore) {
               primary = link
               primaryScore = score
@@ -2093,9 +2149,23 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         if (primaryLinks.get(group) !== element) return false
         if (group.matches("tr, [role='row']")) {
           const groupTextLength = safeText(group).length
-          return groupTextLength > 0 && accessibleName(element).length / groupTextLength >= 0.32
+          return groupTextLength > 0 && accessibleName(element).length / groupTextLength >= 0.15
         }
         return true
+      }
+      const isLayoutTable = (table: Element | null): boolean => {
+        if (!table || !settings.compact) return false
+        if (table.querySelector?.("table, [role='table']")) return true
+        const hasHeaders = Boolean(
+          labelledName(table) ||
+          (table as HTMLTableElement).caption ||
+          table.querySelector?.("th, [role='columnheader'], [role='rowheader']"),
+        )
+        if (hasHeaders) return false
+        const rowCount = table instanceof HTMLTableElement
+          ? table.rows.length
+          : table.querySelectorAll("tr, [role='row']").length
+        return rowCount <= 1 || rowCount >= 20
       }
       const isRedundantHeadingForLink = (element: Element): boolean => {
         if (!settings.compact || element === root) return false
@@ -2103,15 +2173,51 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         if (parentInteractive && (root.contains?.(parentInteractive) ?? true) && isVisible(parentInteractive)) {
           return true
         }
+        const headingText = accessibleName(element)
+        if (!headingText) return false
         const childLinks = Array.from(element.querySelectorAll?.("a[href]") ?? []).filter(isVisible)
         if (childLinks.length === 1) {
-          const headingText = accessibleName(element)
           const linkText = accessibleName(childLinks[0]!)
-          if (headingText && linkText && (linkText === headingText || linkText.startsWith(headingText))) {
+          if (linkText && (linkText === headingText || linkText.startsWith(headingText))) {
+            return true
+          }
+        }
+        const card = element.closest?.("article, [role='article']")
+        if (card && (root.contains?.(card) ?? true)) {
+          const cardLinks = Array.from(card.querySelectorAll("a[href]")).filter(isVisible)
+          if (cardLinks.some((link) => accessibleName(link) === headingText)) {
             return true
           }
         }
         return false
+      }
+      const seenCardLinks = new WeakMap<Element, Set<string>>()
+      const isDuplicateCardLink = (element: Element, displayName: string): boolean => {
+        if (!settings.compact || !displayName || !element.matches("a[href]")) return false
+        const card = element.closest?.("article, [role='article'], li, [role='listitem'], tr, [role='row']")
+        if (!card || !(root.contains?.(card) ?? true)) return false
+        const href = element.getAttribute("href") ?? ""
+        if (!href) return false
+        let seen = seenCardLinks.get(card)
+        if (!seen) {
+          seen = new Set<string>()
+          seenCardLinks.set(card, seen)
+        }
+        const key = `${href}\0${displayName}`
+        if (seen.has(key)) return true
+        seen.add(key)
+        return false
+      }
+      const isRedundantListItem = (element: Element): boolean => {
+        if (!settings.compact || element === root) return false
+        if (element.querySelector?.("ul, ol, [role='list'], h1, h2, h3, h4, h5, h6, [role='heading']")) {
+          return true
+        }
+        if (element.querySelector?.("p")) return false
+        const controls = Array.from(element.querySelectorAll?.("a[href], button") ?? []).filter(isVisible)
+        if (controls.length === 0) return false
+        const itemLength = safeText(element).length
+        return itemLength > 0 && controls.some((control) => accessibleName(control).length >= itemLength * 0.65)
       }
       const priorityFor = (options: { readonly role: string; readonly interactive: boolean; readonly primaryLink: boolean; readonly structuralEssential: boolean; readonly inActiveOverlay: boolean }): number => {
         if (options.role === "alert" || options.role === "status" || options.role === "navigation" || options.structuralEssential || options.inActiveOverlay) return -1
@@ -2122,9 +2228,10 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         return 2
       }
 
-      const entries: BrowserEntry[] = []
+      type PendingEntry = BrowserEntry & { readonly interactiveElement?: Element }
+      const entries: PendingEntry[] = []
       let truncated = false
-      const add = (entry: BrowserEntry): void => {
+      const add = (entry: PendingEntry): void => {
         if (entry.depth > settings.depth) return
         if (entries.length >= settings.maxCandidates) {
           truncated = true
@@ -2194,12 +2301,34 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         const isSafetyText = role === "alert" || role === "status"
         const isParagraph = element.matches("p")
         const isStructural = !isInteractive && element.matches(structuralSelector)
-        if (isStructural && role === "listbox" && (element.getAttribute("aria-label") === "slider" || element.getAttribute("aria-roledescription") === "carousel")) {
-          continue
+        if (isStructural) {
+          if (role === "listbox" && (element.getAttribute("aria-label") === "slider" || element.getAttribute("aria-roledescription") === "carousel")) {
+            continue
+          }
+          if (role === "listitem" && isRedundantListItem(element)) {
+            continue
+          }
+          if (role === "table" && isLayoutTable(element)) {
+            continue
+          }
+          if (role === "row" && (element.querySelector?.("table, [role='table']") || isLayoutTable(element.closest?.("table, [role='table']") ?? null))) {
+            continue
+          }
         }
         if (!isHeading && !isInteractive && !isSafetyText && !isStructural && (settings.interactive || !isParagraph)) continue
         if (settings.interactive && isParagraph && !isSafetyText) continue
+        if (
+          settings.compact &&
+          isParagraph &&
+          !isSafetyText &&
+          element.parentElement?.matches("li, [role='listitem']") &&
+          !isRedundantListItem(element.parentElement) &&
+          safeText(element).length >= safeText(element.parentElement).length * 0.8
+        ) {
+          continue
+        }
         const displayName = isStructural ? structuralName(element, role) : accessibleName(element)
+        if (isInteractive && isDuplicateCardLink(element, displayName)) continue
         const nameFromAuthorOnly = role === "combobox" || role === "listbox" || role === "textbox" || role === "searchbox" || role === "spinbutton" || role === "slider"
         const identityName = isInteractive
           ? (nameFromAuthorOnly ? authorAccessibleName(element) : displayName)
@@ -2236,7 +2365,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           role,
           name,
           ...(isInteractive && identityName ? { identityName } : {}),
-          ...(isInteractive ? { selector: cssPath(element) } : {}),
+          ...(isInteractive ? { interactiveElement: element } : {}),
           ...(details ? { details } : {}),
           priority: priorityFor({
             role: headerCandidateSet.has(element) ? "heading" : role,
@@ -2254,12 +2383,15 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           }),
         })
       }
-      const selected = entries
+      const selected: BrowserEntry[] = entries
         .map((entry, index) => ({ entry, index }))
         .sort((left, right) => left.entry.priority - right.entry.priority || left.index - right.index)
         .slice(0, settings.maxItems)
         .sort((left, right) => left.index - right.index)
-        .map(({ entry }) => entry)
+        .map(({ entry: { interactiveElement, ...rest } }) => ({
+          ...rest,
+          ...(interactiveElement ? { selector: cssPath(interactiveElement) } : {}),
+        }))
       return { entries: selected, truncated: truncated || selected.length < entries.length }
     }
     // tsx/esbuild can inject calls to its module-scoped __name helper into this

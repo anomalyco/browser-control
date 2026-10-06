@@ -281,7 +281,21 @@ async function handleCommand(command: ShimCommand, currentSocket: WebSocket): Pr
     const params = objectParam(command.params, "params")
     const sessionId = optionalStringParam(command.params, "sessionId")
     const debuggee: chrome.debugger.DebuggerSession = { tabId, ...(sessionId === undefined ? {} : { sessionId }) }
-    return toJsonObject(await chrome.debugger.sendCommand(debuggee, cdpMethod, params))
+    try {
+      return toJsonObject(await chrome.debugger.sendCommand(debuggee, cdpMethod, params))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (
+        sessionId === undefined &&
+        cdpMethod === "Page.navigate" &&
+        typeof params?.url === "string" &&
+        /Cannot access a chrome-extension:\/\/ URL/i.test(message)
+      ) {
+        await chrome.tabs.update(tabId, { url: params.url })
+        return { frameId: String(tabId) }
+      }
+      throw error
+    }
   }
   if (command.method === "tabs.create") {
     const url = optionalStringParam(command.params, "url") ?? "about:blank"
