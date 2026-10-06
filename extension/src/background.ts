@@ -149,6 +149,8 @@ async function recoverTabDebugger(tabId: number, requireEviction: boolean): Prom
   const evicted = (await chrome.tabs.sendMessage(tabId, { action: "evict-extension-frames" }).catch(() => undefined)) as { readonly removed?: number } | undefined
   if (requireEviction && (evicted?.removed ?? 0) === 0) return false
   await new Promise((resolve) => setTimeout(resolve, 45))
+  const owned = await getOwnedDebuggerTabIds(chrome.debugger)
+  if (owned.has(tabId)) return true
   return await chrome.debugger.attach({ tabId }, "1.3").then(() => true, (error) => isAlreadyAttachedError(error))
 }
 

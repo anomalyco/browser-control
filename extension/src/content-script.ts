@@ -48,27 +48,41 @@ const foreignExtensionSelector = [
   "embed[src^='chrome-extension://']",
 ].join(",")
 
-function evictForeignExtensionNodesIn(root: Document | ShadowRoot | Element): number {
+function evictForeignExtensionNodesIn(root: Document | ShadowRoot | Element, pierceShadows = false): number {
   let removed = 0
   const ownOrigin = `chrome-extension://${chrome.runtime.id}`
-  const removeIfForeign = (el: Element) => {
+  const isForeignFrameElement = (el: Element): boolean => {
+    if (el.id === hostId) return false
     const src = el.getAttribute("src") ?? el.getAttribute("data") ?? (el as HTMLIFrameElement).src ?? ""
-    if (src.startsWith(ownOrigin)) return
-    el.remove()
-    removed += 1
+    if (src.startsWith(ownOrigin)) return false
+    if (src.startsWith("chrome-extension://")) return true
+    return el.matches(foreignExtensionSelector)
   }
-  if (root instanceof Element && root.matches(foreignExtensionSelector)) {
-    removeIfForeign(root)
-    return removed
+  if (root instanceof Element && isForeignFrameElement(root)) {
+    root.remove()
+    return 1
   }
   for (const el of root.querySelectorAll(foreignExtensionSelector)) {
-    removeIfForeign(el)
+    if (isForeignFrameElement(el)) {
+      el.remove()
+      removed += 1
+    }
+  }
+  if (pierceShadows) {
+    if (root instanceof Element && root.id !== hostId && root.shadowRoot) {
+      removed += evictForeignExtensionNodesIn(root.shadowRoot, true)
+    }
+    for (const el of root.querySelectorAll("*")) {
+      if (el.id !== hostId && el.shadowRoot) {
+        removed += evictForeignExtensionNodesIn(el.shadowRoot, true)
+      }
+    }
   }
   return removed
 }
 
 function evictForeignExtensionFrames(): number {
-  return document.documentElement ? evictForeignExtensionNodesIn(document) : 0
+  return document.documentElement ? evictForeignExtensionNodesIn(document, true) : 0
 }
 
 chrome.runtime.sendMessage({ action: "page-status.ready" }).catch(() => {})
@@ -320,9 +334,13 @@ function observeHost(): void {
     }
     if (currentStatus.state !== "waiting") {
       for (const record of records) {
+        if (record.type === "attributes" && record.target instanceof Element) {
+          evictForeignExtensionNodesIn(record.target, false)
+          continue
+        }
         for (const node of record.addedNodes) {
           if (node instanceof Element) {
-            evictForeignExtensionNodesIn(node)
+            evictForeignExtensionNodesIn(node, true)
           }
         }
       }
@@ -331,5 +349,10 @@ function observeHost(): void {
       renderStatus()
     }
   })
-  observer.observe(document.documentElement, { childList: true, subtree: true })
+  observer.observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["src", "data"],
+  })
 }

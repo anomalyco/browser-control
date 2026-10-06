@@ -294,7 +294,14 @@ export class RootTargetLifecycle {
       yield* this.finish(transition, staged)
       return
     }
-    if (!staged && expected?.targetInfo.targetId === targetInfo.targetId) return
+    if (!staged && expected?.targetInfo.targetId === targetInfo.targetId) {
+      yield* Effect.gen({ self: this }, function* () {
+        yield* this.command(transition, "Page.enable")
+        yield* this.command(transition, "Emulation.setFocusEmulationEnabled", { enabled: true })
+        yield* this.command(transition, "Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true })
+      }).pipe(Effect.ignore)
+      return
+    }
     const owner = expected ?? staged
     if (!owner) return
     yield* this.attachUnlocked(transition, {
