@@ -305,23 +305,25 @@ try {
         <fieldset role="radiogroup">
           <legend>Do you have a fever and rash?</legend>
           <span style="position:relative;display:inline-block">
-            <input id="q-yes" type="radio" name="q1" style="opacity:0;position:absolute;inset:0" />
+            <input id="q-yes" type="radio" name="q1" style="opacity:0;position:absolute;inset:0;z-index:2" />
             <label for="q-yes" style="display:inline-block;padding:8px 16px">Yes</label>
           </span>
           <span style="position:relative;display:inline-block">
-            <input id="q-no" type="radio" name="q1" style="opacity:0;position:absolute;inset:0" />
-            <label for="q-no" style="display:inline-block;padding:8px 16px">No</label>
+            <input id="q-no" type="radio" name="q1" style="opacity:0;position:absolute;inset:0;z-index:0" />
+            <label for="q-no" style="position:relative;z-index:2;display:inline-block;padding:8px 16px">No</label>
           </span>
         </fieldset>
       </main>
     `)
     const { snapshot, ref } = createSnapshotHelpers(page, { selectors: new Map() })
     const outline = await snapshot()
+    const yesRef = outline.match(/radio "Yes" \[ref=(e\d+) unchecked\]/)?.[1]
     const noRef = outline.match(/radio "No" \[ref=(e\d+) unchecked\]/)?.[1]
-    assert.ok(noRef, outline)
+    assert.ok(yesRef && noRef, outline)
+    await ref(yesRef).click()
+    assert.match(await snapshot(), /radio "Yes" \[ref=e\d+ checked\]/)
     await ref(noRef).click()
-    const after = await snapshot()
-    assert.match(after, /radio "No" \[ref=e\d+ checked\]/)
+    assert.match(await snapshot(), /radio "No" \[ref=e\d+ checked\]/)
   })
 } finally {
   await browser.close()

@@ -918,9 +918,16 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           overlayAncestor.getAttribute("aria-label") !== "slider" &&
           overlayAncestor.getAttribute("aria-roledescription") !== "carousel",
         )
-        const labelProxy = isInteractive && (styleOf(element).opacity === "0" || element.getBoundingClientRect().width < 1)
-          ? visibleAssociatedLabel(element)
-          : undefined
+        const labelProxy = (() => {
+          if (!isInteractive) return undefined
+          const label = visibleAssociatedLabel(element)
+          if (!label) return undefined
+          const rect = element.getBoundingClientRect()
+          if (rect.width < 1 || rect.height < 1) return label
+          if (styleOf(element).opacity !== "0") return undefined
+          const hit = document.elementFromPoint?.(rect.left + rect.width / 2, rect.top + rect.height / 2)
+          return hit === element ? undefined : label
+        })()
         add({
           depth: baseDepth + parentKeys.length,
           baseDepth,
