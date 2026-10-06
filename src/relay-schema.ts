@@ -179,6 +179,7 @@ export const AuthenticatedJsonRequest = Schema.Struct({
   startUrl: Schema.optionalKey(Schema.NonEmptyString),
   method: AuthenticatedJsonMethod,
   path: Schema.NonEmptyString,
+  headers: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
   body: Schema.optionalKey(Schema.Json),
   sensitive: Schema.optionalKey(Schema.Boolean),
   timeoutMs: Schema.optionalKey(Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 120_000 }))),

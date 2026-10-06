@@ -93,6 +93,7 @@ export type Error =
 export interface JsonOptions<S extends Schema.Top> {
   readonly path: `/${string}`
   readonly method?: AuthenticatedJsonMethod
+  readonly headers?: Readonly<Record<string, string>>
   readonly body?: Json
   readonly response: S
   readonly sensitive?: boolean
@@ -241,6 +242,7 @@ function makeAuthenticatedOrigin(
       ...(startUrl ? { startUrl } : {}),
       method,
       path: request.path,
+      ...(request.headers === undefined ? {} : { headers: request.headers }),
       ...(request.body === undefined ? {} : { body: request.body }),
       ...(request.sensitive === true ? { sensitive: true } : {}),
       ...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),

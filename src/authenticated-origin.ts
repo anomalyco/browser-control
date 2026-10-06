@@ -24,6 +24,7 @@ type PageRequestInput = {
   readonly origin: string
   readonly method: AuthenticatedJsonMethod
   readonly url: string
+  readonly headers?: Readonly<Record<string, string>>
   readonly body?: unknown
   readonly timeoutMs: number
   readonly maxResponseBytes: number
@@ -75,6 +76,7 @@ export const requestJson = Effect.fn("AuthenticatedOrigin.requestJson")(function
     origin,
     method: request.method,
     url: requestUrl,
+    ...(request.headers === undefined ? {} : { headers: request.headers }),
     ...(request.body === undefined ? {} : { body: request.body }),
     timeoutMs: request.timeoutMs ?? defaultTimeoutMs,
     maxResponseBytes: request.maxResponseBytes ?? defaultMaxResponseBytes,
@@ -190,6 +192,10 @@ async function runPageRequest(input: PageRequestInput): Promise<PageRequestResul
   let requestStarted = false
   try {
     const body = input.body === undefined ? undefined : JSON.stringify(input.body)
+    const headers: Record<string, string> = {
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+      ...(input.headers ?? {}),
+    }
     requestStarted = true
     const response = await window.fetch(input.url, {
       method: input.method,
@@ -197,12 +203,8 @@ async function runPageRequest(input: PageRequestInput): Promise<PageRequestResul
       mode: "same-origin",
       redirect: "error",
       signal: controller.signal,
-      ...(body === undefined
-        ? {}
-        : {
-            headers: { "content-type": "application/json" },
-            body,
-          }),
+      ...(Object.keys(headers).length > 0 ? { headers } : {}),
+      ...(body === undefined ? {} : { body }),
     })
 
     if (!response.ok) {

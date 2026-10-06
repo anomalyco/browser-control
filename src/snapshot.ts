@@ -459,7 +459,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
             const fallbackRoot = (document.body ?? document.documentElement) as Element | null
             if (!fallbackRoot) return null
             const dialogs = Array.from(document.querySelectorAll("dialog, [role='dialog'], [role='alertdialog']")).filter(isVisible)
-            const modals = dialogs.filter((dialog) => dialog.matches(":modal, [aria-modal='true']"))
+            const modals = dialogs.filter((dialog) => dialog.matches(":modal, [aria-modal='true']") || Boolean(dialog.closest?.("[data-focus-lock-disabled='false']")))
             if (modals.length === 1) return modals[0] as Element
             const isOpenListboxOrMenu = (menu: Element): boolean => {
               if (!isVisible(menu)) return false
