@@ -61,19 +61,27 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   })
 })
 
+const explicitlyDetachingTabs = new Set<number>()
+
+async function recoverTabDebugger(tabId: number, requireEviction: boolean): Promise<boolean> {
+  const evicted = (await chrome.tabs.sendMessage(tabId, { action: "evict-extension-frames" }).catch(() => undefined)) as { readonly removed?: number } | undefined
+  if (requireEviction && (evicted?.removed ?? 0) === 0) return false
+  await new Promise((resolve) => setTimeout(resolve, 45))
+  return await chrome.debugger.attach({ tabId }, "1.3").then(() => true, (error) => isAlreadyAttachedError(error))
+}
+
 chrome.debugger.onDetach.addListener((source, reason) => {
   if (!source.tabId) {
     return
   }
   const tabId = source.tabId
   const sessionId = (source as chrome.debugger.DebuggerSession).sessionId
-  if (reason === "target_closed" && sessionId === undefined) {
+  if (sessionId === undefined && !explicitlyDetachingTabs.has(tabId)) {
     void (async () => {
       const tab = await chrome.tabs.get(tabId).catch(() => undefined)
-      if (tab) {
-        await chrome.tabs.sendMessage(tabId, { action: "evict-extension-frames" }).catch(() => {})
-        await new Promise((resolve) => setTimeout(resolve, 45))
-        await chrome.debugger.attach({ tabId }, "1.3").catch(() => {})
+      if (tab && (await recoverTabDebugger(tabId, reason !== "target_closed"))) {
+        sendMessage(debuggerDetachedEvent({ tabId, reason: "target_closed", sessionId }))
+        return
       }
       sendMessage(debuggerDetachedEvent({ tabId, reason, sessionId }))
     })()
@@ -283,7 +291,12 @@ async function handleCommand(command: ShimCommand, currentSocket: WebSocket): Pr
   }
   if (command.method === "debugger.detach") {
     const tabId = numberParam(command.params, "tabId")
-    await chrome.debugger.detach({ tabId })
+    explicitlyDetachingTabs.add(tabId)
+    try {
+      await chrome.debugger.detach({ tabId })
+    } finally {
+      explicitlyDetachingTabs.delete(tabId)
+    }
     await runTabGroupingCommand(tabId, () => guardedUngroupBrowserControlTab(tabId, {
       assertCurrent: () => assertCurrentSocket(currentSocket),
     }))
@@ -301,11 +314,7 @@ async function handleCommand(command: ShimCommand, currentSocket: WebSocket): Pr
       const message = error instanceof Error ? error.message : String(error)
       if (/Cannot access a chrome-extension:\/\/ URL|Debugger is not attached to the tab/i.test(message)) {
         for (let attempt = 0; attempt < 2; attempt += 1) {
-          await chrome.tabs.sendMessage(tabId, { action: "evict-extension-frames" }).catch(() => {})
-          await new Promise((resolve) => setTimeout(resolve, 45))
-          if (sessionId === undefined) {
-            await chrome.debugger.attach({ tabId }, "1.3").catch(() => {})
-          }
+          await recoverTabDebugger(tabId, false)
           try {
             return toJsonObject(await chrome.debugger.sendCommand(debuggee, cdpMethod, params))
           } catch (retryError) {

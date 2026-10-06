@@ -35,37 +35,34 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
   }
 })
 
+const foreignExtensionSelector = [
+  "com-1password-notification",
+  "com-1password-menu",
+  "com-1password-button",
+  "[data-onepassword-extension]",
+  "[data-lastpass-root]",
+  "[id^='bitwarden-']",
+  "iframe[src^='chrome-extension://']",
+  "frame[src^='chrome-extension://']",
+  "object[data^='chrome-extension://']",
+  "embed[src^='chrome-extension://']",
+].join(",")
+
 function evictForeignExtensionFrames(): number {
   let removed = 0
   const ownOrigin = `chrome-extension://${chrome.runtime.id}`
   const visitRoot = (root: Document | ShadowRoot) => {
-    for (const frame of root.querySelectorAll("iframe, frame, object, embed")) {
-      const src = frame.getAttribute("src") ?? (frame as HTMLIFrameElement).src ?? ""
-      if (src.startsWith("chrome-extension://") && !src.startsWith(ownOrigin)) {
-        frame.remove()
-        removed += 1
-      }
+    for (const el of root.querySelectorAll(foreignExtensionSelector)) {
+      const src = el.getAttribute("src") ?? el.getAttribute("data") ?? (el as HTMLIFrameElement).src ?? ""
+      if (src.startsWith(ownOrigin)) continue
+      el.remove()
+      removed += 1
     }
     for (const el of root.querySelectorAll("*")) {
-      const tag = el.tagName.toLowerCase()
-      if (
-        tag.startsWith("com-1password-") ||
-        el.hasAttribute("data-onepassword-extension") ||
-        el.hasAttribute("data-lastpass-root") ||
-        el.id.startsWith("bitwarden-")
-      ) {
-        el.remove()
-        removed += 1
-        continue
-      }
-      if (el.shadowRoot) {
-        visitRoot(el.shadowRoot)
-      }
+      if (el.shadowRoot) visitRoot(el.shadowRoot)
     }
   }
-  if (document.documentElement) {
-    visitRoot(document)
-  }
+  if (document.documentElement) visitRoot(document)
   return removed
 }
 

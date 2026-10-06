@@ -325,6 +325,46 @@ try {
     await ref(noRef).click()
     assert.match(await snapshot(), /radio "No" \[ref=e\d+ checked\]/)
   })
+  await check("sibling tab bar outside main, clickable table rows, and aria-hidden app modal dialogs", async () => {
+    await page.setContent(`
+      <div id="app">
+        <nav><button>Anomaly (Dev)</button><a href="/internal">Internal</a></nav>
+        <div class="workspace-body">
+          <div data-tab-nav>
+            <a href="#overview">Overview</a>
+            <a href="#logs" aria-current="page">Logs</a>
+            <a href="#models">Models</a>
+          </div>
+          <main>
+            <h2>Logs</h2>
+            <table>
+              <tr><th>Time</th><th>Status</th><th>Model</th></tr>
+              <tr role="button" tabindex="0" aria-label="View request req-1"><td>09:27:32</td><td>410 Rejected</td><td>deepseek-v4-pro</td></tr>
+            </table>
+          </main>
+        </div>
+      </div>
+    `)
+    const { snapshot, ref } = createSnapshotHelpers(page, { selectors: new Map() })
+    const initial = await snapshot()
+    assert.match(initial, /button "Anomaly \(Dev\)" \[ref=e\d+\]/)
+    assert.match(initial, /link "Logs" \[ref=e\d+ current=page\]/)
+    assert.match(initial, /link "Models" \[ref=e\d+\]/)
+    const rowMatch = initial.match(/button "View request req-1 — Time: 09:27:32 \| Status: 410 Rejected \| Model: deepseek-v4-pro" \[ref=(e\d+)\]/)
+    assert.ok(rowMatch?.[1], initial)
+    assert.equal(await ref(rowMatch[1]).count(), 1)
+
+    await page.evaluate(() => {
+      document.getElementById("app")!.setAttribute("aria-hidden", "true")
+      const modal = document.createElement("div")
+      modal.setAttribute("role", "dialog")
+      modal.innerHTML = '<h2>Search</h2><input type="search" placeholder="Search docs">'
+      document.body.appendChild(modal)
+    })
+    const modalSnap = await snapshot()
+    assert.match(modalSnap, /searchbox "Search docs" \[ref=e\d+\]/)
+    assert.doesNotMatch(modalSnap, /View request req-1/)
+  })
 } finally {
   await browser.close()
 }

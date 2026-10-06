@@ -413,6 +413,39 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         if (element.tagName === "NAV") return "navigation"
         return element.tagName.toLowerCase()
       }
+      const tableHeadersCache = new WeakMap<Element, readonly string[]>()
+      const tableColumnHeaders = (table: Element | null): readonly string[] => {
+        if (!table) return []
+        const cached = tableHeadersCache.get(table)
+        if (cached !== undefined) return cached
+        const tableRows = Array.from(table.querySelectorAll("tr, [role='row']"))
+        const headerRow = tableRows.find((row) => {
+          const rowCells = Array.from(row.children).filter((child) => child.matches("th, td, [role='columnheader'], [role='rowheader'], [role='cell'], [role='gridcell']"))
+          return rowCells.length > 0 && (rowCells.every((cell) => cell.matches("th, [role='columnheader']")) || rowCells.some((cell) => cell.matches("th[scope='col'], [role='columnheader']")))
+        })
+        const headers = headerRow
+          ? Array.from(headerRow.children).filter((child) => child.matches("th, [role='columnheader']")).map((cell) => safeText(cell))
+          : []
+        tableHeadersCache.set(table, headers)
+        return headers
+      }
+      const rowCellsSummary = (element: Element): string => {
+        const cells = Array.from(element.children).filter((child) => child.matches("th, td, [role='columnheader'], [role='rowheader'], [role='cell'], [role='gridcell']"))
+        const values = cells.map((cell) => safeText(cell))
+        if (values.length === 0) return safeText(element)
+        const headerCells = cells.filter((cell) => cell.matches("th, [role='columnheader'], [role='rowheader']"))
+        if (headerCells.length === cells.length) return values.join(" | ")
+        const headers = tableColumnHeaders(element.closest("table, [role='table'], [role='grid']"))
+        if (headers.length === values.length && headers.every(Boolean)) {
+          return values.map((value, index) => `${headers[index]}: ${value}`).join(" | ")
+        }
+        if (headerCells.length > 0) {
+          const hTexts = headerCells.map((cell) => safeText(cell)).filter(Boolean)
+          const data = cells.filter((cell) => !headerCells.includes(cell)).map((cell) => safeText(cell)).filter(Boolean)
+          return hTexts.length === 1 && data.length > 0 ? `${hTexts[0]}: ${data.join(" | ")}` : values.join(" | ")
+        }
+        return values.join(" | ")
+      }
       const structuralName = (element: Element, role: string): string => {
         const labelled = labelledName(element)
         if (labelled) return labelled
@@ -423,38 +456,12 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           return normalize(element.querySelector("h1, h2, h3, h4, h5, h6, [role='heading']")?.textContent ?? "")
         }
         if (role === "code") return normalize(element.textContent ?? "")
-        if (role === "row") {
-          const cells = Array.from(element.children).filter((child) => child.matches("th, td, [role='columnheader'], [role='rowheader'], [role='cell'], [role='gridcell']"))
-          const values = cells.map((cell) => safeText(cell))
-          if (values.length === 0) return safeText(element)
-          const headerCells = cells.filter((cell) => cell.matches("th, [role='columnheader'], [role='rowheader']"))
-          const table = element.closest("table, [role='table'], [role='grid']")
-          const tableRows = table ? Array.from(table.querySelectorAll("tr, [role='row']")) : []
-          const headerRow = tableRows.find((row) => {
-            if (row === element) return false
-            const rowCells = Array.from(row.children).filter((child) => child.matches("th, td, [role='columnheader'], [role='rowheader'], [role='cell'], [role='gridcell']"))
-            return rowCells.length > 0 && (rowCells.every((cell) => cell.matches("th, [role='columnheader']")) || rowCells.some((cell) => cell.matches("th[scope='col'], [role='columnheader']")))
-          })
-          if (headerRow) {
-            const headers = Array.from(headerRow.children)
-              .filter((child) => child.matches("th, [role='columnheader']"))
-              .map((cell) => safeText(cell))
-            if (headers.length === values.length && headers.every(Boolean)) {
-              return values.map((value, index) => `${headers[index]}: ${value}`).join(" | ")
-            }
-          }
-          if (headerCells.length === cells.length) return values.join(" | ")
-          if (headerCells.length > 0) {
-            const headers = headerCells.map((cell) => safeText(cell)).filter(Boolean)
-            const data = cells.filter((cell) => !headerCells.includes(cell)).map((cell) => safeText(cell)).filter(Boolean)
-            return headers.length === 1 && data.length > 0 ? `${headers[0]}: ${data.join(" | ")}` : values.join(" | ")
-          }
-          return values.join(" | ")
-        }
+        if (role === "row") return rowCellsSummary(element)
         if (role === "listitem") return safeText(element)
         return ""
       }
       let autoScopedMain = false
+      let externalOverlays: Element[] = []
       const root = rootOrSettings instanceof Element
         ? rootOrSettings
         : (() => {
@@ -468,7 +475,9 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
             const fallbackRoot = (document.body ?? document.documentElement) as Element | null
             if (!fallbackRoot) return null
             const dialogs = Array.from(document.querySelectorAll("dialog, [role='dialog'], [role='alertdialog']")).filter(isVisible)
-            const modals = dialogs.filter((dialog) => dialog.matches(":modal, [aria-modal='true']") || Boolean(dialog.closest?.("[data-focus-lock-disabled='false']")))
+            const mains = Array.from(document.querySelectorAll("main")).filter(isVisible)
+            const mainHidingModal = dialogs.length === 1 && mains.length === 1 && !mains[0]!.contains(dialogs[0]!) && Boolean(mains[0]!.closest("[aria-hidden='true'], [inert]"))
+            const modals = dialogs.filter((dialog) => dialog.matches(":modal, [aria-modal='true']") || Boolean(dialog.closest?.("[data-focus-lock-disabled='false']")) || mainHidingModal)
             if (modals.length === 1) return modals[0] as Element
             const isOpenListboxOrMenu = (menu: Element): boolean => {
               if (!isVisible(menu)) return false
@@ -477,13 +486,20 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
               return items.length > 0 && !items.some((item) => item.getAttribute("role") === "option" && item.querySelector?.("a[href], button"))
             }
             const portalMenus = Array.from(document.querySelectorAll("[role='listbox'], [role='menu']")).filter(isOpenListboxOrMenu)
-            const mains = Array.from(document.querySelectorAll("main")).filter(isVisible)
-            if (dialogs.length > 0 || (mains.length === 1 && portalMenus.some((menu) => !mains[0]!.contains?.(menu)))) {
-              return fallbackRoot
-            }
             if (mains.length === 1) {
               autoScopedMain = true
-              return mains[0] as Element
+              let mainRoot = mains[0] as Element
+              const landmarkSelector = "header, footer, nav, aside, [role='banner'], [role='contentinfo'], [role='navigation'], [role='complementary']"
+              while (
+                mainRoot.parentElement &&
+                mainRoot.parentElement !== fallbackRoot &&
+                !mainRoot.parentElement.matches(landmarkSelector) &&
+                !Array.from(mainRoot.parentElement.children).some((child) => child.matches(landmarkSelector))
+              ) {
+                mainRoot = mainRoot.parentElement
+              }
+              externalOverlays = [...dialogs, ...portalMenus].filter((overlay) => !mainRoot.contains?.(overlay))
+              return mainRoot
             }
             return fallbackRoot
           })()
@@ -785,7 +801,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         return 2
       }
 
-      type PendingEntry = BrowserEntry & { readonly interactiveElement?: Element }
+      type PendingEntry = BrowserEntry & { readonly interactiveElement?: Element; readonly inActiveOverlay?: boolean }
       const entries: PendingEntry[] = []
       let truncated = false
       const add = (entry: PendingEntry): void => {
@@ -804,17 +820,25 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       ].join(",")
       const headerSelector = "input, textarea, select, button, [role='searchbox'], [role='combobox'], [role='button'], a[href][aria-label]"
       const headerRoots = autoScopedMain && typeof document.querySelectorAll === "function"
-        ? Array.from(document.querySelectorAll("header, [role='banner']")).filter((h) => isVisible(h) && !root.contains?.(h))
+        ? (() => {
+            const headers = Array.from(document.querySelectorAll("header, [role='banner']")).filter((h) => isVisible(h) && !root.contains?.(h))
+            if (headers.length > 0) return headers
+            return Array.from(document.querySelectorAll("nav, [role='navigation']")).filter((n) => isVisible(n) && !root.contains?.(n) && !n.closest?.("aside, footer, [role='complementary'], [role='contentinfo']"))
+          })()
         : []
       const headerCandidateSet = new Set(
         headerRoots.flatMap((h) =>
-          querySelectorAllDeep(h, headerSelector).filter((el) => !el.closest?.("nav, [role='navigation']")),
+          querySelectorAllDeep(h, headerSelector).filter((el) => h.matches("nav, [role='navigation']") || !el.closest?.("nav, [role='navigation']")),
         ),
       )
       const candidates = [
         ...headerCandidateSet,
         ...(root.matches(candidateSelector) ? [root] : []),
         ...querySelectorAllDeep(root, candidateSelector),
+        ...externalOverlays.flatMap((overlay) => [
+          ...(overlay.matches(candidateSelector) ? [overlay] : []),
+          ...querySelectorAllDeep(overlay, candidateSelector),
+        ]),
       ]
       const collapsedNavigation = new Set<Element>()
       const nonCollapsibleNavigation = new WeakSet<Element>()
@@ -888,12 +912,19 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         ) {
           continue
         }
-        const displayName = isStructural ? structuralName(element, role) : accessibleName(element)
-        if (isInteractive && isDuplicateCardLink(element, displayName)) continue
+        const rawDisplayName = isStructural ? structuralName(element, role) : accessibleName(element)
+        if (isInteractive && isDuplicateCardLink(element, rawDisplayName)) continue
         const nameFromAuthorOnly = role === "combobox" || role === "listbox" || role === "textbox" || role === "searchbox" || role === "spinbutton" || role === "slider"
         const identityName = isInteractive
-          ? (nameFromAuthorOnly ? authorAccessibleName(element) : displayName)
-          : displayName
+          ? (nameFromAuthorOnly ? authorAccessibleName(element) : rawDisplayName)
+          : rawDisplayName
+        const displayName = (() => {
+          if (isInteractive && element instanceof HTMLTableRowElement && explicitAriaName(element)) {
+            const cellsText = rowCellsSummary(element)
+            if (cellsText && cellsText !== rawDisplayName) return `${rawDisplayName} — ${cellsText}`
+          }
+          return rawDisplayName
+        })()
         const isDisabled = ((element as HTMLButtonElement).disabled === true) || element.getAttribute("aria-disabled") === "true"
         if (isInteractive && isDisabled && !displayName && !element.getAttribute("name")) continue
         const fallbackName = role === "group" ? "Group"
@@ -905,7 +936,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           : role === "tablist" ? "Tab list"
           : isInteractive ? element.getAttribute("name") || element.getAttribute("data-testid") || element.getAttribute("data-test-id") || element.getAttribute("data-test") || role
           : ""
-        const name = truncate(displayName || fallbackName, isParagraph || isSafetyText || isStructural ? 180 : 120)
+        const name = truncate(displayName || fallbackName, isParagraph || isSafetyText || isStructural || element instanceof HTMLTableRowElement ? 180 : 120)
         if (!name) continue
         const details = isHeading ? `level=${headingDepth(element) + 1}` : detailsFor(element)
         const primaryLink = (role === "link" && isPrimaryLink(element)) || headerCandidateSet.has(element)
@@ -913,7 +944,6 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         const parentKeys = structuralParentKeys(element)
         const overlayAncestor = element.closest?.("dialog, [role='dialog'], [role='alertdialog'], [role='listbox'], [role='menu']") ?? null
         const inActiveOverlay = Boolean(
-          (isInteractive || role === "dialog" || role === "alertdialog" || role === "listbox" || role === "menu") &&
           overlayAncestor &&
           overlayAncestor.getAttribute("aria-label") !== "slider" &&
           overlayAncestor.getAttribute("aria-roledescription") !== "carousel",
@@ -938,6 +968,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           ...(isInteractive && identityName && !labelProxy ? { identityName } : {}),
           ...(labelProxy ? { selectorRole: "label" } : {}),
           ...(isInteractive ? { interactiveElement: labelProxy ?? element } : {}),
+          ...(inActiveOverlay ? { inActiveOverlay: true } : {}),
           ...(details ? { details } : {}),
           priority: priorityFor({
             role: headerCandidateSet.has(element) ? "heading" : role,
@@ -953,28 +984,35 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           }),
         })
       }
+      const overlayBonus = Math.min(30, entries.filter((entry) => entry.inActiveOverlay).length)
       const selected: BrowserEntry[] = entries
         .map((entry, index) => ({ entry, index }))
         .sort((left, right) => left.entry.priority - right.entry.priority || left.index - right.index)
-        .slice(0, settings.maxItems)
+        .slice(0, settings.maxItems + overlayBonus)
         .sort((left, right) => left.index - right.index)
-        .map(({ entry: { interactiveElement, ...rest } }) => ({
+        .map(({ entry: { interactiveElement, inActiveOverlay: _inActiveOverlay, ...rest } }) => ({
           ...rest,
           ...(interactiveElement ? { selector: cssPath(interactiveElement) } : {}),
         }))
+      const hasLoadingIndicator = Boolean(
+        document.querySelector?.("[aria-busy='true'], .skeleton:not(.no-skeleton)") ||
+        Array.from(document.querySelectorAll?.("[role='status'], [role='progressbar'], main p") ?? []).some(
+          (el) => isVisible(el) && /^loading\b/i.test(normalize(el.textContent ?? el.getAttribute("aria-label") ?? "")),
+        ),
+      )
       const needsSettle = Boolean(
         !settings.rootSelector &&
         typeof MutationObserver !== "undefined" &&
         document.body &&
         (
-          Boolean(document.querySelector?.("[aria-busy='true'], .skeleton:not(.no-skeleton)")) ||
+          hasLoadingIndicator ||
           (!selected.some((entry) => Boolean(entry.selector)) && typeof performance !== "undefined" && performance.now() < 2_500)
         ),
       )
       return {
         entries: selected,
         truncated: truncated || selected.length < entries.length,
-        ...(needsSettle ? { needsSettle: true } : {}),
+        ...(needsSettle ? { needsSettle: true, hasLoadingIndicator } : {}),
       }
     }
     const browserCapture = new Function(
@@ -1002,14 +1040,22 @@ return (${capture.toString()})(rootOrSettings, locatorSettings)`,
             await delay(snapshotRetryDelayMs)
             continue
           }
-          if (result.needsSettle && !options.diff && captureAttempts === 0 && Date.now() + 120 < deadline) {
+          if (result.needsSettle && !options.diff && captureAttempts < 3 && Date.now() + 120 < deadline) {
             captureAttempts++
+            const initialWait = result.hasLoadingIndicator ? 1200 : 320
             await page.evaluate(`new Promise((resolve) => {
-              let quietTimer = window.setTimeout(done, 120);
-              const maxTimer = window.setTimeout(done, 550);
+              const isLoading = () => Boolean(
+                document.querySelector("[aria-busy='true'], .skeleton:not(.no-skeleton)") ||
+                Array.from(document.querySelectorAll("[role='status'], [role='progressbar'], main p")).some(
+                  (el) => /^loading\\b/i.test((el.textContent || el.getAttribute("aria-label") || "").trim())
+                ) ||
+                (!document.querySelector("main") && document.querySelectorAll("a[href], button, input").length <= 2)
+              );
+              let quietTimer = window.setTimeout(done, ${initialWait});
+              const maxTimer = window.setTimeout(done, 1600);
               const observer = new MutationObserver(() => {
                 window.clearTimeout(quietTimer);
-                quietTimer = window.setTimeout(done, 55);
+                quietTimer = window.setTimeout(done, isLoading() ? 1000 : 65);
               });
               function done() {
                 observer.disconnect();

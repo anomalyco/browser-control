@@ -1092,50 +1092,13 @@ export const ghostCursorClientSource = `(() => {
       }
     } catch {}
   };
-  const isForeignExtensionNode = (node) => {
-    if (!(node instanceof Element)) return false;
-    const tag = node.tagName ? node.tagName.toLowerCase() : "";
-    if (tag.startsWith("com-1password-") || node.hasAttribute("data-onepassword-extension") || node.hasAttribute("data-lastpass-root")) {
-      return true;
-    }
-    if (tag === "iframe" || tag === "frame" || tag === "object" || tag === "embed") {
-      const src = node.getAttribute("src") || node.src || "";
-      if (typeof src === "string" && src.startsWith("chrome-extension://")) return true;
-    }
-    return false;
-  };
-  const sweepForeignExtensionNodes = (root) => {
-    if (document.getElementById("__browser_control_page_status__")?.getAttribute("data-waiting") === "true") return;
-    if (isForeignExtensionNode(root)) {
-      root.remove();
-      return;
-    }
-    if (!root || typeof root.querySelectorAll !== "function") return;
-    for (const el of root.querySelectorAll("com-1password-notification, com-1password-menu, com-1password-button, [data-onepassword-extension], [data-lastpass-root], iframe[src^='chrome-extension://'], frame[src^='chrome-extension://']")) {
-      el.remove();
-    }
-  };
-  const guardExtensionFrames = () => {
-    sweepForeignExtensionNodes(document.documentElement);
-    const extObserver = new MutationObserver((records) => {
-      if (document.getElementById("__browser_control_page_status__")?.getAttribute("data-waiting") === "true") return;
-      for (const record of records) {
-        for (const added of record.addedNodes) {
-          sweepForeignExtensionNodes(added);
-        }
-      }
-    });
-    extObserver.observe(document.documentElement, { childList: true, subtree: true });
-  };
   if (document.documentElement) {
     restoreSavedState();
-    guardExtensionFrames();
   } else {
     const observer = new MutationObserver(() => {
       if (!document.documentElement) return;
       observer.disconnect();
       restoreSavedState();
-      guardExtensionFrames();
     });
     observer.observe(document, { childList: true });
   }
