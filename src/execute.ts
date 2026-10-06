@@ -809,7 +809,7 @@ export class ExecuteSandbox {
         // a connect promise that could bind a page after reporting failure.
         this.browser = await chromium.connectOverCDP(this.options.endpointUrl, {
           timeout: adoptedDefaultTarget ? adoptedPageConnectTimeoutMs : playwrightConnectTimeoutMs,
-          ...(this.options.sessionId ? { headers: { "Browser-Control-Session-Id": this.options.sessionId, "Browser-Control-Client-Kind": "sandbox" } } : {}),
+          ...(this.options.sessionId ? { headers: { "Browser-Control-Session-Id": encodeURIComponent(this.options.sessionId), "Browser-Control-Client-Kind": "sandbox" } } : {}),
         })
       } catch (cause) {
         if (adoptedDefaultTarget && cause instanceof errors.TimeoutError) {

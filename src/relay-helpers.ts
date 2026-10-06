@@ -436,7 +436,12 @@ export function getIdText(object: JsonObject | undefined, key: string): string |
 }
 
 export function headerValue(value: string | string[] | undefined): string | undefined {
-  return Predicate.isString(value) && value ? value : undefined
+  if (!Predicate.isString(value) || !value) return undefined
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
 }
 
 export function getTargetInfo(value: unknown): TargetInfo | undefined {

@@ -300,11 +300,7 @@ async function handleCommand(command: ShimCommand, currentSocket: WebSocket): Pr
   if (command.method === "tabs.group") {
     const tabId = numberParam(command.params, "tabId")
     const sessionId = typeof command.params?.sessionId === "string" ? command.params.sessionId : undefined
-    const url = typeof command.params?.url === "string" ? command.params.url : undefined
-    return await runTabGroupingCommand(tabId, () => groupBrowserControlTab(tabId, currentSocket, {
-      ...(sessionId ? { sessionId } : {}),
-      ...(url ? { url } : {}),
-    }))
+    return await runTabGroupingCommand(tabId, () => groupBrowserControlTab(tabId, currentSocket, sessionId))
   }
   if (command.method === "tabs.ungroup") {
     const tabId = numberParam(command.params, "tabId")
@@ -495,14 +491,10 @@ async function reconcileBrowserControlGroups(currentGeneration: number): Promise
 async function groupBrowserControlTab(
   tabId: number,
   currentSocket: WebSocket,
-  options?: { readonly sessionId?: string; readonly url?: string },
+  sessionId?: string,
 ): Promise<JsonObject> {
   const tab = await chrome.tabs.get(tabId)
-  const resolvedUrl = options?.url ?? tab.url
-  const desiredTitle = formatTabGroupTitle({
-    ...(options?.sessionId ? { sessionId: options.sessionId } : {}),
-    ...(resolvedUrl ? { url: resolvedUrl } : {}),
-  })
+  const desiredTitle = formatTabGroupTitle(sessionId)
   if (tab.groupId !== undefined && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
     const currentGroup = await chrome.tabGroups.get(tab.groupId)
     if (currentGroup.title === desiredTitle && currentGroup.color === tabGroupColor) {

@@ -2,15 +2,13 @@ import { Match, Predicate } from "effect"
 import type { Locator, Page } from "playwright-core"
 import type { JsonObject } from "./protocol.ts"
 
-type GhostCursorStyle = "distance-glide" | "spring-inertia" | "far-airplane" | "minimal-spring"
-type GhostCursorClickStyle = "tactile-bloom" | "precision-reticle" | "double-wave" | "minimal-press"
+type GhostCursorStyle = "distance-glide" | "spring-inertia"
 
 export type GhostCursorClientOptions = {
   readonly color?: string
   readonly size?: number
   readonly zIndex?: number
   readonly style?: GhostCursorStyle
-  readonly clickStyle?: GhostCursorClickStyle
 }
 
 type GhostCursorTone = "neutral" | "accent" | "success" | "warn"
@@ -104,7 +102,7 @@ export const ghostCursorClientSource = `(() => {
   if (window !== window.top) {
     return;
   }
-  if (globalThis.__browserControlGhostCursor?.version === 11) {
+  if (globalThis.__browserControlGhostCursor?.version === 12) {
     return;
   }
   globalThis.__browserControlGhostCursor?.hide?.();
@@ -120,17 +118,13 @@ export const ghostCursorClientSource = `(() => {
     size: 23,
     zIndex: 2147483646,
     style: "distance-glide",
-    clickStyle: "tactile-bloom",
   };
   const svgNamespace = "http://www.w3.org/2000/svg";
   const cursorPathData =
     "M0.92 2.18C0.61 1.37 1.42 0.58 2.23 0.9L14.39 5.68C15.23 6.01 15.23 7.2 14.39 7.54L9.86 9.37C9.61 9.47 9.41 9.67 9.31 9.92L7.44 14.42C7.09 15.25 5.9 15.23 5.58 14.39L0.92 2.18Z";
 
   const PI = Math.PI;
-  const TAU = Math.PI * 2;
-  const NOSE_HEADING = -3 * Math.PI / 4;
   const FRAME_MS = 1000 / 60;
-
   const tones = {
     neutral: "#e0b35a",
     accent: "#93c5fd",
@@ -160,7 +154,7 @@ export const ghostCursorClientSource = `(() => {
     camera: { scale: 1, tx: 0, ty: 0 },
     cameraAnim: null,
     spotlight: null,
-     spotlightAnim: null,
+    spotlightAnim: null,
     keysTimer: undefined,
     effects: [],
     flightResolvers: [],
@@ -188,17 +182,11 @@ export const ghostCursorClientSource = `(() => {
     return u === 1 ? 1 : 1 - Math.pow(2, -10 * u);
   };
   const easeOutQuart = (t) => 1 - Math.pow(1 - clamp(t, 0, 1), 4);
-  const wrapPi = (x) => {
-    let r = (x + PI) % TAU;
-    if (r < 0) r += TAU;
-    return r - PI;
-  };
   const mergeOptions = (options) => ({
     color: typeof options?.color === "string" ? options.color : defaults.color,
     size: typeof options?.size === "number" && Number.isFinite(options.size) ? options.size : defaults.size,
     zIndex: typeof options?.zIndex === "number" && Number.isFinite(options.zIndex) ? options.zIndex : defaults.zIndex,
     style: typeof options?.style === "string" ? options.style : state.options.style || defaults.style,
-    clickStyle: typeof options?.clickStyle === "string" ? options.clickStyle : state.options.clickStyle || defaults.clickStyle,
   });
   const formatCoord = (value) => String(Number(value.toFixed(2)));
   const applyCamera = () => {
@@ -214,9 +202,7 @@ export const ghostCursorClientSource = `(() => {
     body.style.transform = "translate3d(" + formatCoord(tx) + "px, " + formatCoord(ty) + "px, 0) scale(" + formatCoord(scale) + ")";
   };
   const applyPosition = () => {
-    if (!state.element) {
-      return;
-    }
+    if (!state.element) return;
     state.element.style.transform = "translate3d(" + formatCoord(state.renderedX) + "px, " + formatCoord(state.renderedY) + "px, 0)";
     if (state.arrow) {
       const pressed = state.element.dataset.pressed === "true";
@@ -260,9 +246,52 @@ export const ghostCursorClientSource = `(() => {
     stage.appendChild(svg);
     return svg;
   };
+  const populateChip = (chip, toneColor, label, detail) => {
+    chip.replaceChildren();
+    if (!label) {
+      chip.style.display = "none";
+      return;
+    }
+    const dot = document.createElement("span");
+    dot.style.cssText = "width:7px;height:7px;border-radius:999px;background:" + toneColor + ";flex-shrink:0;";
+    const txt = document.createElement("span");
+    txt.textContent = label;
+    chip.append(dot, txt);
+    if (detail) {
+      const det = document.createElement("span");
+      det.textContent = detail;
+      det.style.cssText = "font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;font-weight:500;color:#9ca3af;";
+      chip.appendChild(det);
+    }
+  };
+  const styleChipAtRect = (chip, x, y, h, alpha = 1) => {
+    const placeAbove = y > 64;
+    const chipTop = placeAbove ? Math.max(12, y - 40) : Math.min(window.innerHeight - 48, y + h + 12);
+    const chipLeft = clamp(x, 16, Math.max(16, window.innerWidth - 320));
+    chip.style.cssText = [
+      "position:fixed",
+      "left:" + formatCoord(chipLeft) + "px",
+      "top:" + formatCoord(chipTop) + "px",
+      "display:inline-flex",
+      "align-items:center",
+      "gap:8px",
+      "padding:5px 12px",
+      "background:rgba(14, 14, 13, 0.94)",
+      "backdrop-filter:blur(12px)",
+      "border:1px solid rgba(255,255,255,0.16)",
+      "border-radius:999px",
+      "box-shadow:0 10px 24px rgba(0,0,0,0.42)",
+      "font-size:12px",
+      "font-weight:600",
+      "color:#f4f3ef",
+      "white-space:nowrap",
+      "opacity:" + formatCoord(alpha),
+    ].join(";");
+  };
+
+  // Tactile specular bloom + SVG variable-stroke shockwave ring
   const spawnClickPulse = (x, y, phase) => {
     const now = performance.now();
-    const clickStyle = state.options.clickStyle || "tactile-bloom";
     const R = 24 * Math.pow(Math.max(1, state.camera.scale), 0.25);
 
     if (phase === "down") {
@@ -286,122 +315,6 @@ export const ghostCursorClientSource = `(() => {
           halo.setAttribute("opacity", formatCoord(0.55 * (1 - e)));
           dot.setAttribute("r", formatCoord(2.2 + 2.6 * Math.sin(u * PI)));
           dot.setAttribute("opacity", formatCoord(1 - u * 0.6));
-        },
-      });
-      return;
-    }
-
-    if (clickStyle === "minimal-press") {
-      const svg = createSvgOverlay(x, y, 64);
-      const outer = document.createElementNS(svgNamespace, "circle");
-      outer.setAttribute("fill", "none");
-      outer.setAttribute("stroke", "rgba(24, 24, 27, 0.45)");
-      const inner = document.createElementNS(svgNamespace, "circle");
-      inner.setAttribute("fill", "none");
-      inner.setAttribute("stroke", "#fafaf9");
-      svg.append(outer, inner);
-      state.effects.push({
-        el: svg,
-        startTime: now,
-        durationMs: 210,
-        step: (u) => {
-          const e = easeOutQuart(u);
-          const r = 3.5 + (R * 0.65 - 3.5) * e;
-          const sw = 2.2 * (1 - 0.78 * e);
-          const alpha = 1 - Math.pow(u, 1.5);
-          outer.setAttribute("r", formatCoord(r));
-          outer.setAttribute("stroke-width", formatCoord(sw + 1.4));
-          outer.setAttribute("opacity", formatCoord(alpha * 0.55));
-          inner.setAttribute("r", formatCoord(r));
-          inner.setAttribute("stroke-width", formatCoord(sw));
-          inner.setAttribute("opacity", formatCoord(alpha));
-        },
-      });
-      return;
-    }
-
-    if (clickStyle === "precision-reticle") {
-      const svg = createSvgOverlay(x, y, 110);
-      const contrastRing = document.createElementNS(svgNamespace, "circle");
-      contrastRing.setAttribute("fill", "none");
-      contrastRing.setAttribute("stroke", "rgba(18, 18, 20, 0.55)");
-      const mainRing = document.createElementNS(svgNamespace, "circle");
-      mainRing.setAttribute("fill", "none");
-      mainRing.setAttribute("stroke", "#fafaf9");
-      svg.append(contrastRing, mainRing);
-      const angles = [45, 135, 225, 315].map((deg) => (deg * PI) / 180);
-      const tickEls = angles.map(() => {
-        const line = document.createElementNS(svgNamespace, "line");
-        line.setAttribute("stroke", "#e0b35a");
-        line.setAttribute("stroke-width", "1.6");
-        line.setAttribute("stroke-linecap", "round");
-        svg.appendChild(line);
-        return line;
-      });
-      state.effects.push({
-        el: svg,
-        startTime: now,
-        durationMs: 320,
-        step: (u) => {
-          const e = easeOutExpo(u);
-          const r = 4.5 + (R - 4.5) * e;
-          const sw = 2.5 * (1 - 0.82 * e);
-          const alpha = 1 - Math.pow(u, 1.6);
-          contrastRing.setAttribute("r", formatCoord(r));
-          contrastRing.setAttribute("stroke-width", formatCoord(sw + 1.5));
-          contrastRing.setAttribute("opacity", formatCoord(alpha * 0.6));
-          mainRing.setAttribute("r", formatCoord(r));
-          mainRing.setAttribute("stroke-width", formatCoord(sw));
-          mainRing.setAttribute("opacity", formatCoord(alpha));
-          const rInner = r + 2.5;
-          const rOuter = rInner + 4.5 * (1 - 0.5 * e);
-          angles.forEach((ang, idx) => {
-            const l = tickEls[idx];
-            l.setAttribute("x1", formatCoord(Math.cos(ang) * rInner));
-            l.setAttribute("y1", formatCoord(Math.sin(ang) * rInner));
-            l.setAttribute("x2", formatCoord(Math.cos(ang) * rOuter));
-            l.setAttribute("y2", formatCoord(Math.sin(ang) * rOuter));
-            l.setAttribute("opacity", formatCoord(alpha * 0.95));
-          });
-        },
-      });
-      return;
-    }
-
-    if (clickStyle === "double-wave") {
-      const svg = createSvgOverlay(x, y, 110);
-      const c1 = document.createElementNS(svgNamespace, "circle");
-      const w1 = document.createElementNS(svgNamespace, "circle");
-      const w2 = document.createElementNS(svgNamespace, "circle");
-      for (const el of [c1, w1, w2]) el.setAttribute("fill", "none");
-      c1.setAttribute("stroke", "rgba(18, 18, 20, 0.5)");
-      w1.setAttribute("stroke", "#fafaf9");
-      w2.setAttribute("stroke", "rgba(224, 179, 90, 0.88)");
-      svg.append(c1, w2, w1);
-      state.effects.push({
-        el: svg,
-        startTime: now,
-        durationMs: 350,
-        step: (u) => {
-          const e1 = easeOutExpo(clamp(u * 1.12, 0, 1));
-          const r1 = 4 + (R - 4) * e1;
-          const sw1 = 2.6 * (1 - 0.84 * e1);
-          const a1 = 1 - clamp(u * 1.12, 0, 1);
-          c1.setAttribute("r", formatCoord(r1));
-          c1.setAttribute("stroke-width", formatCoord(sw1 + 1.5));
-          c1.setAttribute("opacity", formatCoord(a1 * 0.6));
-          w1.setAttribute("r", formatCoord(r1));
-          w1.setAttribute("stroke-width", formatCoord(sw1));
-          w1.setAttribute("opacity", formatCoord(a1));
-
-          const u2 = clamp((u - 0.14) / 0.86, 0, 1);
-          const e2 = easeOutQuart(u2);
-          const r2 = 3 + (R * 0.72 - 3) * e2;
-          const sw2 = 1.8 * (1 - 0.78 * e2);
-          const a2 = u < 0.14 ? 0 : (1 - u2) * 0.85;
-          w2.setAttribute("r", formatCoord(r2));
-          w2.setAttribute("stroke-width", formatCoord(sw2));
-          w2.setAttribute("opacity", formatCoord(a2));
         },
       });
       return;
@@ -471,7 +384,6 @@ export const ghostCursorClientSource = `(() => {
       state.camera.tx = clamp(vw / 2 - fx * scale, vw * (1 - scale), 0);
       state.camera.ty = clamp(vh / 2 - fy * scale, vh * (1 - scale), 0);
       applyCamera();
-      // Keep an idle cursor anchored to its underlying page coordinate while the camera pans/zooms
       if (!state.flight && ca.cursorPageX !== undefined) {
         state.renderedX = ca.cursorPageX * state.camera.scale + state.camera.tx;
         state.renderedY = ca.cursorPageY * state.camera.scale + state.camera.ty;
@@ -517,7 +429,6 @@ export const ghostCursorClientSource = `(() => {
   const stepMotion = (timestamp, dt) => {
     stepEffects(timestamp);
     const camActive = stepCameraAndSpotlight(timestamp);
-    const style = state.options.style || "distance-glide";
     const pressed = state.element?.dataset.pressed === "true";
     const pressDip = pressed ? -4.5 : 0;
 
@@ -534,15 +445,8 @@ export const ghostCursorClientSource = `(() => {
       state.vy = (state.renderedY - prevY) / dt;
 
       const bell = Math.pow(Math.sin(PI * Math.pow(u, 0.82)), 1.15);
-      let targetDeg = 0;
-      if (style === "distance-glide") {
-        const bankDir = clamp((f.bezier.x1 - f.bezier.x0) / Math.max(40, f.dist), -1, 1) * 0.72 + state.arcSign * 0.28;
-        targetDeg = bankDir * 28 * f.farFactor * bell;
-      } else if (style === "far-airplane") {
-        const rawDeltaDeg = (wrapPi(sample.heading - NOSE_HEADING) * 180) / PI;
-        const clampedDelta = clamp(rawDeltaDeg, -55, 55);
-        targetDeg = clampedDelta * f.farFactor * bell;
-      }
+      const bankDir = clamp((f.bezier.x1 - f.bezier.x0) / Math.max(40, f.dist), -1, 1) * 0.72 + state.arcSign * 0.28;
+      const targetDeg = bankDir * 28 * f.farFactor * bell;
       state.deg += (targetDeg + pressDip - state.deg) * Math.min(1, dt * 30);
 
       if (u >= 1) {
@@ -554,8 +458,8 @@ export const ghostCursorClientSource = `(() => {
         flushFlightResolvers();
       }
     } else {
-      const omega = style === "minimal-spring" ? 30 : 26;
-      const zeta = style === "minimal-spring" ? 0.95 : 0.88;
+      const omega = 26;
+      const zeta = 0.88;
       const k = omega * omega;
       const c = 2 * zeta * omega;
       const substeps = 4;
@@ -579,9 +483,8 @@ export const ghostCursorClientSource = `(() => {
         flushFlightResolvers();
       }
 
-      const maxTilt = style === "minimal-spring" ? 7 : 16;
       const distScale = smoothstep(35, 190, state.lastMoveDist);
-      const velTilt = clamp((state.vx * 0.015 - state.vy * 0.005) * (0.3 + 0.7 * distScale), -maxTilt, maxTilt);
+      const velTilt = clamp((state.vx * 0.015 - state.vy * 0.005) * (0.3 + 0.7 * distScale), -16, 16);
       const targetDeg = velTilt + pressDip;
       const rotAcc = -380 * (state.deg - targetDeg) - 35 * state.vDeg;
       state.vDeg += rotAcc * dt;
@@ -640,9 +543,7 @@ export const ghostCursorClientSource = `(() => {
     }
   };
   const applyVisualOptions = () => {
-    if (!state.element) {
-      return;
-    }
+    if (!state.element) return;
     state.element.style.width = state.options.size + "px";
     state.element.style.height = state.options.size + "px";
     state.element.style.zIndex = String(state.options.zIndex);
@@ -823,10 +724,9 @@ export const ghostCursorClientSource = `(() => {
     const ny = dx / dist;
     flushFlightResolvers();
 
-    if (style === "spring-inertia" || style === "minimal-spring") {
-      const arcFactor = style === "minimal-spring" ? 0.04 : 0.13;
+    if (style === "spring-inertia") {
       const distGate = smoothstep(38, 190, dist);
-      const kick = dist * arcFactor * distGate * state.arcSign * 5.2;
+      const kick = dist * 0.13 * distGate * state.arcSign * 5.2;
       state.vx += nx * kick;
       state.vy += ny * kick;
       state.flight = null;
@@ -851,10 +751,8 @@ export const ghostCursorClientSource = `(() => {
       });
     }
 
-    const farGateStart = style === "far-airplane" ? 110 : 50;
-    const farGateEnd = style === "far-airplane" ? 280 : 220;
-    const farFactor = smoothstep(farGateStart, farGateEnd, dist);
-    const arcOffset = dist * (style === "far-airplane" ? 0.2 : 0.16) * farFactor * state.arcSign;
+    const farFactor = smoothstep(50, 220, dist);
+    const arcOffset = dist * 0.16 * farFactor * state.arcSign;
     const durationMs = clamp(125 + Math.sqrt(dist) * 6.2, 125, 315);
     state.flight = {
       startTime: performance.now(),
@@ -897,7 +795,6 @@ export const ghostCursorClientSource = `(() => {
     return next;
   };
 
-  // Screen Studio-style smooth 60Hz camera zoom & pan (interpolating page-space focus + log-scale)
   const zoomTo = (payload) => {
     const vw = window.innerWidth;
     const vh = window.innerHeight;
@@ -938,7 +835,6 @@ export const ghostCursorClientSource = `(() => {
     });
   };
 
-  // Smoothly morphing dimmed spotlight cutout + optional label pill
   const setSpotlight = (payload) => {
     const stage = ensureStage();
     if (!payload?.rect) {
@@ -980,8 +876,7 @@ export const ghostCursorClientSource = `(() => {
         alpha: 0,
         dim,
         toneColor,
-        label: payload.options?.label || "",
-        detail: payload.options?.detail || "",
+        label: "",
         render() {
           const sp = this;
           sp.hole.style.cssText = [
@@ -996,32 +891,9 @@ export const ghostCursorClientSource = `(() => {
             "opacity:" + formatCoord(sp.alpha),
             "box-sizing:border-box",
           ].join(";");
-          if (!sp.label) {
-            sp.chip.style.display = "none";
-            return;
+          if (sp.label) {
+            styleChipAtRect(sp.chip, sp.x, sp.y, sp.h, sp.alpha);
           }
-          const placeAbove = sp.y > 64;
-          const chipTop = placeAbove ? Math.max(12, sp.y - 40) : Math.min(window.innerHeight - 48, sp.y + sp.h + 12);
-          const chipLeft = clamp(sp.x, 16, Math.max(16, window.innerWidth - 320));
-          sp.chip.style.cssText = [
-            "position:fixed",
-            "left:" + formatCoord(chipLeft) + "px",
-            "top:" + formatCoord(chipTop) + "px",
-            "display:inline-flex",
-            "align-items:center",
-            "gap:8px",
-            "padding:5px 12px",
-            "background:rgba(14, 14, 13, 0.94)",
-            "backdrop-filter:blur(12px)",
-            "border:1px solid rgba(255,255,255,0.16)",
-            "border-radius:999px",
-            "box-shadow:0 10px 24px rgba(0,0,0,0.42)",
-            "font-size:12px",
-            "font-weight:600",
-            "color:#f4f3ef",
-            "white-space:nowrap",
-            "opacity:" + formatCoord(sp.alpha),
-          ].join(";");
         },
       };
     }
@@ -1029,21 +901,7 @@ export const ghostCursorClientSource = `(() => {
     sp.dim = dim;
     sp.toneColor = toneColor;
     sp.label = payload.options?.label || "";
-    sp.detail = payload.options?.detail || "";
-    sp.chip.replaceChildren();
-    if (sp.label) {
-      const dot = document.createElement("span");
-      dot.style.cssText = "width:7px;height:7px;border-radius:999px;background:" + toneColor + ";flex-shrink:0;";
-      const txt = document.createElement("span");
-      txt.textContent = sp.label;
-      sp.chip.append(dot, txt);
-      if (sp.detail) {
-        const det = document.createElement("span");
-        det.textContent = sp.detail;
-        det.style.cssText = "font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;font-weight:500;color:#9ca3af;";
-        sp.chip.appendChild(det);
-      }
-    }
+    populateChip(sp.chip, toneColor, sp.label, payload.options?.detail);
 
     return new Promise((resolve) => {
       state.spotlightAnim = {
@@ -1058,7 +916,6 @@ export const ghostCursorClientSource = `(() => {
     });
   };
 
-  // macOS KeyCastr / Screen Studio keycap HUD pill
   const showKeys = (payload) => {
     if (!payload?.keys?.length) return;
     const stage = ensureStage();
@@ -1203,44 +1060,14 @@ export const ghostCursorClientSource = `(() => {
       "box-sizing:border-box",
     ].join(";");
 
-    const placeAbove = y > 68;
-    const chipTop = placeAbove ? Math.max(12, y - 42) : Math.min(window.innerHeight - 48, y + height + 12);
-    const chipLeft = clamp(x, 16, Math.max(16, window.innerWidth - 320));
     const chip = document.createElement("div");
-    chip.style.cssText = [
-      "position:fixed",
-      "left:" + formatCoord(chipLeft) + "px",
-      "top:" + formatCoord(chipTop) + "px",
-      "display:inline-flex",
-      "align-items:center",
-      "gap:8px",
-      "padding:5px 11px",
-      "background:rgba(14, 14, 13, 0.92)",
-      "backdrop-filter:blur(12px)",
-      "border:1px solid rgba(255,255,255,0.15)",
-      "border-radius:999px",
-      "box-shadow:0 8px 20px rgba(0,0,0,0.32)",
-      "font-size:12px",
-      "font-weight:600",
-      "color:#f4f3ef",
-      "white-space:nowrap",
-    ].join(";");
-    const dot = document.createElement("span");
-    dot.style.cssText = "width:7px;height:7px;border-radius:999px;background:" + toneColor + ";flex-shrink:0;";
-    const text = document.createElement("span");
-    text.textContent = payload.label;
-    chip.append(dot, text);
-    if (payload.options?.detail) {
-      const detail = document.createElement("span");
-      detail.textContent = payload.options.detail;
-      detail.style.cssText = "font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;font-weight:500;color:#9ca3af;";
-      chip.appendChild(detail);
-    }
+    populateChip(chip, toneColor, payload.label, payload.options?.detail);
+    styleChipAtRect(chip, x, y, height, 1);
     container.append(ring, chip);
     stage.appendChild(container);
   };
   globalThis.__browserControlGhostCursor = {
-    version: 11,
+    version: 12,
     show,
     hide,
     restore,
@@ -1310,8 +1137,17 @@ export function ghostCursorRestoreExpression(position: { readonly x: number; rea
   return `globalThis.__browserControlGhostCursor?.restore(${JSON.stringify(position)})`
 }
 
+async function ensureGhostCursor(page: Page): Promise<void> {
+  await page.evaluate(ghostCursorClientSource)
+}
+
+async function resolveTargetBox(page: Page, target: Locator | string): Promise<GhostCursorRect | null> {
+  const locator = Predicate.isString(target) ? page.locator(target) : target
+  return await locator.first().boundingBox()
+}
+
 export async function showGhostCursor(options: { readonly page: Page; readonly cursorOptions?: GhostCursorClientOptions }): Promise<void> {
-  await options.page.evaluate(ghostCursorClientSource)
+  await ensureGhostCursor(options.page)
   const payload: GhostCursorEvaluatePayload = options.cursorOptions ? { cursorOptions: options.cursorOptions } : {}
   await options.page.evaluate(
     (payload: GhostCursorEvaluatePayload) => {
@@ -1334,7 +1170,7 @@ export async function setGhostCursorCaption(options: {
   readonly title: string | null
   readonly captionOptions?: GhostCursorCaptionOptions
 }): Promise<void> {
-  await options.page.evaluate(ghostCursorClientSource)
+  await ensureGhostCursor(options.page)
   const payload: GhostCursorCaptionPayload | null = options.title
     ? { title: options.title, ...(options.captionOptions ? { options: options.captionOptions } : {}) }
     : null
@@ -1350,9 +1186,8 @@ export async function showGhostCursorCallout(options: {
   readonly label: string
   readonly calloutOptions?: GhostCursorCalloutOptions
 }): Promise<void> {
-  await options.page.evaluate(ghostCursorClientSource)
-  const locator = Predicate.isString(options.target) ? options.page.locator(options.target) : options.target
-  const box = await locator.first().boundingBox()
+  await ensureGhostCursor(options.page)
+  const box = await resolveTargetBox(options.page, options.target)
   if (!box) return
   const payload: GhostCursorCalloutPayload = {
     rect: box,
@@ -1377,20 +1212,17 @@ export async function zoomGhostCursorCamera(options: {
   readonly target: Locator | string | { readonly x: number; readonly y: number } | null
   readonly zoomOptions?: GhostCursorZoomOptions
 }): Promise<void> {
-  await options.page.evaluate(ghostCursorClientSource)
+  await ensureGhostCursor(options.page)
   let rect: GhostCursorRect | null = null
   if (options.target !== null) {
-    if (Predicate.isString(options.target) || "boundingBox" in options.target) {
-      const locator = Predicate.isString(options.target) ? options.page.locator(options.target) : options.target
-      rect = await locator.first().boundingBox()
-    } else {
-      rect = { x: options.target.x, y: options.target.y, width: 1, height: 1 }
-    }
+    rect = (Predicate.isString(options.target) || "boundingBox" in options.target)
+      ? await resolveTargetBox(options.page, options.target)
+      : { x: options.target.x, y: options.target.y, width: 1, height: 1 }
   }
   const payload: GhostCursorZoomPayload = {
     rect,
     scale: options.target === null ? 1 : (options.zoomOptions?.scale ?? 1.75),
-    durationMs: options.zoomOptions?.durationMs ?? 320,
+    durationMs: options.zoomOptions?.durationMs ?? 360,
   }
   await options.page.evaluate(async (zoomPayload: GhostCursorZoomPayload) => {
     const api = (globalThis as { __browserControlGhostCursor?: GhostCursorBrowserApi }).__browserControlGhostCursor
@@ -1403,12 +1235,8 @@ export async function setGhostCursorSpotlight(options: {
   readonly target: Locator | string | null
   readonly spotlightOptions?: GhostCursorSpotlightOptions
 }): Promise<void> {
-  await options.page.evaluate(ghostCursorClientSource)
-  let rect: GhostCursorRect | null = null
-  if (options.target !== null) {
-    const locator = Predicate.isString(options.target) ? options.page.locator(options.target) : options.target
-    rect = await locator.first().boundingBox()
-  }
+  await ensureGhostCursor(options.page)
+  const rect = options.target !== null ? await resolveTargetBox(options.page, options.target) : null
   const payload: GhostCursorSpotlightPayload = {
     rect,
     ...(options.spotlightOptions ? { options: options.spotlightOptions } : {}),
@@ -1424,7 +1252,7 @@ export async function showGhostCursorKeys(options: {
   readonly keys: string | readonly string[]
   readonly label?: string
 }): Promise<void> {
-  await options.page.evaluate(ghostCursorClientSource)
+  await ensureGhostCursor(options.page)
   const keys = Predicate.isString(options.keys) ? options.keys.split("+").map((k) => k.trim()).filter(Boolean) : options.keys
   const payload: GhostCursorKeysPayload = {
     keys,

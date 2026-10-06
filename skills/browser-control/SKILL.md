@@ -59,12 +59,14 @@ after five seconds if the page execution context remains unavailable; the read
 timeout does not close or replace the tab.
 
 A bare CLI execute creates a fresh session-owned page and prints the exact
-`--session <id>` continuation command. Every later CLI call must pass that id or
-set `BROWSER_CONTROL_SESSION`; bare execute never guesses from human-shell
-current state.
+`--session <id>` continuation command, or you can pass a descriptive session
+name (including an optional emoji, which appears directly on the browser tab
+group and in-page status pill). Every later CLI call must pass that id or set
+`BROWSER_CONTROL_SESSION`; bare execute never guesses from human-shell current
+state.
 
 ```bash
-browser-control execute 'return page.url()'
+browser-control execute --session "🎙️ elevenlabs" 'return page.url()'
 browser-control execute --session cosmic-otter-866 'return page.url()'
 ```
 
