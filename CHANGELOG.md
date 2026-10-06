@@ -1,5 +1,20 @@
 # @opencode-ai/browser-control
 
+## 0.8.4
+
+### Patch Changes
+
+- 6acc64f: - Add biomechanical pointer, scroll, and keyboard pacing (`src/human-input.ts`, `src/human-model.ts`) synchronized with `GhostCursor` (`src/ghost-cursor.ts`), plus empirical model fitting from the Cloudflare motor calibration obstacle course.
+  - Serialize per-tab `Input.*` and `DOM.scrollIntoViewIfNeeded` transactions with target freshness checks, and clear root `protectedUi` when restricted child frames navigate back to ordinary documents.
+  - Acknowledge `Page.screencastFrame` immediately inside the extension service worker and preserve unscaled backing surfaces so `ffmpeg` crops emulated `setViewportSize` regions without black compositor padding.
+  - Keep Browser Control tab groups expanded, format auto-generated session IDs as `🤖 <site/title>`, preserve attached tabs across `POST /extension/reload`, and reap abandoned relay-owned tabs after the idle TTL.
+  - Promote sibling tab bars, top-level `<nav>` fallback headers, and clickable `<tr>` cell summaries in `snapshot()` while preserving `mainRoot` when Radix/Floating UI portals are open.
+- 86fb059: - Preserve `about:blank` and newly navigated documents during session-page recovery, and clear crash evidence on target replacement and main-frame navigation.
+  - Use `NodeHttpClient.layerNodeHttp` in `RelayClient` and disable `httpServer.requestTimeout` so long `handoff()` and `secrets run` requests do not fail after five minutes with `HeadersTimeoutError`.
+  - Guard `snapshot()` when `document.body` is absent during early navigation, traverse open Shadow DOM controls, include `<input type="button|submit|reset">` values in accessible names, and prefer visible button text and native `<label>` text over `title` attributes so snapshot refs match Playwright `getByRole`.
+  - Allow `session adopt` and MCP `session_adopt` to omit `--target-url`/`--target-index` when adopting a single user-attached tab, register `screenshotWithLabels()` refs for `ref(id)`, bound `page.content()` with the 5-second read watchdog, and surface pointer-interception blocker warnings.
+  - Wait a full 30-second MV3 alarm period plus margin (`35s`) for a sleeping extension worker to reconnect, explain Node-side `window`/relative `fetch` errors in `execute`, include the file-system reason in `execute --file` errors, and stage `pnpm build:extension` outputs atomically.
+
 ## 0.8.3
 
 ### Patch Changes
