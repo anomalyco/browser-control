@@ -1113,7 +1113,7 @@ export class ExecuteSandbox {
       if (this.page === page && frame === page.mainFrame()) {
         this.pageCrashed = false
         this.recordNonBlankUrl(frame.url())
-        page.setDefaultTimeout(30_000)
+        page.setDefaultTimeout?.(30_000)
         if (this.explicitLightColorScheme) {
           void this.applyExplicitLightColorScheme(page)
         }
@@ -1265,27 +1265,31 @@ export class ExecuteSandbox {
   }
 
   private installClosedPageReplacementGuard(page: Page): void {
-    page.setDefaultTimeout(2_500)
+    page.setDefaultTimeout?.(2_500)
     const restoreTimeout = () => {
       this.recreatedFromClosedUrl = undefined
-      page.setDefaultTimeout(30_000)
+      page.setDefaultTimeout?.(30_000)
     }
-    const originalGoto = page.goto.bind(page)
-    const originalSetContent = page.setContent.bind(page)
-    Object.defineProperty(page, "goto", {
-      configurable: true,
-      value: async (...args: Parameters<Page["goto"]>) => {
-        restoreTimeout()
-        return await originalGoto(...args)
-      },
-    })
-    Object.defineProperty(page, "setContent", {
-      configurable: true,
-      value: async (...args: Parameters<Page["setContent"]>) => {
-        restoreTimeout()
-        return await originalSetContent(...args)
-      },
-    })
+    if (typeof page.goto === "function") {
+      const originalGoto = page.goto.bind(page)
+      Object.defineProperty(page, "goto", {
+        configurable: true,
+        value: async (...args: Parameters<Page["goto"]>) => {
+          restoreTimeout()
+          return await originalGoto(...args)
+        },
+      })
+    }
+    if (typeof page.setContent === "function") {
+      const originalSetContent = page.setContent.bind(page)
+      Object.defineProperty(page, "setContent", {
+        configurable: true,
+        value: async (...args: Parameters<Page["setContent"]>) => {
+          restoreTimeout()
+          return await originalSetContent(...args)
+        },
+      })
+    }
   }
 
   private async applyExplicitLightColorScheme(page: Page): Promise<void> {
@@ -1306,45 +1310,49 @@ export class ExecuteSandbox {
 
   private installViewportZoomGuard(page: Page): void {
     if (viewportZoomGuardedPages.has(page)) return
-    const originalEmulateMedia = page.emulateMedia.bind(page)
-    Object.defineProperty(page, "emulateMedia", {
-      configurable: true,
-      value: async (options?: Parameters<Page["emulateMedia"]>[0]) => {
-        if (options && "colorScheme" in options) {
-          this.explicitLightColorScheme = options.colorScheme === "light"
-        }
-        await originalEmulateMedia(options)
-        if (this.explicitLightColorScheme) {
-          await this.applyExplicitLightColorScheme(page)
-        }
-      },
-    })
-    const originalSetViewportSize = page.setViewportSize.bind(page)
-    Object.defineProperty(page, "setViewportSize", {
-      configurable: true,
-      value: async (size: { width: number; height: number }) => {
-        await originalSetViewportSize(size)
-        try {
-          const measured = await withTimeout(
-            page.evaluate(() => ({
-              innerWidth: window.innerWidth,
-              innerHeight: window.innerHeight,
-              dpr: window.devicePixelRatio,
-            })),
-            1_000,
-          )
-          if (
-            measured !== timedOut
-            && (Math.abs(measured.innerWidth - size.width) > 2 || Math.abs(measured.innerHeight - size.height) > 2)
-          ) {
-            const warning = `Viewport size ${size.width}x${size.height} resulted in CSS viewport ${measured.innerWidth}x${measured.innerHeight} (devicePixelRatio=${Number(measured.dpr.toFixed(3))}) due to browser zoom on this origin.`
-            if (!this.pendingWarnings.includes(warning)) {
-              this.pendingWarnings.push(warning)
-            }
+    if (typeof page.emulateMedia === "function") {
+      const originalEmulateMedia = page.emulateMedia.bind(page)
+      Object.defineProperty(page, "emulateMedia", {
+        configurable: true,
+        value: async (options?: Parameters<Page["emulateMedia"]>[0]) => {
+          if (options && "colorScheme" in options) {
+            this.explicitLightColorScheme = options.colorScheme === "light"
           }
-        } catch {}
-      },
-    })
+          await originalEmulateMedia(options)
+          if (this.explicitLightColorScheme) {
+            await this.applyExplicitLightColorScheme(page)
+          }
+        },
+      })
+    }
+    if (typeof page.setViewportSize === "function") {
+      const originalSetViewportSize = page.setViewportSize.bind(page)
+      Object.defineProperty(page, "setViewportSize", {
+        configurable: true,
+        value: async (size: { width: number; height: number }) => {
+          await originalSetViewportSize(size)
+          try {
+            const measured = await withTimeout(
+              page.evaluate(() => ({
+                innerWidth: window.innerWidth,
+                innerHeight: window.innerHeight,
+                dpr: window.devicePixelRatio,
+              })),
+              1_000,
+            )
+            if (
+              measured !== timedOut
+              && (Math.abs(measured.innerWidth - size.width) > 2 || Math.abs(measured.innerHeight - size.height) > 2)
+            ) {
+              const warning = `Viewport size ${size.width}x${size.height} resulted in CSS viewport ${measured.innerWidth}x${measured.innerHeight} (devicePixelRatio=${Number(measured.dpr.toFixed(3))}) due to browser zoom on this origin.`
+              if (!this.pendingWarnings.includes(warning)) {
+                this.pendingWarnings.push(warning)
+              }
+            }
+          } catch {}
+        },
+      })
+    }
     viewportZoomGuardedPages.add(page)
   }
 
@@ -1607,7 +1615,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         scopes.set(locator, locatorScope)
       }
     }
-    const depth = Math.max(1, Math.min(12, Math.floor(options.depth ?? 6)))
+    const depth = Math.max(1, Math.min(16, Math.floor(options.depth ?? 10)))
     const maxItems = Math.max(1, Math.min(200, Math.floor(options.maxItems ?? 80)))
     const settings = {
       compact: options.compact ?? true,
@@ -1712,6 +1720,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         while (node) {
           const parent = node instanceof Element ? node : node.parentElement
           let hidden = false
+          let replacedByAncestorAria = false
           let ancestor = parent
           while (ancestor && element.contains(ancestor)) {
             const style = window.getComputedStyle(ancestor)
@@ -1719,11 +1728,20 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
               hidden = true
               break
             }
+            if (ancestor !== element && ancestor !== node && (ancestor.hasAttribute("aria-label") || ancestor.hasAttribute("aria-labelledby"))) {
+              replacedByAncestorAria = true
+            }
             if (ancestor === element) break
             ancestor = ancestor.parentElement
           }
-          if (!hidden && !parent?.closest("input, textarea, select, script, style, noscript, template")) {
-            if (node.nodeType === Node.TEXT_NODE) {
+          if (!hidden && !replacedByAncestorAria && !parent?.closest("input, textarea, select, script, style, noscript, template")) {
+            if (node instanceof Element && node !== element && (node.hasAttribute("aria-label") || node.hasAttribute("aria-labelledby"))) {
+              const ariaText = explicitAriaName(node)
+              if (ariaText) {
+                parts.push(` ${ariaText} `)
+                lastBlock = undefined
+              }
+            } else if (node.nodeType === Node.TEXT_NODE) {
               const block = nearestBlock(parent)
               if (lastBlock && lastBlock !== block) parts.push(" ")
               parts.push(node.textContent ?? "")
@@ -1750,27 +1768,40 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         }
         return normalize(parts.join(""))
       }
-      const accessibleName = (element: Element): string => {
+      const authorAccessibleName = (element: Element): string => {
         const labelled = explicitAriaName(element)
         if (labelled) return labelled
-        if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+        if (
+          element instanceof HTMLInputElement ||
+          element instanceof HTMLTextAreaElement ||
+          element instanceof HTMLSelectElement ||
+          element instanceof HTMLButtonElement
+        ) {
           const label = element.labels?.[0]
           if (label) {
             const labelText = safeText(label)
             if (labelText) return labelText
           }
-          if (element instanceof HTMLInputElement && (element.type === "button" || element.type === "submit" || element.type === "reset")) {
-            const buttonValue = normalize(element.value || (element.type === "submit" ? "Submit" : element.type === "reset" ? "Reset" : ""))
-            if (buttonValue) return buttonValue
-          }
-          const title = titleName(element)
-          if (title) return title
-          const placeholder = element.getAttribute("placeholder")
-          if (placeholder) return normalize(placeholder)
-          return ""
+        }
+        if (element instanceof HTMLInputElement && (element.type === "button" || element.type === "submit" || element.type === "reset")) {
+          const buttonValue = normalize(element.value || (element.type === "submit" ? "Submit" : element.type === "reset" ? "Reset" : ""))
+          if (buttonValue) return buttonValue
+        }
+        const title = titleName(element)
+        if (title) return title
+        const placeholder = element.getAttribute("placeholder")
+        if (placeholder) return normalize(placeholder)
+        return ""
+      }
+      const accessibleName = (element: Element): string => {
+        const labelled = explicitAriaName(element)
+        if (labelled) return labelled
+        if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement) {
+          return authorAccessibleName(element)
         }
         const alt = element.getAttribute("alt")
-        return normalize(alt || safeText(element) || titleName(element))
+        const childAria = element.querySelector?.("[aria-label]")?.getAttribute("aria-label") || element.querySelector?.("svg title")?.textContent || ""
+        return normalize(alt || safeText(element) || titleName(element) || childAria)
       }
       const roleFor = (element: Element): string => {
         const explicit = element.getAttribute("role")
@@ -1847,6 +1878,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         if (role === "listitem") return safeText(element)
         return ""
       }
+      let autoScopedMain = false
       const root = rootOrSettings instanceof Element
         ? rootOrSettings
         : (() => {
@@ -1862,11 +1894,24 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
             const dialogs = Array.from(document.querySelectorAll("dialog, [role='dialog'], [role='alertdialog']")).filter(isVisible)
             const modals = dialogs.filter((dialog) => dialog.matches(":modal, [aria-modal='true']"))
             if (modals.length === 1) return modals[0] as Element
+            const isOpenListboxOrMenu = (menu: Element): boolean => {
+              if (!isVisible(menu)) return false
+              if (menu.getAttribute("aria-label") === "slider" || menu.getAttribute("aria-roledescription") === "carousel") return false
+              const items = Array.from(menu.querySelectorAll("[role='option'], [role^='menuitem']")).filter(isVisible)
+              return items.length > 0 && !items.some((item) => item.getAttribute("role") === "option" && item.querySelector?.("a[href], button"))
+            }
+            const portalMenus = Array.from(document.querySelectorAll("[role='listbox'], [role='menu']")).filter(isOpenListboxOrMenu)
+            const mains = Array.from(document.querySelectorAll("main")).filter(isVisible)
             // Portals commonly sit beside main. Keep them in scope even when
             // several dialogs are open or the dialog is non-modal.
-            if (dialogs.length > 0) return fallbackRoot
-            const mains = Array.from(document.querySelectorAll("main")).filter(isVisible)
-            return mains.length === 1 ? mains[0] as Element : fallbackRoot
+            if (dialogs.length > 0 || (mains.length === 1 && portalMenus.some((menu) => !mains[0]!.contains?.(menu)))) {
+              return fallbackRoot
+            }
+            if (mains.length === 1) {
+              autoScopedMain = true
+              return mains[0] as Element
+            }
+            return fallbackRoot
           })()
       if (!root) {
         return { entries: [], truncated: false }
@@ -1879,6 +1924,10 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         if (element instanceof HTMLInputElement) {
           if (element.type === "checkbox" || element.type === "radio") details.push(element.checked ? "checked" : "unchecked")
         }
+        const ariaChecked = element.getAttribute("aria-checked")
+        if ((ariaChecked === "true" || ariaChecked === "false" || ariaChecked === "mixed") && !(element instanceof HTMLInputElement)) {
+          details.push(ariaChecked === "true" ? "checked" : ariaChecked === "false" ? "unchecked" : "checked=mixed")
+        }
         if (element instanceof HTMLSelectElement) {
           const selected = element.selectedOptions[0]?.textContent
           if (selected) details.push(`selected="${quote(normalize(selected).slice(0, 80))}"`)
@@ -1886,6 +1935,9 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         }
         if (element instanceof HTMLButtonElement || element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement) {
           if (element.disabled) details.push("disabled")
+        }
+        if (element.getAttribute("aria-disabled") === "true" && !details.includes("disabled")) {
+          details.push("disabled")
         }
         const expanded = element.getAttribute("aria-expanded")
         if (expanded) details.push(`expanded=${expanded}`)
@@ -1935,7 +1987,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           const candidate = `#${CSS.escape(id)}`
           if (scope.querySelectorAll(candidate).length === 1) return candidate
         }
-        for (const attribute of ["data-testid", "data-test", "name", "aria-label", "placeholder"]) {
+        for (const attribute of ["data-testid", "data-test-id", "data-test", "name", "aria-label", "placeholder"]) {
           const value = element.getAttribute(attribute)
           if (value) {
             const candidate = `[${attribute}="${CSS.escape(value)}"]`
@@ -1984,7 +2036,16 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         return level
       }
 
-      const structuralSelector = "fieldset, [role='group'], dialog, [role='dialog'], [role='alertdialog'], [role='tablist'], details, table, [role='table'], tr, [role='row'], ul, ol, [role='list'], li, [role='listitem'], pre"
+      const structuralSelector = "fieldset, [role='group'], dialog, [role='dialog'], [role='alertdialog'], [role='listbox'], [role='menu'], [role='tablist'], details, table, [role='table'], tr, [role='row'], ul, ol, [role='list'], li, [role='listitem'], pre"
+      const interactiveSelector = [
+        "a[href]", "button", "input", "textarea", "select", "summary",
+        "[role='button']", "[role='link']", "[role='tab']",
+        "[role='menuitem']", "[role='menuitemcheckbox']", "[role='menuitemradio']",
+        "[role='option']", "[role='switch']", "[role='checkbox']", "[role='radio']",
+        "[role='combobox']", "[role='searchbox']", "[role='textbox']",
+        "[role='slider']", "[role='spinbutton']", "[role='treeitem']",
+        "[contenteditable]",
+      ].join(",")
       const structuralKeys = new WeakMap<Element, string>()
       let nextStructuralKey = 1
       const structuralKey = (element: Element): string => {
@@ -2005,6 +2066,12 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       }
       const primaryLinks = new WeakMap<Element, Element | null>()
       const isPrimaryLink = (element: Element): boolean => {
+        if (
+          element.closest?.("h1, h2, h3, h4, h5, h6, [role='heading']") ||
+          element.querySelector?.("h1, h2, h3, h4, h5, h6, [role='heading']")
+        ) {
+          return true
+        }
         const group = element.closest("article, li, tr, dt, [role='listitem'], [role='row']")
         if (!group || !root.contains(group)) return false
         if (!primaryLinks.has(group)) {
@@ -2028,8 +2095,24 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         }
         return true
       }
-      const priorityFor = (options: { readonly role: string; readonly interactive: boolean; readonly primaryLink: boolean; readonly structuralEssential: boolean }): number => {
-        if (options.role === "alert" || options.role === "status" || options.role === "navigation" || options.structuralEssential) return -1
+      const isRedundantHeadingForLink = (element: Element): boolean => {
+        if (!settings.compact || element === root) return false
+        const parentInteractive = element.closest?.("a[href], button, [role='button'], [role='option'], [role='menuitem'], [role='menuitemradio'], [role='menuitemcheckbox']")
+        if (parentInteractive && (root.contains?.(parentInteractive) ?? true) && isVisible(parentInteractive)) {
+          return true
+        }
+        const childLinks = Array.from(element.querySelectorAll?.("a[href]") ?? []).filter(isVisible)
+        if (childLinks.length === 1) {
+          const headingText = accessibleName(element)
+          const linkText = accessibleName(childLinks[0]!)
+          if (headingText && linkText && (linkText === headingText || linkText.startsWith(headingText))) {
+            return true
+          }
+        }
+        return false
+      }
+      const priorityFor = (options: { readonly role: string; readonly interactive: boolean; readonly primaryLink: boolean; readonly structuralEssential: boolean; readonly inActiveOverlay: boolean }): number => {
+        if (options.role === "alert" || options.role === "status" || options.role === "navigation" || options.structuralEssential || options.inActiveOverlay) return -1
         if (options.role === "heading") return 0
         if (options.role === "link" && options.primaryLink) return 0
         if (options.interactive && (options.role !== "link" || options.primaryLink)) return 1
@@ -2051,10 +2134,19 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         "h1", "h2", "h3", "h4", "h5", "h6", "[role='heading']",
         "nav", "[role='navigation']", "[role='alert']", "[role='status']", "p",
         structuralSelector,
-        "a[href]", "button", "input", "textarea", "select", "summary",
-        "[role='button']", "[role='link']", "[role='tab']", "[role='menuitem']", "[contenteditable]",
+        interactiveSelector,
       ].join(",")
+      const headerSelector = "input, textarea, select, button, [role='searchbox'], [role='combobox'], [role='button'], a[href][aria-label]"
+      const headerRoots = autoScopedMain && typeof document.querySelectorAll === "function"
+        ? Array.from(document.querySelectorAll("header, [role='banner']")).filter((h) => isVisible(h) && !root.contains?.(h))
+        : []
+      const headerCandidateSet = new Set(
+        headerRoots.flatMap((h) =>
+          querySelectorAllDeep(h, headerSelector).filter((el) => !el.closest?.("nav, [role='navigation']")),
+        ),
+      )
       const candidates = [
+        ...headerCandidateSet,
         ...(root.matches(candidateSelector) ? [root] : []),
         ...querySelectorAllDeep(root, candidateSelector),
       ]
@@ -2067,8 +2159,15 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           break
         }
         if (!isVisible(element)) continue
-        const navigation = element.closest("nav, [role='navigation']")
-        if (settings.compact && navigation && navigation !== root) {
+        const navigation = element.closest?.("nav, [role='navigation'], aside, [role='complementary'], [data-slot='sidebar'], [data-sidebar='sidebar']") ?? null
+        const isCollapsibleNav = Boolean(
+          navigation &&
+          navigation !== root &&
+          !navigation.contains?.(root) &&
+          (navigation.matches("nav, [role='navigation']") ||
+            (navigation.querySelectorAll("a[href]").length >= 8 && !navigation.querySelector?.("h1, main, [role='main'], input, textarea, select"))),
+        )
+        if (settings.compact && isCollapsibleNav && navigation) {
           if (!collapsedNavigation.has(navigation)) {
             collapsedNavigation.add(navigation)
             const count = navigation.querySelectorAll("a[href], button").length
@@ -2078,26 +2177,55 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         }
         const role = roleFor(element)
         const isHeading = role === "heading"
-        const isInteractive = element.matches("a[href], button, input, textarea, select, summary, [role='button'], [role='link'], [role='tab'], [role='menuitem'], [contenteditable]")
+        if (isHeading && isRedundantHeadingForLink(element)) continue
+        if (
+          role === "combobox" &&
+          !(element instanceof HTMLInputElement || element instanceof HTMLButtonElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement) &&
+          element.querySelector?.("input, textarea, select")
+        ) {
+          continue
+        }
+        if (role === "option" && element.querySelector?.("a[href], button")) {
+          continue
+        }
+        const isInteractive = element.matches(interactiveSelector)
         const isSafetyText = role === "alert" || role === "status"
         const isParagraph = element.matches("p")
-        const isStructural = element.matches(structuralSelector)
+        const isStructural = !isInteractive && element.matches(structuralSelector)
+        if (isStructural && role === "listbox" && (element.getAttribute("aria-label") === "slider" || element.getAttribute("aria-roledescription") === "carousel")) {
+          continue
+        }
         if (!isHeading && !isInteractive && !isSafetyText && !isStructural && (settings.interactive || !isParagraph)) continue
         if (settings.interactive && isParagraph && !isSafetyText) continue
-        const identityName = isStructural ? structuralName(element, role) : accessibleName(element)
+        const displayName = isStructural ? structuralName(element, role) : accessibleName(element)
+        const nameFromAuthorOnly = role === "combobox" || role === "listbox" || role === "textbox" || role === "searchbox" || role === "spinbutton" || role === "slider"
+        const identityName = isInteractive
+          ? (nameFromAuthorOnly ? authorAccessibleName(element) : displayName)
+          : displayName
+        const isDisabled = ((element as HTMLButtonElement).disabled === true) || element.getAttribute("aria-disabled") === "true"
+        if (isInteractive && isDisabled && !displayName && !element.getAttribute("name")) continue
         const fallbackName = role === "group" ? "Group"
           : role === "dialog" || role === "alertdialog" ? "Dialog"
+          : role === "listbox" ? "Listbox"
+          : role === "menu" ? "Menu"
           : role === "table" ? "Table"
           : role === "list" ? "List"
           : role === "tablist" ? "Tab list"
-          : isInteractive ? element.getAttribute("name") || role
+          : isInteractive ? element.getAttribute("name") || element.getAttribute("data-testid") || element.getAttribute("data-test-id") || element.getAttribute("data-test") || role
           : ""
-        const name = truncate(identityName || fallbackName, isParagraph || isSafetyText || isStructural ? 180 : 120)
+        const name = truncate(displayName || fallbackName, isParagraph || isSafetyText || isStructural ? 180 : 120)
         if (!name) continue
         const details = isHeading ? `level=${headingDepth(element) + 1}` : detailsFor(element)
-        const primaryLink = role === "link" && isPrimaryLink(element)
+        const primaryLink = (role === "link" && isPrimaryLink(element)) || headerCandidateSet.has(element)
         const baseDepth = headingDepth(element)
         const parentKeys = structuralParentKeys(element)
+        const overlayAncestor = element.closest?.("dialog, [role='dialog'], [role='alertdialog'], [role='listbox'], [role='menu']") ?? null
+        const inActiveOverlay = Boolean(
+          (isInteractive || role === "dialog" || role === "alertdialog" || role === "listbox" || role === "menu") &&
+          overlayAncestor &&
+          overlayAncestor.getAttribute("aria-label") !== "slider" &&
+          overlayAncestor.getAttribute("aria-roledescription") !== "carousel",
+        )
         add({
           depth: baseDepth + parentKeys.length,
           baseDepth,
@@ -2105,16 +2233,21 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           ...(parentKeys.length > 0 ? { parentKeys } : {}),
           role,
           name,
-          ...(isInteractive ? { identityName } : {}),
+          ...(isInteractive && identityName ? { identityName } : {}),
           ...(isInteractive ? { selector: cssPath(element) } : {}),
           ...(details ? { details } : {}),
           priority: priorityFor({
-            role,
+            role: headerCandidateSet.has(element) ? "heading" : role,
             interactive: isInteractive,
             primaryLink,
-            // Repeated list wrappers must not exhaust the budget before their
-            // primary links and controls. Retained wrappers still provide nesting.
-            structuralEssential: isStructural && role !== "row" && role !== "listitem" &&
+            inActiveOverlay,
+            // Repeated list wrappers and code blocks must not exhaust the budget before
+            // headings, primary links, and interactive controls.
+            structuralEssential: isStructural &&
+              role !== "row" &&
+              role !== "listitem" &&
+              role !== "code" &&
+              (role !== "group" || Boolean(displayName)) &&
               (role !== "list" || reservedLists++ < Math.max(1, Math.floor(settings.maxItems / 10))),
           }),
         })
@@ -2273,6 +2406,9 @@ return (${capture.toString()})(rootOrSettings, locatorSettings)`,
   }
 
   const ref: SnapshotRefHelper = (id) => {
+    if (!Predicate.isString(id) || !id.trim()) {
+      throw new Error(`Unknown snapshot ref: ${String(id)}; call snapshot() to get current refs`)
+    }
     const normalized = id.startsWith("@") ? id.slice(1) : id
     if (registry.page !== page || registry.url !== page.url()) {
       throw new Error("Snapshot refs are stale after a page change; call snapshot() again")
@@ -2399,12 +2535,17 @@ function snapshotRefAriaRole(role: string): Parameters<Page["getByRole"]>[0] | u
     case "link":
     case "listbox":
     case "menuitem":
+    case "menuitemcheckbox":
+    case "menuitemradio":
+    case "option":
     case "radio":
     case "searchbox":
     case "slider":
     case "spinbutton":
+    case "switch":
     case "tab":
     case "textbox":
+    case "treeitem":
       return role
     default:
       return undefined

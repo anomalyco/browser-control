@@ -167,6 +167,88 @@ try {
     })
     assert.equal(await snapshot(), "")
   })
+  await check("custom button[role=combobox] and portal listbox/menu options outside main", async () => {
+    await page.setContent(`
+      <aside data-slot="sidebar">
+        <ul>${Array.from({ length: 12 }, (_, i) => `<li><a href="#doc-${i}">Doc ${i}</a></li>`).join("")}</ul>
+      </aside>
+      <main>
+        <h1>Select</h1>
+        <button type="button" role="combobox" aria-expanded="false" id="fruit-trigger"><span>Select a fruit</span></button>
+      </main>
+      <div role="listbox" id="fruit-portal" style="display: none">
+        <div role="option" aria-selected="false" id="opt-apple">Apple</div>
+        <div role="option" aria-selected="false" id="opt-pineapple">Pineapple</div>
+      </div>
+      <ul role="menu" id="sort-portal" style="display: none">
+        <li role="menuitemradio" aria-checked="true">Newest</li>
+        <li role="menuitemradio" aria-checked="false" id="sort-oldest">Oldest</li>
+      </ul>
+    `)
+    await page.evaluate(() => {
+      document.getElementById("fruit-trigger")!.addEventListener("click", () => {
+        document.getElementById("fruit-trigger")!.setAttribute("aria-expanded", "true")
+        document.getElementById("fruit-portal")!.style.display = "block"
+      })
+      document.getElementById("opt-pineapple")!.addEventListener("click", () => {
+        document.querySelector("#fruit-trigger span")!.textContent = "Pineapple"
+        document.getElementById("fruit-portal")!.style.display = "none"
+        document.getElementById("sort-portal")!.style.display = "block"
+      })
+    })
+    const { snapshot, ref } = createSnapshotHelpers(page, { selectors: new Map() })
+    const initial = await snapshot()
+    assert.match(initial, /navigation "Navigation" \[12 controls\]/)
+    assert.doesNotMatch(initial, /Doc 11/)
+    const comboRef = initial.match(/combobox "Select a fruit" \[ref=(e\d+)/)?.[1]
+    assert.ok(comboRef, initial)
+    await ref(comboRef).click({ timeout: 1_000 })
+
+    const withPortal = await snapshot()
+    const pineappleRef = withPortal.match(/option "Pineapple" \[ref=(e\d+)/)?.[1]
+    assert.ok(pineappleRef, withPortal)
+    await ref(pineappleRef).click({ timeout: 1_000 })
+
+    const withMenu = await snapshot()
+    assert.match(withMenu, /combobox "Pineapple"/)
+    assert.match(withMenu, /menuitemradio "Newest" \[ref=e\d+ checked\]/)
+    const oldestRef = withMenu.match(/menuitemradio "Oldest" \[ref=(e\d+) unchecked\]/)?.[1]
+    assert.ok(oldestRef, withMenu)
+    assert.equal(await ref(oldestRef).count(), 1)
+  })
+  await check("header search controls, heading-link deduplication, and descendant aria-label in links", async () => {
+    await page.setContent(`
+      <header>
+        <nav><a href="#nav">Global Nav</a></nav>
+        <input placeholder="Search restaurants, cuisines, etc.">
+      </header>
+      <main>
+        <article>
+          <a href="#venue-1"><h2>Cha Cha Cha</h2></a>
+          <a href="#venue-2"><h2>Izakaya Rintaro</h2></a>
+        </article>
+        <h3><a href="#issue-1">rpc: request-level defect</a></h3>
+        <a href="#crab" id="crab-link">
+          <span>#1 most liked</span>
+          <button aria-label="Quick Add"><svg><title>Plus small</title></svg></button>
+          <span>Crab Rangoon 8 pcs</span>
+        </a>
+        <button disabled class="skeleton"></button>
+      </main>
+    `)
+    const { snapshot, ref } = createSnapshotHelpers(page, { selectors: new Map() })
+    const outline = await snapshot()
+    assert.doesNotMatch(outline, /Global Nav/)
+    assert.doesNotMatch(outline, /button "button" \[[^\]]*disabled/)
+    assert.match(outline, /textbox "Search restaurants, cuisines, etc\." \[ref=e\d+\]/)
+    assert.match(outline, /link "Cha Cha Cha" \[ref=e\d+\]/)
+    assert.match(outline, /link "Izakaya Rintaro" \[ref=e\d+\]/)
+    assert.doesNotMatch(outline, /heading "Cha Cha Cha"/)
+    assert.doesNotMatch(outline, /heading "rpc: request-level defect"/)
+    const crabRef = outline.match(/link "#1 most liked Quick Add Crab Rangoon 8 pcs" \[ref=(e\d+)\]/)?.[1]
+    assert.ok(crabRef, outline)
+    assert.equal(await ref(crabRef).count(), 1)
+  })
 } finally {
   await browser.close()
 }

@@ -66,8 +66,9 @@ group and in-page status pill). Every later CLI call must pass that id or set
 state.
 
 ```bash
+browser-control session new "🎙️ elevenlabs"
 browser-control execute --session "🎙️ elevenlabs" 'return page.url()'
-browser-control execute --session cosmic-otter-866 'return page.url()'
+browser-control execute 'return page.url()'
 ```
 
 MCP keeps one implicit process session. Omit `session` for that normal path, or
