@@ -416,34 +416,44 @@ async function scrollToward(tab: TabState, params: JsonObject, send: Send): Prom
     ...(params.nodeId === undefined ? {} : { nodeId: params.nodeId }),
     ...(params.backendNodeId === undefined ? {} : { backendNodeId: params.backendNodeId }),
   }
-  const metrics = (await send("Page.getLayoutMetrics", {}).catch(() => undefined)) as
-    | { cssVisualViewport?: { clientWidth: number; clientHeight: number; pageY?: number } }
-    | undefined
-  const viewport = metrics?.cssVisualViewport
-  if (!viewport) return
-  const offset = async (): Promise<number | undefined> => {
-    const layout = (await send("Page.getLayoutMetrics", {}).catch(() => undefined)) as
-      | { cssVisualViewport?: { clientHeight: number; pageY?: number } }
-      | undefined
-    const currentViewport = layout?.cssVisualViewport ?? viewport
-    const pageY = currentViewport.pageY ?? 0
-    const result = (await send("DOM.getContentQuads", node).catch(() => undefined)) as { quads?: number[][] } | undefined
-    const quad = result?.quads?.[0]
-    if (!quad || quad.length < 8) return undefined
+  const measure = async (): Promise<{
+    readonly clientWidth: number
+    readonly clientHeight: number
+    readonly delta: number
+  } | undefined> => {
+    const timed = await Promise.race([
+      Promise.all([
+        send("Page.getLayoutMetrics", {}).catch(() => undefined),
+        send("DOM.getContentQuads", node).catch(() => undefined),
+      ]),
+      sleep(120).then(() => undefined),
+    ])
+    if (!timed) return undefined
+    const [layoutRaw, quadRaw] = timed as [
+      { cssVisualViewport?: { clientWidth: number; clientHeight: number; pageY?: number } } | undefined,
+      { quads?: number[][] } | undefined,
+    ]
+    const viewport = layoutRaw?.cssVisualViewport
+    const quad = quadRaw?.quads?.[0]
+    if (!viewport || !quad || quad.length < 8) return undefined
+    const pageY = viewport.pageY ?? 0
     const ys = [quad[1]! - pageY, quad[3]! - pageY, quad[5]! - pageY, quad[7]! - pageY]
     const minY = Math.min(...ys)
     const maxY = Math.max(...ys)
-    if (minY >= 16 && maxY <= currentViewport.clientHeight - 16) return 0
-    return (minY + maxY) / 2 - currentViewport.clientHeight * random(0.38, 0.5)
+    const delta =
+      minY >= 16 && maxY <= viewport.clientHeight - 16
+        ? 0
+        : (minY + maxY) / 2 - viewport.clientHeight * random(0.38, 0.5)
+    return { clientWidth: viewport.clientWidth, clientHeight: viewport.clientHeight, delta }
   }
-  const first = await offset()
-  if (!first || Math.abs(first) < 24) return
+  const first = await measure()
+  if (!first || Math.abs(first.delta) < 24) return
   const pointer = tab.pointer ?? {
-    x: round1(viewport.clientWidth * random(0.38, 0.62)),
-    y: round1(viewport.clientHeight * random(0.38, 0.62)),
+    x: round1(first.clientWidth * random(0.38, 0.62)),
+    y: round1(first.clientHeight * random(0.38, 0.62)),
   }
   tab.pointer = pointer
-  let remaining = first
+  let remaining = first.delta
   for (let flick = 0; flick < 3 && Math.abs(remaining) > 12; flick += 1) {
     const amount = Math.sign(remaining) * Math.min(Math.abs(remaining), random(550, 1100))
     const driftX = round1(pointer.x + noise(1.6))
@@ -461,9 +471,9 @@ async function scrollToward(tab: TabState, params: JsonObject, send: Send): Prom
         deltaY: frame.y,
       }),
     )
-    const next = await offset()
-    if (next === undefined || Math.abs(next - remaining) < 2) break
-    remaining = next
+    const next = await measure()
+    if (!next || Math.abs(next.delta - remaining) < 2) break
+    remaining = next.delta
     if (Math.abs(remaining) > 12) await sleep(random(24, 48))
   }
 }

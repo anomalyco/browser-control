@@ -370,16 +370,16 @@ export function analyzeReach(reach: RecordedReach): ReachAnalysis | undefined {
       overshootPx = clamp(pullBackAmount, 2.2, 24)
       splitU = clamp(maxTangentialU, 0.68, 0.92)
     } else {
-      for (let b = Math.max(peakBin + 2, 11); b <= 16; b += 1) {
+      for (let b = Math.max(peakBin + 2, 7); b <= 16; b += 1) {
         const vDip = velocityBins[b]!
-        const vAfter = Math.max(velocityBins[b + 1] ?? 0, velocityBins[b + 2] ?? 0)
+        const vAfter = Math.max(velocityBins[b + 1] ?? 0, velocityBins[b + 2] ?? 0, velocityBins[b + 3] ?? 0)
         const uDip = (b + 0.5) / binCount
         const projDip = interpolateProjection(projections, uDip, distance)
         const remaining = distance - projDip.par
-        if (vDip < peakVal * 0.28 && vAfter > vDip * 1.35 && remaining >= 3.5 && remaining <= 24) {
+        if (vDip < peakVal * 0.35 && vAfter > vDip * 1.12 && remaining >= 3.5 && remaining <= Math.min(75, distance * 0.38)) {
           mode = "undershoot"
-          undershootPx = clamp(remaining, 3.5, 24)
-          splitU = clamp(uDip, 0.66, 0.86)
+          undershootPx = clamp(remaining, 3.5, 42)
+          splitU = clamp(uDip, 0.45, 0.86)
           break
         }
       }

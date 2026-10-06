@@ -614,6 +614,44 @@ export class BrowserControlSessions {
     if (this.admission === "draining") this.admission = "open"
   }
 
+  reapIdleRelaySessions(options: {
+    readonly maxIdleMs: number
+    readonly now?: number
+    readonly isTargetBusy?: (targetId: string) => boolean
+  }): Effect.Effect<readonly string[]> {
+    const manager = this
+    return Effect.gen(function* () {
+      if (manager.admission !== "open" || options.maxIdleMs <= 0) {
+        return []
+      }
+      const now = options.now ?? Date.now()
+      const reaped: string[] = []
+      for (const session of Array.from(manager.sessions.values())) {
+        if (manager.isExecuting(session.id) || manager.hasPendingWork(session.id) || session.sandbox.networkStatus().active) {
+          continue
+        }
+        const updatedAtMs = Date.parse(session.updatedAt || session.createdAt)
+        if (!Number.isFinite(updatedAtMs) || now - updatedAtMs < options.maxIdleMs) {
+          continue
+        }
+        const isAutoNamed = /^mcp-[0-9a-f]{6,}$/i.test(session.id) || /^[a-z]+-[a-z]+-\d{3}$/.test(session.id)
+        if (session.target?.owner === "relay") {
+          if (options.isTargetBusy?.(session.target.id)) continue
+          const closed = yield* (
+            isAutoNamed
+              ? manager.delete(session.id)
+              : manager.reset(session.id).pipe(Effect.map(Boolean))
+          ).pipe(Effect.orElseSucceed(() => false))
+          if (closed) reaped.push(session.id)
+        } else if (!session.target && isAutoNamed) {
+          const deleted = yield* manager.delete(session.id).pipe(Effect.orElseSucceed(() => false))
+          if (deleted) reaped.push(session.id)
+        }
+      }
+      return reaped
+    })
+  }
+
   closeAll(): Effect.Effect<void> {
     const manager = this
     return Effect.gen(function* () {

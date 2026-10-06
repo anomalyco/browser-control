@@ -258,6 +258,55 @@ h1 {
   inset: 0;
 }
 
+/* Start card */
+.start-card {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: min(22.5rem, 90%);
+  background: #141512;
+  border: 1px solid var(--line-strong);
+  border-radius: 11px;
+  padding: 1.1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  box-shadow: 0 18px 42px rgb(0 0 0 / 45%);
+}
+
+.start-buttons {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.55rem;
+}
+
+.start-device-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.7rem 0.65rem;
+  border-radius: 8px;
+  border: 1px solid var(--line-strong);
+  background: var(--panel-2);
+  color: var(--fg);
+  font-size: 0.84rem;
+  font-weight: 540;
+  cursor: pointer;
+}
+
+.start-device-btn:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.start-device-btn small {
+  font-size: 0.7rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+
 /* Stage 1: Fitts targets */
 .fitts-target {
   position: absolute;

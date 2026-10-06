@@ -531,7 +531,10 @@ export class ExecuteSandbox {
             : this.pageProtectedUi && isMaskedProtectedUiFailure(error)
             ? protectedExtensionUiDiagnostic
             : executionContextFailureDiagnostic(error, aftermath)
-          if (diagnostic?.startsWith("execution-context/")) {
+          if (
+            diagnostic?.startsWith("execution-context/")
+            || /\bTimeout \d+ms exceeded\b/i.test(error instanceof ExecuteCodeError ? error.message : error.message)
+          ) {
             this.pageHealthCheckRequired = true
           }
           const warnings = this.finalizeWarnings(

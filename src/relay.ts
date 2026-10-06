@@ -500,6 +500,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   }
   const managed = yield* Config.Boolean("BROWSER_CONTROL_MANAGED_RELAY").pipe(Config.withDefault(false))
   const restartTimeoutMs = yield* Config.Int("BROWSER_CONTROL_RESTART_TIMEOUT_MS").pipe(Config.withDefault(10_000))
+  const idleTabTtlMs = yield* Config.Int("BROWSER_CONTROL_IDLE_TAB_TTL_MS").pipe(Config.withDefault(15 * 60_000))
   const restartRequestId = yield* Config.option(Config.String("BROWSER_CONTROL_RESTART_REQUEST_ID"))
   const lifecycleLogPath = path.join(path.dirname(defaultSessionCatalogPath(port)), "lifecycle.jsonl")
   const audit = (event: RelayLifecycleEvent) => Effect.try(() => appendRelayLifecycleEvent(lifecycleLogPath, event))
@@ -635,7 +636,24 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     return method === "Runtime.evaluate" || method === "Runtime.callFunctionOn"
   }
 
+  const idleReapTimer = idleTabTtlMs > 0
+    ? setInterval(() => {
+        Effect.runPromise(
+          sessions.reapIdleRelaySessions({
+            maxIdleMs: idleTabTtlMs,
+            isTargetBusy: (targetId) => {
+              const target = registry.targetsByTargetId.get(targetId)
+              if (!target) return false
+              return handoffs.pendingForTab(target.tabId) !== undefined || recordingRelay.isRecordingTab(target.tabId)
+            },
+          }),
+        ).catch(() => {})
+      }, 60_000)
+    : undefined
+  idleReapTimer?.unref()
+
   const cleanup = Effect.fnUntraced(function* () {
+    if (idleReapTimer) clearInterval(idleReapTimer)
     yield* shutdownControl.close().pipe(Effect.ignore)
     yield* sessions.closeAll()
     yield* rootLifecycle.close()

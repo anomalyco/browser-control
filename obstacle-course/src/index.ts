@@ -174,6 +174,29 @@ export class ObstacleHub extends DurableObject<Env> {
       return jsonResponse({ run, model, reachAnalyses })
     }
 
+    if (url.pathname.startsWith("/api/runs/") && request.method === "PATCH") {
+      const id = decodeURIComponent(url.pathname.slice("/api/runs/".length))
+      const body = (await request.json()) as { readonly handle?: string }
+      const newHandle = sanitizeHandle(body.handle)
+      const rows = this.ctx.storage.sql
+        .exec<{ payload_json: string }>("SELECT payload_json FROM runs WHERE id = ? LIMIT 1", id)
+        .toArray()
+      if (rows.length === 0) {
+        return jsonResponse({ error: "Run not found" }, 404)
+      }
+      const run = JSON.parse(rows[0]!.payload_json) as ObstacleRunPayload
+      const updated: ObstacleRunPayload = { ...run, handle: newHandle }
+      this.ctx.storage.sql.exec(
+        "UPDATE runs SET handle = ?, payload_json = ? WHERE id = ?",
+        newHandle,
+        JSON.stringify(updated),
+        id,
+      )
+      const state = this.buildState({})
+      this.broadcastState(state)
+      return jsonResponse({ ok: true, id, handle: newHandle, state })
+    }
+
     if (url.pathname.startsWith("/api/runs/") && request.method === "DELETE") {
       const id = decodeURIComponent(url.pathname.slice("/api/runs/".length))
       this.ctx.storage.sql.exec("DELETE FROM runs WHERE id = ?", id)

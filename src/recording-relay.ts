@@ -767,8 +767,6 @@ export class RecordingRelay {
         params: {
           format: "jpeg",
           quality: cdpJpegQuality,
-          maxWidth: size.width,
-          maxHeight: size.height,
           everyNthFrame: 1,
         },
       })

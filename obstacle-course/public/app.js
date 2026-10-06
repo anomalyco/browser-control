@@ -34,19 +34,30 @@ const rosterCountLabel = document.querySelector("#roster-count-label")
 const traceCaption = document.querySelector("#trace-caption")
 
 // Persistent handle & device selection
-const savedHandle = localStorage.getItem("bc_calibration_handle") || ""
+const rawSavedHandle = localStorage.getItem("bc_calibration_handle") || ""
+const savedHandle = rawSavedHandle === "agent-verify" ? "kit" : rawSavedHandle
+if (rawSavedHandle === "agent-verify") {
+  localStorage.setItem("bc_calibration_handle", "kit")
+}
 handleInput.value = savedHandle
 handleInput.addEventListener("input", () => {
   localStorage.setItem("bc_calibration_handle", handleInput.value.trim())
 })
 
 let deviceOverride = "auto"
-let detectedDevice = "mouse"
+let detectedDevice = "trackpad"
+let selectedDeviceFilter = "all"
+
+function syncDeviceSegmented(device) {
+  for (const b of document.querySelectorAll(".segmented .seg")) {
+    b.classList.toggle("active", b.dataset.device === device)
+  }
+}
+
 for (const btn of document.querySelectorAll(".segmented .seg")) {
   btn.addEventListener("click", () => {
-    for (const b of document.querySelectorAll(".segmented .seg")) b.classList.remove("active")
-    btn.classList.add("active")
     deviceOverride = btn.dataset.device || "auto"
+    syncDeviceSegmented(deviceOverride)
     updateHud()
   })
 }
@@ -333,7 +344,59 @@ function resetCourse() {
   recordedScrolls = []
   recordedKeys = []
   updateHud()
-  renderFittsStage(0)
+  renderStartCard()
+}
+
+function renderStartCard() {
+  arenaStage.innerHTML = ""
+  const card = document.createElement("div")
+  card.className = "start-card"
+  const currentHandle = (handleInput.value || "").replace(/"/g, "")
+  card.innerHTML = `
+    <label class="cadence-field">
+      <span>Handle</span>
+      <input id="start-handle-input" type="text" maxlength="24" autocomplete="off" spellcheck="false" placeholder="slack handle (e.g. kit)" value="${currentHandle}" />
+    </label>
+    <div class="start-buttons">
+      <button type="button" class="start-device-btn" data-start-device="trackpad">
+        <span>Trackpad</span>
+        <small>Start 40s course</small>
+      </button>
+      <button type="button" class="start-device-btn" data-start-device="mouse">
+        <span>Mouse</span>
+        <small>Start 40s course</small>
+      </button>
+    </div>
+  `
+  arenaStage.appendChild(card)
+
+  const startInput = card.querySelector("#start-handle-input")
+  startInput.addEventListener("input", () => {
+    handleInput.value = startInput.value.trim()
+    localStorage.setItem("bc_calibration_handle", handleInput.value)
+  })
+  if (!currentHandle) {
+    setTimeout(() => startInput.focus(), 30)
+  }
+
+  for (const btn of card.querySelectorAll(".start-device-btn")) {
+    btn.addEventListener("click", (e) => {
+      const chosen = btn.dataset.startDevice || "trackpad"
+      detectedDevice = chosen
+      deviceOverride = chosen
+      syncDeviceSegmented(chosen)
+      if (startInput.value.trim()) {
+        handleInput.value = startInput.value.trim()
+        localStorage.setItem("bc_calibration_handle", handleInput.value)
+      }
+      courseStartedAt = performance.now()
+      lastAnchor = arenaPoint(e.clientX, e.clientY)
+      activeBuffer = [{ x: lastAnchor.x, y: lastAnchor.y, t: performance.now() }]
+      pendingDown = null
+      updateHud()
+      renderFittsStage(0)
+    })
+  }
 }
 
 function updateHud() {
@@ -568,6 +631,10 @@ function renderCadenceStage() {
   card.className = "cadence-card"
   card.innerHTML = `
     <label class="cadence-field">
+      <span>Handle</span>
+      <input id="cadence-handle" type="text" autocomplete="off" spellcheck="false" placeholder="your slack handle (e.g. vogel)" value="${(handleInput.value || "").replace(/"/g, "")}" />
+    </label>
+    <label class="cadence-field">
       <span>Type <code>${phrase}</code></span>
       <input id="cadence-input-1" type="text" autocomplete="off" spellcheck="false" placeholder="${phrase}" />
     </label>
@@ -579,6 +646,11 @@ function renderCadenceStage() {
   `
   arenaStage.appendChild(card)
 
+  const cadenceHandle = card.querySelector("#cadence-handle")
+  cadenceHandle.addEventListener("input", () => {
+    handleInput.value = cadenceHandle.value.trim()
+    localStorage.setItem("bc_calibration_handle", handleInput.value)
+  })
   const input1 = card.querySelector("#cadence-input-1")
   const input2 = card.querySelector("#cadence-input-2")
   const submitBtn = card.querySelector("#cadence-submit")
@@ -737,10 +809,12 @@ newRunBtn.addEventListener("click", () => {
 })
 
 // Fetch & live-sync server state
-async function fetchState(handle = selectedHandleFilter) {
+async function fetchState(handle = selectedHandleFilter, device = selectedDeviceFilter) {
   selectedHandleFilter = handle
+  selectedDeviceFilter = device
   const params = new URLSearchParams()
   if (handle && handle !== "all") params.set("handle", handle)
+  if (device && device !== "all") params.set("device", device)
   const res = await fetch(`/api/state?${params.toString()}`)
   if (!res.ok) return
   const state = await res.json()
@@ -776,17 +850,26 @@ function renderFilterChips(state) {
   profileFilters.innerHTML = ""
   const allChip = document.createElement("button")
   allChip.type = "button"
-  allChip.className = `filter-chip ${selectedHandleFilter === "all" ? "active" : ""}`
+  allChip.className = `filter-chip ${selectedHandleFilter === "all" && selectedDeviceFilter === "all" ? "active" : ""}`
   allChip.textContent = `Team (${state.totals.runs})`
-  allChip.addEventListener("click", () => fetchState("all"))
+  allChip.addEventListener("click", () => fetchState("all", "all"))
   profileFilters.appendChild(allChip)
+
+  for (const dev of ["trackpad", "mouse"]) {
+    const devChip = document.createElement("button")
+    devChip.type = "button"
+    devChip.className = `filter-chip ${selectedDeviceFilter === dev && selectedHandleFilter === "all" ? "active" : ""}`
+    devChip.textContent = dev
+    devChip.addEventListener("click", () => fetchState("all", dev))
+    profileFilters.appendChild(devChip)
+  }
 
   for (const person of state.roster) {
     const chip = document.createElement("button")
     chip.type = "button"
     chip.className = `filter-chip ${selectedHandleFilter === person.handle ? "active" : ""}`
     chip.textContent = `@${person.handle} (${person.runs})`
-    chip.addEventListener("click", () => fetchState(person.handle))
+    chip.addEventListener("click", () => fetchState(person.handle, "all"))
     profileFilters.appendChild(chip)
   }
 }

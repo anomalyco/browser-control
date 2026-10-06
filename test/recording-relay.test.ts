@@ -569,7 +569,7 @@ describe("RecordingRelay CDP screencast", () => {
     expect(debuggerCommands[2]).toEqual({
       tabId: 7,
       method: "Page.startScreencast",
-      params: { format: "jpeg", quality: 85, maxWidth: 2560, maxHeight: 1276, everyNthFrame: 1 },
+      params: { format: "jpeg", quality: 85, everyNthFrame: 1 },
     })
 
     now = 1_100
