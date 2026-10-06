@@ -5,15 +5,15 @@ import { ariaSnapshotWithoutTextControlValues } from "./aria-snapshot.ts"
 import { runPlaywrightOperation } from "./execute.ts"
 import { runtimeFailureKind } from "./runtime-diagnostics.ts"
 
-export type AriaSnapshotTarget = Locator | string
+type AriaSnapshotTarget = Locator | string
 
-export type AriaSnapshotOptions = {
+type AriaSnapshotOptions = {
   readonly timeout?: number
 }
 
 export type AriaSnapshotHelper = (target?: AriaSnapshotTarget, options?: AriaSnapshotOptions) => Promise<string>
 
-export type SnapshotOptions = {
+type SnapshotOptions = {
   readonly within?: AriaSnapshotTarget
   readonly interactive?: boolean
   readonly compact?: boolean
@@ -29,7 +29,7 @@ export type SnapshotOptions = {
 export type SnapshotHelper = (options?: SnapshotOptions) => Promise<string>
 export type SnapshotRefHelper = (id: string) => Locator
 
-export type SnapshotEntry = {
+type SnapshotEntry = {
   readonly depth: number
   readonly baseDepth?: number
   readonly key?: string
@@ -53,7 +53,7 @@ export type SnapshotRefRegistry = {
   removeNavigationListener?: () => void
 }
 
-export type SnapshotRenderedEntry = {
+type SnapshotRenderedEntry = {
   readonly prefix: string
   readonly details?: string
   readonly selector?: string
@@ -62,7 +62,7 @@ export type SnapshotRenderedEntry = {
   readonly refId?: string
 }
 
-export type SnapshotBaseline = {
+type SnapshotBaseline = {
   readonly page: Page
   readonly signature: string
   readonly entries: readonly SnapshotRenderedEntry[]
@@ -93,7 +93,7 @@ export type ScreenshotWithLabelsResult = {
   readonly labels: readonly ScreenshotLabel[]
 }
 
-export type ScreenshotLabel = {
+type ScreenshotLabel = {
   readonly ref: string
   readonly selector: string
   readonly role: string
@@ -103,7 +103,7 @@ export type ScreenshotLabel = {
   readonly rect: ScreenshotLabelRect
 }
 
-export type ScreenshotLabelRect = {
+type ScreenshotLabelRect = {
   readonly x: number
   readonly y: number
   readonly width: number

@@ -338,7 +338,7 @@ export const AuthProfileSummary = Schema.Struct({
 })
 export interface AuthProfileSummary extends Schema.Schema.Type<typeof AuthProfileSummary> {}
 
-export const NetworkEndpointDigest = Schema.Struct({
+const NetworkEndpointDigest = Schema.Struct({
   method: Schema.String,
   url: Schema.String,
   status: Schema.optionalKey(Schema.Number),
@@ -347,7 +347,6 @@ export const NetworkEndpointDigest = Schema.Struct({
   requestKeys: Schema.optionalKey(Schema.Array(Schema.String)),
   responseKeys: Schema.optionalKey(Schema.Array(Schema.String)),
 })
-export interface NetworkEndpointDigest extends Schema.Schema.Type<typeof NetworkEndpointDigest> {}
 
 export const NetworkStopResponse = NetworkStatusResponse.pipe(Schema.fieldsAssign({
   active: Schema.Literal(false),

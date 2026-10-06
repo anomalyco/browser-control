@@ -35,7 +35,7 @@ export type NetworkCaptureStatus = {
   readonly secrets?: string
 }
 
-export type NetworkEndpointDigest = {
+type NetworkEndpointDigest = {
   readonly method: string
   readonly url: string
   readonly status?: number
