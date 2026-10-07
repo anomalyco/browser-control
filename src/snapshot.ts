@@ -1076,6 +1076,24 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           })
         }
       }
+      const hasConfirmAccessHeading = entries.some(
+        (entry) =>
+          entry.role === "heading" &&
+          /^(confirm access|confirm your password|verify your identity|two-factor authentication|authentication required)$/i.test(entry.name),
+      ) || /\bconfirm access\b/i.test(document.title ?? "")
+      const hasSudoChallengeControl = Boolean(
+        document.querySelector?.("input[type='password'], input[name='sudo_password'], input[name*='otp' i], [data-octo-click*='sudo']"),
+      ) || entries.some((entry) => entry.role === "button" && /passkey|security key|confirm password|verify/i.test(entry.name))
+      if (hasConfirmAccessHeading && hasSudoChallengeControl) {
+        entries.unshift({
+          depth: 0,
+          baseDepth: 0,
+          role: "status",
+          name: "waiting for human: confirm access",
+          details: "handoff recommended",
+          priority: -1,
+        })
+      }
       const overlayBonus = Math.min(30, entries.filter((entry) => entry.inActiveOverlay).length)
       const rawSelected = entries
         .map((entry, index) => ({ entry, index }))

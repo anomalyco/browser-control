@@ -444,6 +444,22 @@ try {
     `)
     const pdfSnap = await snapshot()
     assert.match(pdfSnap, /- document "statement-2026-10\.pdf" \[type=application\/pdf\]/)
+
+    await page.setContent(`
+      <html><head><title>Confirm access · GitHub</title></head>
+      <body>
+        <main>
+          <h1>Confirm access</h1>
+          <form>
+            <label for="sudo_password">Password</label>
+            <input id="sudo_password" name="sudo_password" type="password" />
+            <button type="submit">Confirm password</button>
+          </form>
+        </main>
+      </body></html>
+    `)
+    const sudoSnap = await snapshot()
+    assert.match(sudoSnap, /- status "waiting for human: confirm access" \[handoff recommended\]/)
   })
 } finally {
   await browser.close()

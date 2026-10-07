@@ -133,6 +133,15 @@ export class CdpClientPool<Client extends object> implements Iterable<Client> {
         continue
       }
       this.send(client, event)
+      if (event.method !== "Target.attachedToTarget" && event.method !== "Target.detachedFromTarget") {
+        const isRootEvent = event.sessionId === undefined || event.sessionId === rootSessionId
+        for (const [aliasId, alias] of state.aliases) {
+          if (!ClientCdpSessionAlias.$is("Target")(alias) || alias.tabId !== announced.tabId) continue
+          if (alias.chromeSessionId !== undefined ? alias.chromeSessionId === event.sessionId : isRootEvent) {
+            this.send(client, { ...event, sessionId: aliasId })
+          }
+        }
+      }
     }
   }
 

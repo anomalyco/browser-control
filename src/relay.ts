@@ -103,7 +103,7 @@ const installRelayProcessGuard = Effect.acquireRelease(
 
 export function shouldSuppressRelayProcessFault(cause: unknown): boolean {
   const errorText = cause instanceof Error ? `${cause.message}\n${cause.stack ?? ""}` : String(cause)
-  return /playwright-core|coreBundle|Duplicate target/i.test(errorText)
+  return /playwright-core|coreBundle|Duplicate target|page\.waitForEvent/i.test(errorText)
 }
 
 export function handleRelayProcessFault(

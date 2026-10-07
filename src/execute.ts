@@ -1405,16 +1405,271 @@ export async function waitForExactTarget<T>(options: {
   }
 }
 
+const activeDownloadSetups = new WeakMap<Page, Promise<void>>()
+
+function parseContentDispositionFilename(disposition: string | undefined, requestUrl: string): string {
+  if (disposition) {
+    const utf8Match = /filename\*\s*=\s*(?:UTF-8|utf-8)''([^;\s]+)/i.exec(disposition)
+    if (utf8Match?.[1]) {
+      try {
+        const decoded = path.basename(decodeURIComponent(utf8Match[1].replace(/^["']|["']$/g, "")))
+        if (decoded && decoded !== "." && decoded !== "..") return decoded
+      } catch {}
+    }
+    const quotedMatch = /filename\s*=\s*"([^"]+)"/i.exec(disposition) ?? /filename\s*=\s*([^;\s]+)/i.exec(disposition)
+    if (quotedMatch?.[1]) {
+      const cleaned = path.basename(quotedMatch[1].trim().replace(/^["']|["']$/g, ""))
+      if (cleaned && cleaned !== "." && cleaned !== "..") return cleaned
+    }
+  }
+  try {
+    const parsedUrl = new URL(requestUrl)
+    const fromPath = path.basename(decodeURIComponent(parsedUrl.pathname))
+    if (fromPath && fromPath !== "/" && fromPath !== "." && fromPath !== "..") return fromPath
+  } catch {}
+  return "download"
+}
+
+async function materializeCapturedDownload(options: {
+  readonly page: Page
+  readonly url: string
+  readonly suggestedFilename: string
+  readonly data: Buffer
+}) {
+  const safeFilename = path.basename(options.suggestedFilename.trim() || "download") || "download"
+  const downloadDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "browser-control-download-"))
+  const savedPath = path.join(downloadDir, safeFilename)
+  await fs.promises.writeFile(savedPath, options.data, { mode: 0o600 })
+  return {
+    url: () => options.url,
+    suggestedFilename: () => safeFilename,
+    path: async () => savedPath,
+    saveAs: async (targetPath: string) => {
+      await fs.promises.mkdir(path.dirname(targetPath), { recursive: true })
+      await fs.promises.copyFile(savedPath, targetPath)
+    },
+    failure: async () => null,
+    delete: async () => {
+      await fs.promises.rm(downloadDir, { recursive: true, force: true })
+    },
+    cancel: async () => {},
+    createReadStream: async () => fs.createReadStream(savedPath),
+    page: () => options.page,
+    filename: safeFilename,
+    savedPath,
+  }
+}
+
+async function waitForPageDownload(page: Page, optionsOrPredicate?: unknown, rawEvaluate?: Page["evaluate"]): Promise<unknown> {
+  const context = typeof page.context === "function" ? page.context() : undefined
+  if (!context || typeof context.newCDPSession !== "function") {
+    throw new Error(downloadCapabilityErrorMessage)
+  }
+  const predicate = typeof optionsOrPredicate === "function"
+    ? (optionsOrPredicate as (download: unknown) => boolean | Promise<boolean>)
+    : Predicate.isObject(optionsOrPredicate) && typeof optionsOrPredicate.predicate === "function"
+    ? (optionsOrPredicate.predicate as (download: unknown) => boolean | Promise<boolean>)
+    : undefined
+  const timeoutMs = Predicate.isObject(optionsOrPredicate) && typeof optionsOrPredicate.timeout === "number"
+    ? optionsOrPredicate.timeout
+    : 30_000
+
+  const evaluateOnPage = rawEvaluate ?? page.evaluate.bind(page)
+  const cdp = await context.newCDPSession(page)
+  let settled = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+
+  const cleanup = async () => {
+    if (timer) clearTimeout(timer)
+    await evaluateOnPage(() => {
+      ;(window as Window & { __browserControlDownloadArmed?: boolean }).__browserControlDownloadArmed = false
+    }).catch(() => {})
+    await cdp.send("Fetch.disable").catch(() => {})
+    await cdp.detach().catch(() => {})
+  }
+
+  return await new Promise<unknown>((resolve, reject) => {
+    const finishResolve = async (candidate: { readonly url: string; readonly suggestedFilename: string; readonly data: Buffer }) => {
+      if (settled) return
+      try {
+        const download = await materializeCapturedDownload({ page, ...candidate })
+        if (predicate && !(await predicate(download))) return
+        settled = true
+        await cleanup()
+        resolve(download)
+      } catch (error) {
+        if (settled) return
+        settled = true
+        await cleanup()
+        reject(error)
+      }
+    }
+
+    const finishReject = async (error: Error) => {
+      if (settled) return
+      settled = true
+      await cleanup()
+      reject(error)
+    }
+
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        void finishReject(new errors.TimeoutError(`page.waitForEvent: Timeout ${timeoutMs}ms exceeded while waiting for event "download"`))
+      }, timeoutMs)
+    }
+
+    cdp.on("Fetch.requestPaused", (event: {
+      readonly requestId: string
+      readonly request: { readonly url: string }
+      readonly resourceType?: string
+      readonly responseStatusCode?: number
+      readonly responseHeaders?: ReadonlyArray<{ readonly name: string; readonly value: string }>
+    }) => {
+      void (async () => {
+        if (settled) {
+          await cdp.send("Fetch.continueRequest", { requestId: event.requestId }).catch(() => {})
+          return
+        }
+        const status = event.responseStatusCode ?? 200
+        if (status >= 300 && status < 400) {
+          await cdp.send("Fetch.continueRequest", { requestId: event.requestId }).catch(() => {})
+          return
+        }
+        const headers = event.responseHeaders ?? []
+        const disposition = headers.find((h) => h.name.toLowerCase() === "content-disposition")?.value ?? ""
+        const contentType = headers.find((h) => h.name.toLowerCase() === "content-type")?.value ?? ""
+        const isAttachment = /^\s*attachment\b/i.test(disposition)
+        const isBinaryDocument =
+          event.resourceType === "Document" &&
+          /^(application\/(octet-stream|x-pem-file|pkcs8|x-x509-ca-cert|zip|x-gzip|gzip|x-tar)|binary\/octet-stream)\b/i.test(contentType)
+        if (!isAttachment && !isBinaryDocument) {
+          await cdp.send("Fetch.continueRequest", { requestId: event.requestId }).catch(() => {})
+          return
+        }
+        try {
+          const bodyResult = (await cdp.send("Fetch.getResponseBody", { requestId: event.requestId })) as {
+            readonly body: string
+            readonly base64Encoded: boolean
+          }
+          await cdp.send("Fetch.fulfillRequest", {
+            requestId: event.requestId,
+            responseCode: 204,
+            responseHeaders: [],
+          }).catch(() => {})
+          const data = Buffer.from(bodyResult.body, bodyResult.base64Encoded ? "base64" : "utf8")
+          const suggestedFilename = parseContentDispositionFilename(disposition, event.request.url)
+          await finishResolve({ url: event.request.url, suggestedFilename, data })
+        } catch {
+          await cdp.send("Fetch.continueRequest", { requestId: event.requestId }).catch(() => {})
+        }
+      })()
+    })
+
+    cdp.on("Runtime.bindingCalled", (event: { readonly name: string; readonly payload: string }) => {
+      if (event.name !== "__browserControlOnDownload" || settled) return
+      void (async () => {
+        try {
+          const parsed = JSON.parse(event.payload) as {
+            readonly url?: string
+            readonly suggestedFilename?: string
+            readonly base64?: string
+          }
+          const data = Buffer.from(parsed.base64 ?? "", "base64")
+          await finishResolve({
+            url: parsed.url ?? page.url(),
+            suggestedFilename: parsed.suggestedFilename || "download",
+            data,
+          })
+        } catch {}
+      })()
+    })
+
+    const setup = Promise.all([
+      cdp.send("Fetch.enable", {
+        patterns: [{ urlPattern: "*", requestStage: "Response" }],
+      }),
+      cdp.send("Runtime.addBinding", { name: "__browserControlOnDownload" }).catch(() => {}),
+      evaluateOnPage(() => {
+        const w = window as Window & {
+          __browserControlDownloadArmed?: boolean
+          __browserControlDownloadHookInstalled?: boolean
+          __browserControlOnDownload?: (payload: string) => void
+        }
+        w.__browserControlDownloadArmed = true
+        if (w.__browserControlDownloadHookInstalled) return
+        w.__browserControlDownloadHookInstalled = true
+        const captureAnchor = (anchor: HTMLAnchorElement, event?: Event): boolean => {
+          if (!w.__browserControlDownloadArmed) return false
+          const hasDownloadAttr = anchor.hasAttribute("download")
+          const href = anchor.href || anchor.getAttribute("href") || ""
+          if (!hasDownloadAttr && !href.startsWith("blob:") && !href.startsWith("data:")) return false
+          if (!href || href.startsWith("javascript:")) return false
+          event?.preventDefault()
+          event?.stopPropagation()
+          const attrName = anchor.getAttribute("download")?.trim()
+          const fallbackName = href.split("/").pop()?.split("?")[0] || "download"
+          void fetch(href, { credentials: "include" })
+            .then(async (res) => {
+              if (!res.ok) return
+              const buf = await res.arrayBuffer()
+              const bytes = new Uint8Array(buf)
+              let binary = ""
+              for (let i = 0; i < bytes.length; i += 0x8000) {
+                binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+              }
+              w.__browserControlOnDownload?.(JSON.stringify({
+                url: href,
+                suggestedFilename: attrName || fallbackName,
+                base64: btoa(binary),
+              }))
+            })
+            .catch(() => {})
+          return true
+        }
+        document.addEventListener("click", (event) => {
+          const target = event.target instanceof Element ? event.target.closest("a") : null
+          if (target instanceof HTMLAnchorElement) {
+            captureAnchor(target, event)
+          }
+        }, true)
+        const origClick = HTMLAnchorElement.prototype.click
+        HTMLAnchorElement.prototype.click = function () {
+          if (captureAnchor(this)) return
+          return origClick.apply(this)
+        }
+      }).catch(() => {}),
+    ]).then(() => undefined)
+
+    activeDownloadSetups.set(page, setup)
+    void setup.catch((err) => finishReject(err instanceof Error ? err : new Error(String(err))))
+  })
+}
+
 export function installDownloadCapabilityGuard(page: Page): void {
   if (downloadGuardedPages.has(page)) {
     return
   }
   const waitForEvent = page.waitForEvent.bind(page) as (event: string, ...args: unknown[]) => Promise<unknown>
+  const rawEvaluate = typeof page.evaluate === "function" ? page.evaluate.bind(page) : undefined
+  if (rawEvaluate) {
+    Object.defineProperty(page, "evaluate", {
+      configurable: true,
+      value: async (...args: Parameters<Page["evaluate"]>) => {
+        const pendingSetup = activeDownloadSetups.get(page)
+        if (pendingSetup) {
+          await pendingSetup.catch(() => {})
+        }
+        return await rawEvaluate(...args)
+      },
+    })
+  }
   Object.defineProperty(page, "waitForEvent", {
     configurable: true,
     value: (event: string, ...args: unknown[]) => {
       if (event === "download") {
-        return Promise.reject(new Error(downloadCapabilityErrorMessage))
+        const promise = waitForPageDownload(page, args[0], rawEvaluate)
+        void promise.catch(() => {})
+        return promise
       }
       return waitForEvent(event, ...args)
     },
