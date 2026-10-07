@@ -455,7 +455,10 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         if (role === "dialog" || role === "alertdialog" || role === "group") {
           return normalize(element.querySelector("h1, h2, h3, h4, h5, h6, [role='heading']")?.textContent ?? "")
         }
-        if (role === "code") return normalize(element.textContent ?? "")
+        if (role === "code") {
+          const codeTarget = element.tagName === "PRE" ? (element.querySelector("code") ?? element) : element
+          return normalize(codeTarget.textContent ?? "")
+        }
         if (role === "row") return rowCellsSummary(element)
         if (role === "listitem") return safeText(element)
         return ""
@@ -710,8 +713,15 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           for (const link of links) {
             const name = accessibleName(link)
             const headingBonus = link.closest("h1, h2, h3, h4, h5, h6, [role='heading']") ? 1_000 : 0
-            const commentBonus = /\b\d+\s+comments?\b/i.test(name) ? 500 : 0
-            const score = name.length + headingBonus + commentBonus
+            const isComment = /\b\d+\s+comments?\b|^discuss$/i.test(name)
+            const isMeta =
+              isComment ||
+              /^\(?https?:\/\//i.test(name) ||
+              /\b\d+\s+(?:points?|votes?|likes?|mins?|minutes?|hours?|days?|weeks?|months?|years?)\b/i.test(name) ||
+              /^(?:hide|past|web|flag|share|save|report|reply|permalink|source|cached)$/i.test(name.trim())
+            const titleBonus = !isMeta && name.length >= 10 ? 600 : 0
+            const commentBonus = isComment ? 250 : 0
+            const score = name.length + headingBonus + titleBonus + commentBonus
             if (score > primaryScore) {
               primary = link
               primaryScore = score
@@ -792,9 +802,16 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         const itemLength = safeText(element).length
         return itemLength > 0 && controls.some((control) => accessibleName(control).length >= itemLength * 0.65)
       }
-      const priorityFor = (options: { readonly role: string; readonly interactive: boolean; readonly primaryLink: boolean; readonly structuralEssential: boolean; readonly inActiveOverlay: boolean }): number => {
+      const priorityFor = (options: {
+        readonly role: string
+        readonly interactive: boolean
+        readonly primaryLink: boolean
+        readonly leadParagraph: boolean
+        readonly structuralEssential: boolean
+        readonly inActiveOverlay: boolean
+      }): number => {
         if (options.role === "alert" || options.role === "status" || options.role === "navigation" || options.structuralEssential || options.inActiveOverlay) return -1
-        if (options.role === "heading") return 0
+        if (options.role === "heading" || options.leadParagraph) return 0
         if (options.role === "link" && options.primaryLink) return 0
         if (options.interactive && (options.role !== "link" || options.primaryLink)) return 1
         if (options.role === "link") return 3
@@ -843,6 +860,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       const collapsedNavigation = new Set<Element>()
       const nonCollapsibleNavigation = new WeakSet<Element>()
       let reservedLists = 0
+      let reservedLeadParagraphs = 0
 
       for (const element of candidates) {
         if (entries.length >= settings.maxCandidates) {
@@ -897,6 +915,9 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
             continue
           }
           if (role === "row" && (element.querySelector?.("table, [role='table']") || isLayoutTable(element.closest?.("table, [role='table']") ?? null))) {
+            continue
+          }
+          if (role === "code" && element.querySelector?.("pre, [role='tablist']")) {
             continue
           }
         }
@@ -958,6 +979,9 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           const hit = document.elementFromPoint?.(rect.left + rect.width / 2, rect.top + rect.height / 2)
           return hit === element ? undefined : label
         })()
+        const isLeadParagraph = isParagraph && !isSafetyText && settings.maxItems >= 50 && name.length >= 40 && reservedLeadParagraphs < 2
+        if (isLeadParagraph) reservedLeadParagraphs += 1
+        const isButtonCombobox = role === "combobox" && element instanceof HTMLButtonElement
         add({
           depth: baseDepth + parentKeys.length,
           baseDepth,
@@ -966,7 +990,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           role,
           name,
           ...(isInteractive && identityName && !labelProxy ? { identityName } : {}),
-          ...(labelProxy ? { selectorRole: "label" } : {}),
+          ...(labelProxy ? { selectorRole: "label" } : isButtonCombobox ? { selectorRole: "none" } : {}),
           ...(isInteractive ? { interactiveElement: labelProxy ?? element } : {}),
           ...(inActiveOverlay ? { inActiveOverlay: true } : {}),
           ...(details ? { details } : {}),
@@ -974,6 +998,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
             role: headerCandidateSet.has(element) ? "heading" : role,
             interactive: isInteractive,
             primaryLink,
+            leadParagraph: isLeadParagraph,
             inActiveOverlay,
             structuralEssential: isStructural &&
               role !== "row" &&
@@ -985,11 +1010,19 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         })
       }
       const overlayBonus = Math.min(30, entries.filter((entry) => entry.inActiveOverlay).length)
-      const selected: BrowserEntry[] = entries
+      const rawSelected = entries
         .map((entry, index) => ({ entry, index }))
         .sort((left, right) => left.entry.priority - right.entry.priority || left.index - right.index)
         .slice(0, settings.maxItems + overlayBonus)
         .sort((left, right) => left.index - right.index)
+      const usedParentKeys = new Set<string>()
+      for (const { entry } of rawSelected) {
+        if (entry.role !== "list") {
+          for (const key of entry.parentKeys ?? []) usedParentKeys.add(key)
+        }
+      }
+      const selected: BrowserEntry[] = rawSelected
+        .filter(({ entry }) => entry.role !== "list" || !entry.key || usedParentKeys.has(entry.key))
         .map(({ entry: { interactiveElement, inActiveOverlay: _inActiveOverlay, ...rest } }) => ({
           ...rest,
           ...(interactiveElement ? { selector: cssPath(interactiveElement) } : {}),

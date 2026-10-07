@@ -365,6 +365,47 @@ try {
     assert.match(modalSnap, /searchbox "Search docs" \[ref=e\d+\]/)
     assert.doesNotMatch(modalSnap, /View request req-1/)
   })
+  await check("article story title priority, clean pre/code extraction, and button combobox ref stability across aria-hidden portals", async () => {
+    await page.setContent(`
+      <main id="content">
+        <h1>Search Stories</h1>
+        <p>Effect is a production TypeScript framework providing composable concurrency, structured error handling, and dependency injection.</p>
+        <button id="fruit-select" role="combobox" aria-expanded="false">Select a fruit</button>
+        <pre><div role="tablist"><button role="tab" aria-selected="true">bun</button></div><pre><code>bun add effect</code><button>Copy</button></pre></pre>
+        <article class="Story">
+          <div>
+            <a href="https://news.ycombinator.com/item?id=1"><span>Effect – Build robust apps in TypeScript</span></a>
+            <a href="https://effect.website/">(https://effect.website/)</a>
+          </div>
+          <div>
+            <a href="https://news.ycombinator.com/item?id=1">127 points</a>
+            <a href="https://news.ycombinator.com/user?id=alice">alice</a>
+            <a href="https://news.ycombinator.com/item?id=1">74 comments</a>
+          </div>
+        </article>
+        <ul><li>Plain text item</li></ul>
+      </main>
+    `)
+    const { snapshot, ref } = createSnapshotHelpers(page, { selectors: new Map() })
+    const snap = await snapshot({ maxItems: 6 })
+    assert.match(snap, /link "Effect – Build robust apps in TypeScript" \[ref=e\d+\]/)
+    assert.doesNotMatch(snap, /74 comments/)
+    assert.doesNotMatch(snap, /list "List"/)
+
+    const full = await snapshot()
+    assert.match(full, /p "Effect is a production TypeScript framework/)
+    assert.match(full, /code "bun add effect"/)
+    assert.doesNotMatch(full, /bun add effectCopy/)
+    const comboRef = full.match(/combobox "Select a fruit" \[ref=(e\d+)/)?.[1]
+    assert.ok(comboRef, full)
+    await page.evaluate(() => {
+      document.getElementById("content")!.setAttribute("aria-hidden", "true")
+      const btn = document.getElementById("fruit-select")!
+      btn.setAttribute("aria-expanded", "true")
+      btn.textContent = "Pineapple"
+    })
+    assert.equal(await ref(comboRef).count(), 1)
+  })
 } finally {
   await browser.close()
 }
