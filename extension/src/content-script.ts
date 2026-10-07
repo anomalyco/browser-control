@@ -56,7 +56,8 @@ function evictForeignExtensionNodesIn(
   const ownOrigin = `chrome-extension://${chrome.runtime.id}`
   const isForeignFrameElement = (el: Element): boolean => {
     if (el.id === hostId || el.id === "__browser_control_ghost_cursor__") return false
-    const src = el.getAttribute("src") ?? el.getAttribute("data") ?? (el as HTMLIFrameElement).src ?? ""
+    const rawSrc = el.getAttribute("src") ?? el.getAttribute("data") ?? (el as HTMLIFrameElement).src
+    const src = typeof rawSrc === "string" ? rawSrc : ""
     if (src.startsWith(ownOrigin)) return false
     if (src.startsWith("chrome-extension://")) return true
     if (el.matches(foreignExtensionSelector)) return true
