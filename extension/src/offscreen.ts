@@ -27,6 +27,10 @@ type RecordingState = {
 
 const recordings = new Map<number, RecordingState>()
 
+if (globalThis.location?.hash === "#reload") {
+  chrome.runtime.reload()
+}
+
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
   if (!isOffscreenMessage(message)) return false
   void handleMessage(message).then(sendResponse)

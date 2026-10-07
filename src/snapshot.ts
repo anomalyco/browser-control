@@ -265,6 +265,11 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       }
       const titleName = (element: Element): string => normalize(element.getAttribute("title") ?? "")
       const labelledName = (element: Element): string => explicitAriaName(element) || titleName(element)
+      const isHeadingPermalinkAnchor = (el: Element): boolean =>
+        el.matches("a[href^='#']") &&
+        Boolean(el.closest("h1, h2, h3, h4, h5, h6, [role='heading']")) &&
+        (normalize(el.textContent ?? "").length <= 2 ||
+          /\bpermalink\b|^direct link to\b|^section titled\b/i.test(el.getAttribute("aria-label") ?? ""))
       const safeTextCache = new WeakMap<Element, string>()
       const safeText = (element: Element): string => {
         const cached = safeTextCache.get(element)
@@ -289,6 +294,9 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           acceptNode(node) {
             if (node instanceof Element) {
               if (node.matches("input, textarea, select, script, style, noscript, template")) {
+                return NodeFilter.FILTER_REJECT
+              }
+              if (node !== element && isHeadingPermalinkAnchor(node)) {
                 return NodeFilter.FILTER_REJECT
               }
               const style = styleOf(node)
@@ -767,7 +775,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         }
         const card = element.closest?.("article, [role='article']")
         if (card && (root.contains?.(card) ?? true)) {
-          const rawCardLinks = Array.from(card.querySelectorAll("a[href]"))
+          const rawCardLinks = querySelectorAllDeep(card, "a[href]")
           if (rawCardLinks.length <= 12 && rawCardLinks.filter(isVisible).some((link) => accessibleName(link) === headingText)) {
             return true
           }
@@ -887,6 +895,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           }
         }
         if (!isVisible(element)) continue
+        if (settings.compact && isHeadingPermalinkAnchor(element)) continue
         const role = roleFor(element)
         const isHeading = role === "heading"
         if (isHeading && isRedundantHeadingForLink(element)) continue

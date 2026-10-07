@@ -580,6 +580,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     ...(contextDebugLog ? { trace: contextDebugLog } : {}),
   })
   const mainFrameIdsByTab = new Map<number, string>()
+  const utilityWorldNamesByTab = new Map<number, Set<string>>()
   const inputLocks = new Map<number, Semaphore.Semaphore>()
   const ghostCursorPositionsByTab = new Map<number, { readonly x: number; readonly y: number }>()
   const suppressedChildSessions = new Map<string, number>()
@@ -596,11 +597,50 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   function retractProtectedFrame(target: ConnectedTarget, frameId: string, url: string | undefined): void {
     contextDebugLog?.(`protected-frame frame=${boundedToken(frameId)} ${targetDiagnosticIdentity(target)} ${summarizeDiagnosticUrl(url)}`)
     sendEventToTargetViewers(target.sessionId, { method: "Page.frameDetached", params: { frameId, reason: "remove" }, sessionId: target.sessionId })
+    refreshPageStatus(target.tabId)
   }
 
   function forgetProtectedFrames(tabId: number): void {
     protectedFrames.forgetTab(tabId)
     setProtectedUi(tabId, false)
+  }
+
+  function ensureMainFrameAttached(tabId: number, target: ConnectedTarget, frameId: string | undefined): void {
+    if (!frameId) return
+    const previousMainFrameId = mainFrameIdsByTab.get(tabId) ?? target.targetInfo.targetId
+    mainFrameIdsByTab.set(tabId, frameId)
+    if (previousMainFrameId !== frameId) {
+      contextDebugLog?.(`main-frame-swapped oldFrame=${boundedToken(previousMainFrameId)} newFrame=${boundedToken(frameId)} ${targetDiagnosticIdentity(target)}`)
+      sendEventToTargetViewers(target.sessionId, {
+        method: "Page.frameAttached",
+        params: { frameId, parentFrameId: "" },
+        sessionId: target.sessionId,
+      })
+    }
+  }
+
+  function restoreTabUtilityWorlds(tabId: number, explicitFrameId?: string): void {
+    const worlds = utilityWorldNamesByTab.get(tabId)
+    if (!worlds || worlds.size === 0) return
+    const frameId = explicitFrameId ?? mainFrameIdsByTab.get(tabId) ?? registry.routingRootTarget(tabId)?.targetInfo.targetId
+    for (const worldName of worlds) {
+      Effect.runPromise(
+        Effect.gen(function* () {
+          yield* sendDebuggerCommand({
+            tabId,
+            method: "Page.addScriptToEvaluateOnNewDocument",
+            params: { source: "", worldName },
+          }).pipe(Effect.ignore)
+          if (frameId) {
+            yield* sendDebuggerCommand({
+              tabId,
+              method: "Page.createIsolatedWorld",
+              params: { frameId, grantUniveralAccess: true, worldName },
+            }).pipe(Effect.ignore)
+          }
+        }),
+      ).catch(() => {})
+    }
   }
 
   function targetDiagnosticIdentity(target: ConnectedTarget | ChildTarget | undefined): string {
@@ -927,6 +967,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       if (reason === "target_closed") {
         if (eventTabId) {
           rootLifecycle.queue({ tabId: eventTabId, attachIfMissing: false, verificationRetries: 3, errorMessage: "Failed to reconcile ambiguous debugger detach" })
+          restoreTabUtilityWorlds(eventTabId)
         }
         return
       }
@@ -1094,13 +1135,14 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       const frameUrl = getString(frame, "url")
       const frameParentId = getString(frame, "parentId")
       if (frameUrl !== undefined && frameParentId === undefined && (sourceSessionId === undefined || sourceSessionId === target.sessionId)) {
-        if (frameId !== undefined) {
-          mainFrameIdsByTab.set(tabId, frameId)
-        }
+        ensureMainFrameAttached(tabId, target, frameId)
         // The previous document's frames, protected ones included, are gone.
         forgetProtectedFrames(tabId)
         contextDebugLog?.(`main-frame-navigated frame=${boundedToken(frameId)} loader=${boundedToken(getString(frame, "loaderId"))} ${targetDiagnosticIdentity(target)} ${summarizeDiagnosticUrl(frameUrl)}`)
         registry.updateTargetUrl(tabId, frameUrl)
+        if (getString(params, "type") === "TabsUpdateFallback") {
+          restoreTabUtilityWorlds(tabId, frameId)
+        }
       }
       if (frameId !== undefined && frameParentId !== undefined && params) {
         registry.rememberFrameEvent({ tabId, frameId, navigated: params })
@@ -1362,6 +1404,18 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       catch: (error) => error instanceof Error ? error : new Error(String(error)),
     })
     const { tabId } = route
+    if (
+      route.chromeSessionId === undefined &&
+      (normalizedMessage.method === "Page.addScriptToEvaluateOnNewDocument" ||
+        normalizedMessage.method === "Page.createIsolatedWorld")
+    ) {
+      const worldName = getString(normalizedMessage.params, "worldName")
+      if (worldName?.startsWith("__playwright_utility_world_")) {
+        const set = utilityWorldNamesByTab.get(tabId) ?? new Set<string>()
+        set.add(worldName)
+        utilityWorldNamesByTab.set(tabId, set)
+      }
+    }
     const command = {
       tabId,
       method: normalizedMessage.method,
@@ -1498,6 +1552,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   function clearTabRuntimeState(tabId: number): void {
     inputLocks.delete(tabId)
     mainFrameIdsByTab.delete(tabId)
+    utilityWorldNamesByTab.delete(tabId)
     protectedFrames.forgetTab(tabId)
     ghostCursorPositionsByTab.delete(tabId)
     forgetTab(tabId)

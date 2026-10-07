@@ -369,6 +369,7 @@ try {
     await page.setContent(`
       <main id="content">
         <h1>Search Stories</h1>
+        <h2><a href="#primitives" aria-label="the primitives permalink"></a>The primitives: string, number, and boolean</h2>
         <p>Effect is a production TypeScript framework providing composable concurrency, structured error handling, and dependency injection.</p>
         <button id="fruit-select" role="combobox" aria-expanded="false">Select a fruit</button>
         <pre><div role="tablist"><button role="tab" aria-selected="true">bun</button></div><pre><code>bun add effect</code><button>Copy</button></pre></pre>
@@ -393,6 +394,8 @@ try {
     assert.doesNotMatch(snap, /list "List"/)
 
     const full = await snapshot()
+    assert.match(full, /heading "The primitives: string, number, and boolean" \[level=2\]/)
+    assert.doesNotMatch(full, /the primitives permalink/)
     assert.match(full, /p "Effect is a production TypeScript framework/)
     assert.match(full, /code "bun add effect"/)
     assert.doesNotMatch(full, /bun add effectCopy/)

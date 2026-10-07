@@ -335,9 +335,11 @@ export const selectRuntime = Effect.fn("RuntimeInstall.select")(function* (optio
       await fs.rm(temporary, { force: true })
     }
     const extensionSource = path.join(install, "node_modules", packageName, "extension", "dist")
+    const repoExtensionDist = path.join(root, "extension", "dist")
+    await fs.cp(extensionSource, repoExtensionDist, { recursive: true, force: true }).catch(() => {})
     const extensionsRoot = path.join(path.dirname(active), "extensions")
     const entries = await fs.readdir(extensionsRoot, { withFileTypes: true }).catch(() => [])
-    let syncedExtensions = 0
+    let syncedExtensions = 1
     for (const entry of entries) {
       if (entry.isDirectory() && entry.name.startsWith("browser-control-")) {
         await fs.cp(extensionSource, path.join(extensionsRoot, entry.name), { recursive: true, force: true })

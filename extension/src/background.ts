@@ -133,12 +133,101 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 const explicitlyDetachingTabs = new Set<number>()
 
 async function recoverTabDebugger(tabId: number, requireEviction: boolean): Promise<boolean> {
-  const evicted = (await chrome.tabs.sendMessage(tabId, { action: "evict-extension-frames" }).catch(() => undefined)) as { readonly removed?: number } | undefined
+  const evicted = (await chrome.tabs.sendMessage(tabId, { action: "evict-extension-frames", aggressive: true }).catch(() => undefined)) as { readonly removed?: number } | undefined
   if (requireEviction && (evicted?.removed ?? 0) === 0) return false
   await new Promise((resolve) => setTimeout(resolve, 45))
   const owned = await getOwnedDebuggerTabIds(chrome.debugger)
   if (owned.has(tabId)) return true
-  return await chrome.debugger.attach({ tabId }, "1.3").then(() => true, (error) => isAlreadyAttachedError(error))
+  const attached = await chrome.debugger.attach({ tabId }, "1.3").then(() => true, (error) => isAlreadyAttachedError(error))
+  if (attached) {
+    await Promise.all([
+      chrome.debugger.sendCommand({ tabId }, "Page.enable", {}).catch(() => {}),
+      chrome.debugger.sendCommand({ tabId }, "Page.setLifecycleEventsEnabled", { enabled: true }).catch(() => {}),
+      chrome.debugger.sendCommand({ tabId }, "Runtime.enable", {}).catch(() => {}),
+      chrome.debugger.sendCommand({ tabId }, "Network.enable", {}).catch(() => {}),
+      chrome.debugger.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {}),
+      chrome.debugger.sendCommand({ tabId }, "Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }).catch(() => {}),
+    ])
+  }
+  return attached
+}
+
+async function navigateViaTabsUpdateFallback(
+  tabId: number,
+  url: string,
+  requestedFrameId: string | undefined,
+  currentSocket: WebSocket,
+): Promise<JsonObject> {
+  const beforeTab = await chrome.tabs.get(tabId).catch(() => undefined)
+  const previousUrl = beforeTab?.url
+  await chrome.tabs.update(tabId, { url })
+  const deadline = Date.now() + 12_000
+  let frameObj: JsonObject | undefined
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 60))
+    const tab = await chrome.tabs.get(tabId).catch(() => undefined)
+    if (!tab) break
+    await recoverTabDebugger(tabId, false)
+    try {
+      const tree = toJsonObject(await chrome.debugger.sendCommand({ tabId }, "Page.getFrameTree", {}))
+      const frameTree = objectParam(tree, "frameTree")
+      const candidate = objectParam(frameTree, "frame")
+      const currentUrl = typeof candidate?.url === "string" ? candidate.url : tab.url
+      const urlAdvanced = !previousUrl || previousUrl === url || currentUrl !== previousUrl
+      if (candidate && currentUrl && currentUrl !== "about:blank" && urlAdvanced && tab.status === "complete") {
+        frameObj = candidate
+        break
+      }
+      if (candidate && urlAdvanced) frameObj = candidate
+    } catch {
+      // Wait for navigation away from extension-tainted document to finish
+    }
+  }
+  const frameId =
+    (typeof frameObj?.id === "string" ? frameObj.id : undefined) ??
+    requestedFrameId ??
+    String(tabId)
+  const loaderId =
+    (typeof frameObj?.loaderId === "string" ? frameObj.loaderId : undefined) ??
+    `tabs-update-${Date.now()}`
+  const finalUrl = (typeof frameObj?.url === "string" ? frameObj.url : undefined) ?? url
+  const synthesizedFrame: JsonObject = frameObj ?? {
+    id: frameId,
+    loaderId,
+    url: finalUrl,
+    domainAndRegistry: "",
+    securityOrigin: "",
+    mimeType: "text/html",
+  }
+  // 1. Emit Page.frameNavigated FIRST so the relay re-keys mainFrame._id in Playwright
+  // before any new execution contexts or lifecycle events arrive.
+  sendOnCurrentSocket(currentSocket, {
+    method: "debugger.event",
+    params: {
+      tabId,
+      method: "Page.frameNavigated",
+      params: { frame: synthesizedFrame, type: "TabsUpdateFallback" },
+    },
+  })
+  // 2. Now re-enable Runtime so Chrome emits Runtime.executionContextCreated for the new mainFrameId.
+  await chrome.debugger.sendCommand({ tabId }, "Page.enable", {}).catch(() => {})
+  await chrome.debugger.sendCommand({ tabId }, "Page.setLifecycleEventsEnabled", { enabled: true }).catch(() => {})
+  await chrome.debugger.sendCommand({ tabId }, "Runtime.disable", {}).catch(() => {})
+  await chrome.debugger.sendCommand({ tabId }, "Runtime.enable", {}).catch(() => {})
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  // 3. Emit lifecycle events after contexts are registered.
+  const ts = Date.now() / 1_000
+  for (const name of ["commit", "DOMContentLoaded", "load", "networkAlmostIdle", "networkIdle"]) {
+    sendOnCurrentSocket(currentSocket, {
+      method: "debugger.event",
+      params: {
+        tabId,
+        method: "Page.lifecycleEvent",
+        params: { frameId, loaderId, name, timestamp: ts },
+      },
+    })
+  }
+  return { frameId, loaderId }
 }
 
 chrome.debugger.onDetach.addListener((source, reason) => {
@@ -433,8 +522,12 @@ async function handleCommand(command: ShimCommand, currentSocket: WebSocket): Pr
           }
         }
         if (sessionId === undefined && cdpMethod === "Page.navigate" && typeof params?.url === "string") {
-          await chrome.tabs.update(tabId, { url: params.url })
-          return { frameId: String(tabId) }
+          return await navigateViaTabsUpdateFallback(
+            tabId,
+            params.url,
+            optionalStringParam(params, "frameId"),
+            currentSocket,
+          )
         }
       }
       throw error
