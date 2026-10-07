@@ -1,7 +1,7 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import type { GhostCursorMouseAction } from "./ghost-cursor.ts"
+import { ghostCursorMouseActionExpression, type GhostCursorMouseAction } from "./ghost-cursor.ts"
 import { DEFAULT_HUMAN_MODEL_PROFILE, type HumanModelProfile, type Point } from "./human-model.ts"
 import type { JsonObject } from "./protocol.ts"
 
@@ -13,19 +13,15 @@ export type TrajectoryStep = {
 }
 
 let cachedProfile: HumanModelProfile | undefined
-let cachedProfileCheckedAt = 0
 
 export function setHumanModelProfile(profile: HumanModelProfile | undefined): void {
   cachedProfile = profile
-  cachedProfileCheckedAt = Date.now()
 }
 
 export function getHumanModelProfile(): HumanModelProfile {
-  const now = Date.now()
-  if (cachedProfile && now - cachedProfileCheckedAt < 15_000) {
+  if (cachedProfile) {
     return cachedProfile
   }
-  cachedProfileCheckedAt = now
   if (process.env.VITEST === "true" && !process.env.BROWSER_CONTROL_HUMAN_MODEL_PATH) {
     cachedProfile = DEFAULT_HUMAN_MODEL_PROFILE
     return cachedProfile
@@ -349,7 +345,7 @@ async function paceMouse(tab: TabState, params: JsonObject, send: Send): Promise
     const driftX = round1(params.x + noise(1.4))
     const driftY = round1(params.y + noise(1.4))
     void send("Runtime.evaluate", {
-      expression: `globalThis.__browserControlGhostCursor?.applyMouseEvent(${JSON.stringify({ type: "move", x: driftX, y: driftY, button: "none", durationMs: 110 })})`,
+      expression: ghostCursorMouseActionExpression({ type: "move", x: driftX, y: driftY, button: "none", durationMs: 110 }),
       awaitPromise: false,
     }).catch(() => undefined)
     await sendFrames(frames, (frame) =>
@@ -463,7 +459,7 @@ async function scrollToward(tab: TabState, params: JsonObject, send: Send): Prom
     const driftX = round1(pointer.x + noise(1.6))
     const driftY = round1(pointer.y + noise(1.6))
     void send("Runtime.evaluate", {
-      expression: `globalThis.__browserControlGhostCursor?.applyMouseEvent(${JSON.stringify({ type: "move", x: driftX, y: driftY, button: "none", durationMs: 120 })})`,
+      expression: ghostCursorMouseActionExpression({ type: "move", x: driftX, y: driftY, button: "none", durationMs: 120 }),
       awaitPromise: false,
     }).catch(() => undefined)
     await sendFrames(glide(0, amount), (frame) =>

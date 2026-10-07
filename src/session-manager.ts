@@ -529,7 +529,9 @@ export class BrowserControlSessions {
             return yield* timeoutError
           }
           const activeReservation = reservation
-          previousTarget = session.target ?? previousTarget
+          if (session.target && session.target.id !== options.targetId) {
+            previousTarget = session.target
+          }
           const previousTargetId = previousTarget?.id
           if (previousTarget?.owner === "relay" && previousTarget.id !== options.targetId) {
             yield* manager.closeRelayTarget(previousTarget.id)

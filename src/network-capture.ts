@@ -505,7 +505,9 @@ function finishCapture(
       : undefined
     const collector = new SecretCollector(existingProfile?.slots ?? [])
     const structurallyProtected = active.entries.map((entry) => protectEntry(entry, collector))
-    const protectedEntries = structurallyProtected.map((entry) => redactEntryKnownValues(entry, collector))
+    const protectedEntries = options.outputPath
+      ? structurallyProtected.map((entry) => redactEntryKnownValues(entry, collector))
+      : structurallyProtected
     if (options.requireObservedSecrets && collector.observedRefs().length === 0) {
       return yield* new NetworkCaptureError({
         message: `Auth refresh did not observe credentials for profile ${secrets ?? "unknown"}`,
@@ -558,6 +560,7 @@ function summarizeEndpoints(entries: readonly CapturedEntry[]): readonly Network
     } catch {}
     const key = `${entry.request.method} ${routePath}`
     const existing = byRoute.get(key)
+    if (!existing && byRoute.size >= 30) continue
     const notableHeaders = entry.request.headers
       .filter((h) => {
         const lower = h.name.toLowerCase()
@@ -566,8 +569,8 @@ function summarizeEndpoints(entries: readonly CapturedEntry[]): readonly Network
       })
       .slice(0, 8)
       .map((h) => `${h.name}: ${h.value.slice(0, 80)}`)
-    const requestKeys = extractTopLevelJsonKeys(entry.request.body)
-    const responseKeys = extractTopLevelJsonKeys(entry.response?.body)
+    const requestKeys = existing?.requestKeys ? undefined : extractTopLevelJsonKeys(entry.request.body)
+    const responseKeys = existing?.responseKeys ? undefined : extractTopLevelJsonKeys(entry.response?.body)
     byRoute.set(key, {
       method: entry.request.method,
       url: entry.request.url.slice(0, 240),
@@ -577,7 +580,6 @@ function summarizeEndpoints(entries: readonly CapturedEntry[]): readonly Network
       ...(requestKeys ? { requestKeys } : existing?.requestKeys ? { requestKeys: existing.requestKeys } : {}),
       ...(responseKeys ? { responseKeys } : existing?.responseKeys ? { responseKeys: existing.responseKeys } : {}),
     })
-    if (byRoute.size >= 30) break
   }
   return [...byRoute.values()]
 }

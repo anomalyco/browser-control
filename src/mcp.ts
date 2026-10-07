@@ -517,14 +517,19 @@ const registerTools = Effect.gen(function* () {
       }),
       annotations: Context.empty(),
       handle: (payload: unknown) => {
+        const invoke = Effect.try({
+          try: () => spec.handle(payload),
+          catch: (cause) => cause instanceof Error ? cause : new Error(String(cause)),
+        }).pipe(Effect.flatten)
         const operation = mcpToolRequiresRelayCompatibility(spec.name)
           ? RelayLifecycle.ensureRelay({ relay }).pipe(
             Effect.flatMap((readiness) => readiness.buildProblem
               ? Effect.fail(new Error(readiness.buildProblem))
-              : spec.handle(payload)),
+              : invoke),
           )
-          : spec.handle(payload)
+          : invoke
         return operation.pipe(
+          Effect.catchDefect((defect) => Effect.fail(defect instanceof Error ? defect : new Error(String(defect)))),
           Effect.match({
             onFailure: (error) => toolResult({ text: mcpErrorMessage(spec.name, error.message), isError: true }),
             onSuccess: (value) => toolResultForValue(value),

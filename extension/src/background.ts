@@ -133,7 +133,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 const explicitlyDetachingTabs = new Set<number>()
 
 async function recoverTabDebugger(tabId: number, requireEviction: boolean): Promise<boolean> {
-  const evicted = (await chrome.tabs.sendMessage(tabId, { action: "evict-extension-frames", aggressive: true }).catch(() => undefined)) as { readonly removed?: number } | undefined
+  const evicted = (await chrome.tabs.sendMessage(tabId, { action: "evict-extension-frames" }).catch(() => undefined)) as { readonly removed?: number } | undefined
   if (requireEviction && (evicted?.removed ?? 0) === 0) return false
   await new Promise((resolve) => setTimeout(resolve, 45))
   const owned = await getOwnedDebuggerTabIds(chrome.debugger)

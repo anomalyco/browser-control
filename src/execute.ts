@@ -833,7 +833,7 @@ export class ExecuteSandbox {
     }
     installPageReadTimeout(page)
     this.installViewportZoomGuard(page)
-    this.networkCapture.bindPage(this.page)
+    this.networkCapture.bindPage(page)
     return { browser, context, page }
   }
 
@@ -1047,6 +1047,7 @@ export class ExecuteSandbox {
     if (targetId === undefined || targetId !== this.defaultPageTargetId) {
       this.pageCrashed = false
       this.pageProtectedUi = false
+      this.explicitLightColorScheme = false
     }
     this.defaultPageTargetId = targetId
     this.ownsPage = ownsPage
@@ -1066,8 +1067,11 @@ export class ExecuteSandbox {
     const navigate = (frame: Frame) => {
       if (this.page === page && frame === page.mainFrame()) {
         this.pageCrashed = false
+        const hadClosedReplacementGuard = this.recreatedFromClosedUrl !== undefined
         this.recordNonBlankUrl(frame.url())
-        page.setDefaultTimeout?.(30_000)
+        if (hadClosedReplacementGuard) {
+          page.setDefaultTimeout?.(30_000)
+        }
         if (this.explicitLightColorScheme) {
           void this.applyExplicitLightColorScheme(page)
         }

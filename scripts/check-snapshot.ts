@@ -409,6 +409,42 @@ try {
     })
     assert.equal(await ref(comboRef).count(), 1)
   })
+
+  await check("select options preview, scrollable container pagination, ancestor-path find, and native PDF embed", async () => {
+    const { snapshot } = createSnapshotHelpers(page, { selectors: new Map() })
+    await page.setContent(`
+      <main>
+        <h1>Billing Settings</h1>
+        <div role="group" aria-label="Currency & Logs" style="height:100px; overflow-y:auto">
+          <div style="height:360px">
+            <label for="currency">Currency</label>
+            <select id="currency">
+              <option value="usd" selected>USD</option>
+              <option value="eur">EUR</option>
+              <option value="gbp">GBP</option>
+            </select>
+            <p>Line 1</p>
+            <p>Line 2</p>
+            <p>Line 3</p>
+            <button id="rotate-key">Rotate API Key</button>
+          </div>
+        </div>
+      </main>
+    `)
+    const full = await snapshot()
+    assert.match(full, /combobox "Currency" \[ref=e\d+ selected="USD" 3 options options="USD, EUR, GBP"\]/)
+    assert.match(full, /group "Currency & Logs" \[scrollable="0\.0↑ [1-9]\.\d↓"\]/)
+    const found = await snapshot({ find: "Rotate API Key" })
+    assert.match(found, /- heading "Billing Settings" \[level=1\]/)
+    assert.match(found, /- button "Rotate API Key" \[ref=e\d+\]/)
+
+    await page.setContent(`
+      <html><head><title>statement-2026-10.pdf</title></head>
+      <body><embed type="application/x-google-chrome-pdf" src="https://example.com/statement-2026-10.pdf"></body></html>
+    `)
+    const pdfSnap = await snapshot()
+    assert.match(pdfSnap, /- document "statement-2026-10\.pdf" \[type=application\/pdf\]/)
+  })
 } finally {
   await browser.close()
 }

@@ -49,6 +49,7 @@ export type SnapshotRefRegistry = {
   selectors: Map<string, { readonly selector: string; readonly role: string; readonly name?: string }>
   previousSnapshot?: SnapshotBaseline
   nextRef?: number
+  refRoots?: WeakMap<Locator, { readonly selector: string; readonly role: string; readonly name?: string }>
   locatorScopes?: WeakMap<Locator, number>
   nextLocatorScope?: number
   removeNavigationListener?: () => void
@@ -129,18 +130,18 @@ export function invalidateSnapshotDocument(registry: SnapshotRefRegistry): void 
   delete registry.page
   delete registry.url
   delete registry.previousSnapshot
+  delete registry.refRoots
 }
 
 export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry): {
   readonly snapshot: SnapshotHelper
   readonly ref: SnapshotRefHelper
 } {
-  const refRoots = new WeakMap<Locator, { readonly selector: string; readonly role: string; readonly name?: string }>()
   const snapshot: SnapshotHelper = async (options = {}) => {
     const within = options.within
     const withinSelector = Predicate.isString(within) ? within : undefined
     const withinLocator = within !== undefined && !Predicate.isString(within) ? within : undefined
-    const refRoot = withinLocator ? refRoots.get(withinLocator) : undefined
+    const refRoot = withinLocator ? registry.refRoots?.get(withinLocator) : undefined
     const locator = withinLocator && !refRoot ? withinLocator : undefined
     let locatorScope: number | undefined
     if (locator) {
@@ -533,6 +534,15 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           const selected = element.selectedOptions[0]?.textContent
           if (selected) details.push(`selected="${quote(normalize(selected).slice(0, 80))}"`)
           details.push(`${element.options.length} options`)
+          if (element.options.length > 0) {
+            const preview = Array.from(element.options)
+              .map((opt) => normalize(opt.textContent ?? "").slice(0, 32))
+              .filter(Boolean)
+              .slice(0, 5)
+            if (preview.length > 0) {
+              details.push(`options="${quote(preview.join(", "))}${element.options.length > preview.length ? ", ..." : ""}"`)
+            }
+          }
         }
         if (element instanceof HTMLButtonElement || element instanceof HTMLInputElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement) {
           if (element.disabled) details.push("disabled")
@@ -556,6 +566,20 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         if (element instanceof HTMLTableElement) details.push(`${element.rows.length} rows`)
         if (element instanceof HTMLUListElement || element instanceof HTMLOListElement) details.push(`${element.children.length} items`)
         if (element instanceof HTMLFieldSetElement) details.push(`${element.elements.length} controls`)
+        if (
+          typeof element.scrollHeight === "number" &&
+          typeof element.clientHeight === "number" &&
+          element.clientHeight >= 40 &&
+          element.scrollHeight > element.clientHeight + 24
+        ) {
+          const style = styleOf(element)
+          const overflowY = style.overflowY || style.overflow || ""
+          if (overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay") {
+            const above = Math.max(0, (element.scrollTop || 0) / element.clientHeight).toFixed(1)
+            const below = Math.max(0, (element.scrollHeight - element.clientHeight - (element.scrollTop || 0)) / element.clientHeight).toFixed(1)
+            details.push(`scrollable="${above}↑ ${below}↓"`)
+          }
+        }
         return details.length ? details.join(" ") : undefined
       }
       const isShadowRoot = (node: unknown): node is ShadowRoot =>
@@ -593,6 +617,19 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         return results
       }
       const localCssCache = new WeakMap<Element, string>()
+      const uniqueSelectorCache = new WeakMap<Document | ShadowRoot, Map<string, boolean>>()
+      const isUniqueInScope = (scope: Document | ShadowRoot, candidate: string): boolean => {
+        let map = uniqueSelectorCache.get(scope)
+        if (!map) {
+          map = new Map<string, boolean>()
+          uniqueSelectorCache.set(scope, map)
+        }
+        const cached = map.get(candidate)
+        if (cached !== undefined) return cached
+        const unique = scope.querySelectorAll(candidate).length === 1
+        map.set(candidate, unique)
+        return unique
+      }
       const localCssPath = (element: Element, scope: Document | ShadowRoot): string => {
         const cached = localCssCache.get(element)
         if (cached !== undefined) return cached
@@ -600,13 +637,13 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           const id = element.getAttribute("id")
           if (id) {
             const candidate = `#${CSS.escape(id)}`
-            if (scope.querySelectorAll(candidate).length === 1) return candidate
+            if (isUniqueInScope(scope, candidate)) return candidate
           }
           for (const attribute of ["data-testid", "data-test-id", "data-test", "name", "aria-label", "placeholder"]) {
             const value = element.getAttribute(attribute)
             if (value) {
               const candidate = `[${attribute}="${CSS.escape(value)}"]`
-              if (scope.querySelectorAll(candidate).length === 1) return candidate
+              if (isUniqueInScope(scope, candidate)) return candidate
             }
           }
           const tag = element.tagName.toLowerCase()
@@ -617,7 +654,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
             if (className.includes(":") || className.includes("[") || className.includes("/")) continue
             if (++checkedClasses > 4) break
             const candidate = `${tag}.${CSS.escape(className)}${roleSuffix}`
-            if (scope.querySelectorAll(candidate).length === 1) return candidate
+            if (isUniqueInScope(scope, candidate)) return candidate
           }
           const parent = element.parentElement
           if (!parent) {
@@ -799,16 +836,24 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         seen.add(key)
         return false
       }
+      const redundantListItemCache = new WeakMap<Element, boolean>()
       const isRedundantListItem = (element: Element): boolean => {
         if (!settings.compact || element === root) return false
-        if (element.querySelector?.("ul, ol, [role='list'], h1, h2, h3, h4, h5, h6, [role='heading']")) {
-          return true
+        const cached = redundantListItemCache.get(element)
+        if (cached !== undefined) return cached
+        const compute = (): boolean => {
+          if (element.querySelector?.("ul, ol, [role='list'], h1, h2, h3, h4, h5, h6, [role='heading']")) {
+            return true
+          }
+          if (element.querySelector?.("p")) return false
+          const controls = Array.from(element.querySelectorAll?.("a[href], button") ?? []).filter(isVisible)
+          if (controls.length === 0) return false
+          const itemLength = safeText(element).length
+          return itemLength > 0 && controls.some((control) => accessibleName(control).length >= itemLength * 0.65)
         }
-        if (element.querySelector?.("p")) return false
-        const controls = Array.from(element.querySelectorAll?.("a[href], button") ?? []).filter(isVisible)
-        if (controls.length === 0) return false
-        const itemLength = safeText(element).length
-        return itemLength > 0 && controls.some((control) => accessibleName(control).length >= itemLength * 0.65)
+        const result = compute()
+        redundantListItemCache.set(element, result)
+        return result
       }
       const priorityFor = (options: {
         readonly role: string
@@ -1018,6 +1063,19 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           }),
         })
       }
+      if (entries.length === 0) {
+        const pdfEmbed = document.querySelector?.("embed[type='application/x-google-chrome-pdf'], embed[type='application/pdf']")
+        if (pdfEmbed || (typeof document.contentType === "string" && document.contentType === "application/pdf")) {
+          const src = pdfEmbed?.getAttribute("src") || (typeof location !== "undefined" ? location.href : "")
+          add({
+            depth: 0,
+            role: "document",
+            name: truncate(normalize(document.title || src || "PDF Document"), 100),
+            details: "type=application/pdf",
+            priority: -1,
+          })
+        }
+      }
       const overlayBonus = Math.min(30, entries.filter((entry) => entry.inActiveOverlay).length)
       const rawSelected = entries
         .map((entry, index) => ({ entry, index }))
@@ -1037,7 +1095,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           ...(interactiveElement ? { selector: cssPath(interactiveElement) } : {}),
         }))
       const hasLoadingIndicator = Boolean(
-        document.querySelector?.("[aria-busy='true'], .skeleton:not(.no-skeleton)") ||
+        Array.from(document.querySelectorAll?.("[aria-busy='true'], .skeleton:not(.no-skeleton)") ?? []).some(isVisible) ||
         Array.from(document.querySelectorAll?.("[role='status'], [role='progressbar'], main p") ?? []).some(
           (el) => isVisible(el) && /^loading\b/i.test(normalize(el.textContent ?? el.getAttribute("aria-label") ?? "")),
         ),
@@ -1048,7 +1106,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         document.body &&
         (
           hasLoadingIndicator ||
-          (!selected.some((entry) => Boolean(entry.selector)) && typeof performance !== "undefined" && performance.now() < 2_500)
+          (selected.length === 0 && typeof performance !== "undefined" && performance.now() < 2_500)
         ),
       )
       return {
@@ -1245,6 +1303,7 @@ return (${capture.toString()})(rootOrSettings, locatorSettings)`,
     const resolved = role
       ? locator.and(page.getByRole(role, snapshotRef.name ? { name: snapshotRef.name, exact: true } : undefined))
       : locator
+    const refRoots = registry.refRoots ??= new WeakMap()
     refRoots.set(resolved, snapshotRef)
     return resolved
   }
@@ -1273,9 +1332,23 @@ function findSnapshotLines(lines: readonly string[], query: string | RegExp, req
     return `No snapshot lines matched ${Predicate.isString(query) ? JSON.stringify(query) : query.toString()}.`
   }
   const included = new Set<number>()
+  const lineIndent = (line: string): number => {
+    const match = /^(\s*)-\s/.exec(line)
+    return match ? match[1]!.length : Number.POSITIVE_INFINITY
+  }
   for (const index of matches) {
     for (let candidate = Math.max(0, index - context); candidate <= Math.min(lines.length - 1, index + context); candidate++) {
       included.add(candidate)
+    }
+    if (requestedContext === undefined) {
+      let minIndent = lineIndent(lines[index]!)
+      for (let cursor = index - 1; cursor >= 0 && minIndent > 0; cursor--) {
+        const indent = lineIndent(lines[cursor]!)
+        if (indent < minIndent) {
+          included.add(cursor)
+          minIndent = indent
+        }
+      }
     }
   }
   const output: string[] = []
@@ -1479,7 +1552,7 @@ export async function screenshotWithLabels(options: ScreenshotWithLabelsOptions 
   if (options.registry) {
     const registry = options.registry
     registry.removeNavigationListener?.()
-    registry.selectors.clear()
+    invalidateSnapshotDocument(registry)
     registry.page = page
     registry.url = page.url()
     for (const label of labels) {
@@ -1596,15 +1669,20 @@ async function showScreenshotLabels(page: Page): Promise<readonly ScreenshotLabe
     const localSelectorForElement = (element: Element, scope: Document | ShadowRoot): string => {
       const id = element.getAttribute("id")
       if (id) {
-        return `#${CSS.escape(id)}`
+        const candidate = `#${CSS.escape(id)}`
+        if (scope.querySelectorAll(candidate).length === 1) return candidate
       }
       for (const attr of ["data-testid", "data-test-id", "data-test"]) {
         const val = element.getAttribute(attr)
-        if (val) return `[${attr}="${CSS.escape(val)}"]`
+        if (val) {
+          const candidate = `[${attr}="${CSS.escape(val)}"]`
+          if (scope.querySelectorAll(candidate).length === 1) return candidate
+        }
       }
       const name = element.getAttribute("name")
       if (name) {
-        return `${element.tagName.toLowerCase()}[name="${CSS.escape(name)}"]`
+        const candidate = `${element.tagName.toLowerCase()}[name="${CSS.escape(name)}"]`
+        if (scope.querySelectorAll(candidate).length === 1) return candidate
       }
       const parent = element.parentElement
       if (!parent) {

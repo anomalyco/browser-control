@@ -1043,11 +1043,24 @@ function cdpRecordingSize(metrics: JsonObject): { readonly width: number; readon
   }
 }
 
+let ffmpegCheckPromise: Promise<void> | undefined
+
+function ensureFfmpegAvailable(): Promise<void> {
+  return ffmpegCheckPromise ??= new Promise<void>((resolve, reject) => {
+    execFile("ffmpeg", ["-version"], { timeout: 5_000 }, (error) => {
+      if (error) {
+        ffmpegCheckPromise = undefined
+        reject(error)
+      } else {
+        resolve()
+      }
+    })
+  })
+}
+
 export async function startFfmpegVideoEncoder(options: Parameters<StartVideoEncoder>[0]): Promise<VideoEncoder> {
   // Preserve start-time dependency errors even though geometry arrives later.
-  await new Promise<void>((resolve, reject) => {
-    execFile("ffmpeg", ["-version"], { timeout: 5_000 }, (error) => error ? reject(error) : resolve())
-  })
+  await ensureFfmpegAvailable()
   // The first compositor frame supplies the backing surface's CSS width. It can
   // differ from both the emulated viewport and the JPEG's Retina pixel width.
   let acquisition: Promise<VideoEncoder> | undefined
@@ -1142,9 +1155,7 @@ async function createFfmpegVideoEncoder(options: {
       if (completed || finishingPromise || cancelPromise) throw new Error("ffmpeg input closed before recording finished")
       const envelope = mjpegMatroskaFrame(timestampMs, durationMs, frame.length)
       try {
-        await writeStreamChunk(child.stdin, envelope.header)
-        await writeStreamChunk(child.stdin, frame)
-        await writeStreamChunk(child.stdin, envelope.trailer)
+        await writeStreamChunk(child.stdin, Buffer.concat([envelope.header, frame, envelope.trailer]))
       } catch (error) {
         throw new Error(`${error instanceof Error ? error.message : String(error)}${stderr.trim() ? `: ${stderr.trim()}` : ""}`)
       }

@@ -391,7 +391,7 @@ export class TargetRegistry {
       return undefined
     }
     this.updateRootTargetInfo(options.tabId, options.targetInfo)
-    const target = this.tabTargets.get(options.tabId)
+    const target = this.routingRootTarget(options.tabId)
     return target ? { kind: "root", target } : undefined
   }
 
@@ -405,11 +405,8 @@ export class TargetRegistry {
     if (!target) {
       return
     }
-    const updated: ConnectedTarget = { ...target, targetInfo }
-    this.targets.set(updated.sessionId, updated)
-    this.tabTargets.set(tabId, updated)
     this.targetsByTargetId.delete(target.targetInfo.targetId)
-    this.targetsByTargetId.set(targetInfo.targetId, updated)
+    this.addRootTarget({ ...target, targetInfo })
   }
 
   updateChildTargetInfo(targetInfo: TargetInfo): void {

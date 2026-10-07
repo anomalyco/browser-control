@@ -108,6 +108,15 @@ export const ghostCursorClientSource = `(() => {
     return;
   }
   globalThis.__browserControlGhostCursor?.hide?.();
+  if (typeof window.print === "function" && !window.print.__browserControlGuarded) {
+    const guardedPrint = function () {
+      window.__browserControlPrintRequestedAt = Date.now();
+    };
+    guardedPrint.__browserControlGuarded = true;
+    try {
+      window.print = guardedPrint;
+    } catch {}
+  }
   const cursorId = "${ghostCursorElementId}";
   const stageId = "__browser_control_ghost_stage__";
   const captionId = "__browser_control_ghost_caption__";
@@ -494,10 +503,17 @@ export const ghostCursorClientSource = `(() => {
       state.deg += (targetDeg + pressDip - state.deg) * Math.min(1, dt * 30);
 
       if (u >= 1) {
-        const endSample = f.path && f.path.length > 2 ? sampleWaypoints(f.path, 1) : sampleBezier(f.bezier, 1);
-        const overshootSpeed = f.path ? clamp(f.dist * 0.04, 0, 22) : clamp(f.dist * 0.10, 0, 55);
-        state.vx = Math.cos(endSample.heading) * overshootSpeed;
-        state.vy = Math.sin(endSample.heading) * overshootSpeed;
+        if (f.path && f.path.length > 2) {
+          state.renderedX = state.targetX;
+          state.renderedY = state.targetY;
+          state.vx = 0;
+          state.vy = 0;
+        } else {
+          const endSample = sampleBezier(f.bezier, 1);
+          const overshootSpeed = clamp(f.dist * 0.10, 0, 55);
+          state.vx = Math.cos(endSample.heading) * overshootSpeed;
+          state.vy = Math.sin(endSample.heading) * overshootSpeed;
+        }
         state.flight = null;
         flushFlightResolvers();
       }
@@ -1215,7 +1231,12 @@ export function ghostCursorRestoreExpression(position: { readonly x: number; rea
 }
 
 async function ensureGhostCursor(page: Page): Promise<void> {
-  await page.evaluate(ghostCursorClientSource)
+  const installed = await page.evaluate(
+    () => (globalThis as { __browserControlGhostCursor?: { readonly version?: number } }).__browserControlGhostCursor?.version === 14,
+  ).catch(() => false)
+  if (!installed) {
+    await page.evaluate(ghostCursorClientSource)
+  }
 }
 
 async function resolveTargetBox(page: Page, target: Locator | string): Promise<GhostCursorRect | null> {

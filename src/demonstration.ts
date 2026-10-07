@@ -121,12 +121,12 @@ async function recorderState(page: Page): Promise<PageRecorderState> {
   const existing = pageRecorders.get(page)
   if (existing) return existing
   const state: PageRecorderState = {}
-  pageRecorders.set(page, state)
   await page.exposeBinding(demonstrationBindingName, (_source, value: unknown) => {
     const active = state.active
     if (!active || !isDemonstrationStep(value)) return
     appendStep(active.steps, value)
   })
+  pageRecorders.set(page, state)
   return state
 }
 

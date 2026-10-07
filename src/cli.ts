@@ -733,7 +733,7 @@ const flightRecorderStart = Command.make(
       ...(Option.isSome(retentionMs) ? { retentionMs: retentionMs.value } : {}),
       ...(Option.isSome(frameRate) ? { frameRate: frameRate.value } : {}),
     })
-    yield* Console.log(json ? JSON.stringify(result) : `Flight recorder buffering tab ${result.tabId}; retention=${result.retentionMs}ms`)
+    yield* Console.log(json ? JSON.stringify(result, null, 2) : `Flight recorder buffering tab ${result.tabId}; retention=${result.retentionMs}ms`)
   }),
 ).pipe(Command.withDescription("Start a rolling in-memory video buffer"))
 
@@ -748,7 +748,7 @@ const flightRecorderStatus = Command.make(
     const relay = yield* RelayClient.Service
     yield* ensureCliRelay()
     const result = yield* relay.flightRecorderStatus(yield* recordingTarget({ session, tabId }))
-    if (json) return yield* Console.log(JSON.stringify(result))
+    if (json) return yield* Console.log(JSON.stringify(result, null, 2))
     if (!result.active) return yield* Console.log("Flight recorder inactive")
     yield* Console.log(`Flight recorder tab=${result.tabId} frames=${result.bufferedFrames} retained=${result.retainedDurationMs}ms bytes=${result.bufferedBytes}`)
   }),
@@ -771,7 +771,7 @@ const flightRecorderSaveLast = Command.make(
       outputPath: path.resolve(outputPath),
       ...(Option.isSome(durationMs) ? { durationMs: durationMs.value } : {}),
     })
-    yield* Console.log(json ? JSON.stringify(result) : `Saved ${result.durationMs}ms flight recorder clip (${result.frameCount} frames) to ${result.path}`)
+    yield* Console.log(json ? JSON.stringify(result, null, 2) : `Saved ${result.durationMs}ms flight recorder clip (${result.frameCount} frames) to ${result.path}`)
   }),
 ).pipe(Command.withDescription("Save the most recent buffered video without stopping the recorder"))
 

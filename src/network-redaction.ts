@@ -149,7 +149,7 @@ export class SecretCollector {
         if (separator < 1) return part
         const cookieName = part.slice(0, separator).trim()
         const cookieValue = part.slice(separator + 1)
-        if (lower === "set-cookie" && index > 0 && /^(domain|path|expires|max-age|samesite)$/i.test(cookieName)) {
+        if (lower === "set-cookie" && index > 0) {
           return part
         }
         if (!cookieValue) return part
@@ -327,33 +327,54 @@ function sourceName(requestScope: string, location: string, occurrence = 0): str
 export function redactKnownValues(text: string, slots: readonly RedactionSlot[]): string {
   return [...slots]
     .sort((left, right) => right.value.length - left.value.length)
-    .reduce((output, slot) => replaceOutsideReferences(output, slot.value, `\${${slot.ref}}`), text)
+    .reduce((output, slot) => {
+      if (slot.value.length < 4 && output !== slot.value) return output
+      return replaceOutsideReferences(output, slot.value, `\${${slot.ref}}`)
+    }, text)
 }
 
-function redactKnownValue(value: unknown, slots: readonly RedactionSlot[]): unknown {
+function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
+  if (!Predicate.isObject(value) || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+function redactKnownValue(value: unknown, slots: readonly RedactionSlot[], seen = new WeakSet<object>()): unknown {
   if (Predicate.isString(value)) return redactKnownValues(value, slots)
   if (Predicate.isNumber(value) || Predicate.isBoolean(value)) {
     const slot = slots.find((candidate) => candidate.value === String(value))
     return slot ? `\${${slot.ref}}` : value
   }
-  if (Array.isArray(value)) return value.map((item) => redactKnownValue(item, slots))
-  if (!Predicate.isObject(value)) return value
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return value
+    seen.add(value)
+    return value.map((item) => redactKnownValue(item, slots, seen))
+  }
+  if (!isPlainJsonObject(value)) return value
+  if (seen.has(value)) return value
+  seen.add(value)
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [
     key,
-    secretNamePattern.test(key) ? redactSecretValue(item) : redactKnownValue(item, slots),
+    secretNamePattern.test(key) ? redactSecretValue(item, seen) : redactKnownValue(item, slots, seen),
   ]))
 }
 
-function redactSecretValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redactSecretValue)
-  if (Predicate.isObject(value)) {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactSecretValue(item)]))
+function redactSecretValue(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return value
+    seen.add(value)
+    return value.map((item) => redactSecretValue(item, seen))
+  }
+  if (isPlainJsonObject(value)) {
+    if (seen.has(value)) return value
+    seen.add(value)
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactSecretValue(item, seen)]))
   }
   return value === null || value === "" ? value : "[REDACTED]"
 }
 
 function replaceOutsideReferences(text: string, value: string, replacement: string): string {
-  if (!value) return text
+  if (!value || !text.includes(value)) return text
   const referencePattern = /\$\{BC_SECRET_\d+\}/g
   let output = ""
   let offset = 0

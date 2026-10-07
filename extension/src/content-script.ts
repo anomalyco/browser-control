@@ -16,8 +16,7 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
   }
   const incoming = message as { readonly action?: unknown; readonly status?: unknown }
   if (incoming.action === "evict-extension-frames") {
-    const aggressive = Boolean((incoming as { readonly aggressive?: unknown }).aggressive)
-    const removed = evictForeignExtensionFrames(aggressive)
+    const removed = evictForeignExtensionFrames()
     sendResponse({ removed })
     return
   }
@@ -30,7 +29,7 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     currentStatus = status
     completingHandoffId = undefined
     if (status.state !== "waiting") {
-      evictForeignExtensionFrames(true)
+      evictForeignExtensionFrames()
     }
     renderStatus()
   }
@@ -43,29 +42,15 @@ const foreignExtensionSelector = [
   "[data-onepassword-extension]",
   "[data-lastpass-root]",
   "[id^='bitwarden-']",
-  "#credential_picker_container",
-  "#credential_picker_iframe",
-  "iframe[src*='accounts.google.com/gsi/']",
   "iframe[src^='chrome-extension://']",
   "frame[src^='chrome-extension://']",
   "object[data^='chrome-extension://']",
   "embed[src^='chrome-extension://']",
 ].join(",")
 
-const protectedRootIds = new Set([
-  hostId,
-  "__browser_control_ghost_cursor__",
-  "app",
-  "root",
-  "__next",
-  "main",
-  " main-content",
-])
-
 function evictForeignExtensionNodesIn(
   root: Document | ShadowRoot | Element,
   pierceShadows = false,
-  aggressive = false,
 ): number {
   let removed = 0
   const ownOrigin = `chrome-extension://${chrome.runtime.id}`
@@ -75,13 +60,12 @@ function evictForeignExtensionNodesIn(
     if (src.startsWith(ownOrigin)) return false
     if (src.startsWith("chrome-extension://")) return true
     if (el.matches(foreignExtensionSelector)) return true
-    if (aggressive && (el instanceof HTMLIFrameElement || el.tagName === "FRAME" || el.tagName === "OBJECT" || el.tagName === "EMBED")) {
+    if (el instanceof HTMLIFrameElement || el.tagName === "FRAME") {
       try {
         const href = (el as HTMLIFrameElement).contentWindow?.location?.href ?? ""
-        if (!href || href.startsWith("chrome-extension://")) return true
+        if (href.startsWith("chrome-extension://") && !href.startsWith(ownOrigin)) return true
       } catch {
-        // Cross-origin or chrome-extension:// frame while debugger is blocked
-        return true
+        // Cross-origin frame; child content-script ("all_frames": true) handles its own DOM
       }
     }
     return false
@@ -90,67 +74,36 @@ function evictForeignExtensionNodesIn(
     root.remove()
     return 1
   }
-  const selector = aggressive
-    ? `iframe, frame, object, embed, ${foreignExtensionSelector}`
-    : foreignExtensionSelector
-  for (const el of root.querySelectorAll(selector)) {
+  for (const el of root.querySelectorAll(`iframe, frame, ${foreignExtensionSelector}`)) {
     if (isForeignFrameElement(el)) {
       el.remove()
       removed += 1
     }
   }
-  if (aggressive && root === document) {
-    for (const container of [document.documentElement, document.body]) {
-      if (!container) continue
-      for (const child of Array.from(container.children)) {
-        if (protectedRootIds.has(child.id)) continue
-        const tag = child.tagName
-        if (
-          tag === "HEAD" ||
-          tag === "BODY" ||
-          tag === "MAIN" ||
-          tag === "HEADER" ||
-          tag === "FOOTER" ||
-          tag === "NAV" ||
-          tag === "SCRIPT" ||
-          tag === "STYLE" ||
-          tag === "LINK" ||
-          tag === "META" ||
-          tag === "NOSCRIPT" ||
-          tag === "SVG"
-        ) {
-          continue
-        }
-        // Closed-shadow extension hosts have 0 light-DOM children and no light-DOM text
-        if (child.children.length === 0 && !child.shadowRoot && (child.textContent ?? "").trim() === "") {
-          const style = window.getComputedStyle(child)
-          const zIndex = Number.parseInt(style.zIndex || "0", 10)
-          if (tag.includes("-") || style.position === "fixed" || zIndex >= 999999) {
-            child.remove()
-            removed += 1
-          }
-        }
-      }
-    }
-  }
   if (pierceShadows) {
     if (root instanceof Element && root.id !== hostId && root.shadowRoot) {
-      removed += evictForeignExtensionNodesIn(root.shadowRoot, true, aggressive)
+      removed += evictForeignExtensionNodesIn(root.shadowRoot, true)
     }
     for (const el of root.querySelectorAll("*")) {
       if (el.id !== hostId && el.shadowRoot) {
-        removed += evictForeignExtensionNodesIn(el.shadowRoot, true, aggressive)
+        removed += evictForeignExtensionNodesIn(el.shadowRoot, true)
       }
     }
   }
   return removed
 }
 
-function evictForeignExtensionFrames(aggressive = false): number {
-  return document.documentElement ? evictForeignExtensionNodesIn(document, true, aggressive) : 0
+function evictForeignExtensionFrames(): number {
+  return document.documentElement ? evictForeignExtensionNodesIn(document, true) : 0
 }
 
 chrome.runtime.sendMessage({ action: "page-status.ready" }).catch(() => {})
+document.addEventListener("DOMContentLoaded", () => {
+  if (currentStatus) {
+    if (currentStatus.state !== "waiting") evictForeignExtensionFrames()
+    renderStatus()
+  }
+}, { once: true })
 
 function renderStatus(): void {
   if (!currentStatus || !document.documentElement) {
