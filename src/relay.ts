@@ -309,6 +309,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     readonly target: HandoffPageTarget
     readonly start?: () => unknown | Promise<unknown>
     readonly cancelStart?: () => Promise<void>
+    readonly until?: () => boolean | Promise<boolean>
   }): Promise<HandoffOutcome> => {
     const target = resolveHandoffTarget(options.sessionId, options.target)
     const sessionTabs = activeHandoffTabs.get(options.sessionId) ?? new Set<number>()
@@ -322,6 +323,22 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       message: options.message,
       timeoutMs: options.timeoutMs,
     })
+    let untilStopped = false
+    if (options.until) {
+      const checkUntil = options.until
+      void (async () => {
+        while (!untilStopped) {
+          await new Promise((r) => setTimeout(r, 350))
+          if (untilStopped) break
+          try {
+            if (await checkUntil()) {
+              wait.resolve?.()
+              break
+            }
+          } catch {}
+        }
+      })()
+    }
     let outcome: HandoffOutcome | undefined
     try {
       outcome = await awaitHandoffAction({
@@ -340,6 +357,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       removeActiveHandoffTab(options.sessionId, target.tabId)
       throw error
     } finally {
+      untilStopped = true
       if (outcome !== undefined && outcome !== "resolved" && outcome !== "timeout") {
         removeActiveHandoffTab(options.sessionId, target.tabId)
       }
@@ -361,14 +379,44 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         endpointUrl,
         sessionId: id,
         onDefaultTargetChange,
-        requestHandoff: ({ message, timeoutMs, target, start, cancelStart }) => requestHandoff({
+        requestHandoff: ({ message, timeoutMs, target, start, cancelStart, until }) => requestHandoff({
           sessionId: id,
           message,
           timeoutMs,
           target,
           ...(start ? { start } : {}),
           ...(cancelStart ? { cancelStart } : {}),
+          ...(until ? { until } : {}),
         }),
+        requestTabAttach: async (opts) => {
+          const timeoutMs = opts.timeoutMs ?? 60_000
+          const response = await Effect.runPromise(
+            sendToExtension({
+              method: "tabs.requestAttach",
+              params: {
+                sessionId: id,
+                ...(opts.urlIncludes ? { urlIncludes: opts.urlIncludes } : {}),
+                ...(opts.titleIncludes ? { titleIncludes: opts.titleIncludes } : {}),
+                ...(opts.message ? { message: opts.message } : {}),
+                timeoutMs,
+              },
+            }),
+          )
+          const approved = response.approved === true
+          const tabId = getNumber(response, "tabId")
+          if (!approved || tabId === undefined) {
+            throw new Error("User declined or timed out the in-page tab attach request")
+          }
+          const committed = await Effect.runPromise(
+            rootLifecycle.attach({
+              tabId,
+              owner: "user",
+              browserControlSessionId: id,
+              alreadyAttached: true,
+            }),
+          )
+          return { targetId: committed.targetInfo.targetId }
+        },
       }),
     {
       onExecuteStateChange: (sessionId, executing) => {
@@ -923,7 +971,19 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     if (extensionMethod === "debugger.attached") {
       if (eventTabId) {
         announcedRootTabIds.add(eventTabId)
-        rootLifecycle.queue({ tabId: eventTabId, attachIfMissing: true, verificationRetries: 0, errorMessage: "Debugger re-announce failed", generation })
+        const openerTabId = getNumber(message.params, "openerTabId")
+        const openerTarget = openerTabId !== undefined ? registry.routingRootTarget(openerTabId) : undefined
+        rootLifecycle.queue({
+          tabId: eventTabId,
+          attachIfMissing: true,
+          verificationRetries: 0,
+          errorMessage: "Debugger re-announce failed",
+          generation,
+          ...(openerTarget ? {
+            owner: openerTarget.owner,
+            ...(openerTarget.browserControlSessionId ? { browserControlSessionId: openerTarget.browserControlSessionId } : {}),
+          } : {}),
+        })
       }
       return
     }

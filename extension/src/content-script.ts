@@ -3,6 +3,7 @@ import { pageStatusFromJson, pageStatusView } from "./page-status.ts"
 
 const hostId = "__browser_control_page_status__"
 let currentStatus: PageStatus | undefined
+let pendingTabRequest: { readonly requestId: string; readonly sessionId?: string; readonly message: string } | undefined
 let observer: MutationObserver | undefined
 let completingHandoffId: string | undefined
 let attendedCursor: HTMLElement | undefined
@@ -14,18 +15,37 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
   if (!message || typeof message !== "object" || Array.isArray(message)) {
     return
   }
-  const incoming = message as { readonly action?: unknown; readonly status?: unknown }
+  const incoming = message as { readonly action?: unknown; readonly status?: unknown; readonly requestId?: unknown; readonly sessionId?: unknown; readonly message?: unknown }
   if (incoming.action === "evict-extension-frames") {
     const removed = evictForeignExtensionFrames()
     sendResponse({ removed })
     return
   }
+  if (incoming.action === "tab-request.prompt" && typeof incoming.requestId === "string") {
+    pendingTabRequest = {
+      requestId: incoming.requestId,
+      ...(typeof incoming.sessionId === "string" && incoming.sessionId ? { sessionId: incoming.sessionId } : {}),
+      message: typeof incoming.message === "string" && incoming.message ? incoming.message : "Allow Browser Control to use this tab?",
+    }
+    currentStatus = {
+      state: "waiting",
+      owner: "user",
+      ...(pendingTabRequest.sessionId ? { sessionId: pendingTabRequest.sessionId } : {}),
+      message: pendingTabRequest.message,
+      handoffId: `tab-request:${pendingTabRequest.requestId}`,
+    }
+    renderStatus()
+    sendResponse({ shown: true })
+    return
+  }
   if (incoming.action === "page-status.clear") {
+    pendingTabRequest = undefined
     clearStatus()
     return
   }
   const status = pageStatusFromJson(incoming.status)
   if (incoming.action === "page-status.set" && status) {
+    pendingTabRequest = undefined
     currentStatus = status
     completingHandoffId = undefined
     if (status.state !== "waiting") {
@@ -99,6 +119,23 @@ function evictForeignExtensionFrames(): number {
 }
 
 chrome.runtime.sendMessage({ action: "page-status.ready" }).catch(() => {})
+window.addEventListener("keydown", (event) => {
+  if (pendingTabRequest && event.key === "Escape") {
+    event.preventDefault()
+    event.stopPropagation()
+    decideTabRequest(pendingTabRequest.requestId, false)
+    return
+  }
+  if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && currentStatus?.state === "waiting" && currentStatus.handoffId) {
+    event.preventDefault()
+    event.stopPropagation()
+    if (pendingTabRequest) {
+      decideTabRequest(pendingTabRequest.requestId, true)
+    } else {
+      completeHandoff(currentStatus.handoffId)
+    }
+  }
+}, true)
 document.addEventListener("DOMContentLoaded", () => {
   if (currentStatus) {
     if (currentStatus.state !== "waiting") evictForeignExtensionFrames()
@@ -260,13 +297,31 @@ function renderStatus(): void {
     const completion = view.completion
     const button = document.createElement("button")
     button.type = "button"
-    button.textContent = completion.label
-    button.addEventListener("click", () => {
-      button.disabled = true
-      button.textContent = "Continuing…"
-      completeHandoff(completion.handoffId)
-    })
-    statusElement.append(button)
+    if (pendingTabRequest) {
+      const requestId = pendingTabRequest.requestId
+      button.textContent = "Allow"
+      button.addEventListener("click", () => {
+        button.disabled = true
+        button.textContent = "Attaching…"
+        decideTabRequest(requestId, true)
+      })
+      const decline = document.createElement("button")
+      decline.type = "button"
+      decline.textContent = "Not now"
+      decline.style.cssText = "margin-left: 6px; background: rgba(148, 163, 184, 0.18); color: #e2e8f0;"
+      decline.addEventListener("click", () => {
+        decideTabRequest(requestId, false)
+      })
+      statusElement.append(button, decline)
+    } else {
+      button.textContent = completion.label
+      button.addEventListener("click", () => {
+        button.disabled = true
+        button.textContent = "Continuing…"
+        completeHandoff(completion.handoffId)
+      })
+      statusElement.append(button)
+    }
     const vignette = document.createElement("div")
     vignette.id = "__browser_control_vignette__"
     host.shadowRoot?.insertBefore(vignette, statusElement)
@@ -335,6 +390,12 @@ function clearStatus(): void {
   observer?.disconnect()
   observer = undefined
   document.getElementById(hostId)?.remove()
+}
+
+function decideTabRequest(requestId: string, approved: boolean): void {
+  pendingTabRequest = undefined
+  clearStatus()
+  void chrome.runtime.sendMessage({ action: "tab-request.decision", requestId, approved }).catch(() => {})
 }
 
 function completeHandoff(handoffId: string): void {

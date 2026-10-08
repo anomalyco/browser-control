@@ -104,6 +104,8 @@ export class RootTargetLifecycle {
     readonly verificationRetries: number
     readonly errorMessage: string
     readonly generation?: number
+    readonly owner?: "relay" | "user"
+    readonly browserControlSessionId?: string
   }): void {
     if (this.closing) return
     const lifecycle = this
@@ -140,7 +142,12 @@ export class RootTargetLifecycle {
         return lifecycle.withPermit(options.tabId, generation, (transition) => {
           if (lifecycle.options.registry.routingRootTarget(options.tabId)) return lifecycle.reconcileUnlocked(transition)
           return mayAttach
-            ? lifecycle.attachUnlocked(transition, { tabId: options.tabId, owner: "user", alreadyAttached: true }).pipe(Effect.asVoid)
+            ? lifecycle.attachUnlocked(transition, {
+              tabId: options.tabId,
+              owner: options.owner ?? "user",
+              alreadyAttached: true,
+              ...(options.browserControlSessionId ? { browserControlSessionId: options.browserControlSessionId } : {}),
+            }).pipe(Effect.asVoid)
             : Effect.void
         })
       }).pipe(

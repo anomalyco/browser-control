@@ -352,6 +352,7 @@ type SandboxGlobals = {
   }
   readonly handoff: (message?: string, options?: HandoffCallOptions) => Promise<void>
   readonly demonstrate: (message?: string, options?: HandoffCallOptions) => Promise<DemonstrationResult>
+  readonly requestTab: (queryOrOptions?: string | RequestTabOptions) => Promise<Page>
   readonly network: {
     readonly start: (options?: NetworkCapture.NetworkCaptureOptions) => Promise<NetworkCapture.NetworkCaptureStatus>
     readonly status: () => NetworkCapture.NetworkCaptureStatus
@@ -366,7 +367,19 @@ type HandoffCallOptions = {
   readonly timeoutMs?: number
   readonly page?: Page
   readonly start?: () => unknown | Promise<unknown>
+  readonly until?: () => boolean | Promise<boolean>
 }
+
+type RequestTabOptions = {
+  readonly urlIncludes?: string
+  readonly titleIncludes?: string
+  readonly message?: string
+  readonly timeoutMs?: number
+}
+
+type RequestTabAttach = (options: RequestTabOptions) => Promise<{
+  readonly targetId: string
+}>
 
 export type HandoffPageTarget = {
   readonly targetId: string
@@ -378,6 +391,7 @@ export type RequestHandoff = (options: {
   readonly target: HandoffPageTarget
   readonly start?: () => unknown | Promise<unknown>
   readonly cancelStart?: () => Promise<void>
+  readonly until?: () => boolean | Promise<boolean>
 }) => Promise<HandoffOutcome>
 
 const defaultHandoffTimeoutMs = 10 * 60 * 1_000
@@ -429,6 +443,7 @@ type ExecuteSandboxOptions = {
   readonly endpointUrl: string
   readonly sessionId?: string
   readonly requestHandoff?: RequestHandoff
+  readonly requestTabAttach?: RequestTabAttach
   readonly onDefaultTargetChange?: (target: SessionTarget | undefined) => void
   /** Health-check budget per attempt for a page that failed with an execution-context error. */
   readonly pageHealthCheckTimeoutMs?: number
@@ -494,13 +509,20 @@ export class ExecuteSandbox {
     return Effect.tryPromise({
       try: async () => {
         const globals = await this.getGlobals(options)
+        const initialPages = new Set(typeof globals.context.pages === "function" ? globals.context.pages() : [])
         const { result, logs, logSummary, aftermath } = await runUserCode({ code, globals })
+        const openedPages = (typeof globals.context.pages === "function" ? globals.context.pages() : [])
+          .filter((candidate) => !initialPages.has(candidate) && candidate !== globals.page && !candidate.isClosed?.())
+        const popupWarning = openedPages.length > 0
+          ? `New tab opened during execute (${openedPages.map((p) => formatBoundedPageUrl(safePageUrl(p) || "about:blank")).join(", ")}). Use context.pages() or --target-url to inspect it.`
+          : undefined
         await this.networkCapture.settleForOutput()
         const extracted = extractExecuteMedia(result)
         const redactedValue = this.networkCapture.redactValue(extracted.value)
         const jsonSafeResult = toJsonSafeValue(redactedValue)
         const warnings = this.finalizeWarnings(
           logSummary,
+          popupWarning,
           jsonSafeResult.serializable ? undefined : `Execute result could not be represented as JSON value: ${jsonSafeResult.reason}`,
         )
         return {
@@ -871,6 +893,7 @@ export class ExecuteSandbox {
         target: { targetId },
         ...(options?.start ? { start: options.start } : {}),
         ...(options?.start ? { cancelStart: () => Effect.runPromise(this.disconnectSettled()) } : {}),
+        ...(options?.until ? { until: options.until } : {}),
       })
       await finishHandoff({
         outcome,
@@ -904,6 +927,26 @@ export class ExecuteSandbox {
         throw error
       }
       return await recorder.stop()
+    }
+    const requestTab = async (queryOrOptions?: string | RequestTabOptions): Promise<Page> => {
+      const opts: RequestTabOptions = typeof queryOrOptions === "string"
+        ? { urlIncludes: queryOrOptions }
+        : (queryOrOptions ?? {})
+      if (!this.options.requestTabAttach) {
+        throw new Error("requestTab requires a relay-backed Browser Control session")
+      }
+      const { targetId } = await this.options.requestTabAttach(opts)
+      const matched = await waitForExactTarget({
+        targetId,
+        timeoutMs: adoptedPageConnectTimeoutMs,
+        candidates: () => context.pages(),
+        getTargetId: resolvePageTargetId,
+      })
+      if (!matched) {
+        throw new Error(`Approved tab target ${targetId} did not become available in Playwright context`)
+      }
+      this.bindDefaultPage(matched, targetId, false, true)
+      return matched
     }
     return {
       browser,
@@ -963,6 +1006,7 @@ export class ExecuteSandbox {
       },
       handoff,
       demonstrate,
+      requestTab,
       network: {
         start: (options) => Effect.runPromise(this.networkCapture.start(page, options)),
         status: () => this.networkCapture.status(),
@@ -1944,13 +1988,28 @@ function formatLocatorFailurePageWarning(
   aftermath: ExecuteAftermath | undefined,
   recreatedFromClosedUrl?: string,
 ): string | undefined {
-  if (!(error instanceof Error) || !locatorFailurePattern.test(error.message)) return undefined
+  if (!(error instanceof Error)) return undefined
   const rawUrl = aftermath?.endUrl ?? aftermath?.startUrl
-  if (rawUrl !== "about:blank") return undefined
-  if (recreatedFromClosedUrl) {
-    return `Locator failed on about:blank because the previous session page (${formatBoundedPageUrl(recreatedFromClosedUrl)}) was closed. Call page.goto(...) to reopen it before querying controls.`
+  if (/page\.goto:\s*Timeout\s+\d+ms\s+exceeded/i.test(error.message) && rawUrl && rawUrl !== "about:blank") {
+    return `page.goto timed out waiting for the load event, but the tab is already at ${formatBoundedPageUrl(rawUrl)}. Call snapshot() or pass { waitUntil: "domcontentloaded" } instead of retrying page.goto().`
   }
-  return "Locator failed on page about:blank. Navigate with page.goto(...) or adopt an attached tab before querying controls."
+  if (!locatorFailurePattern.test(error.message)) return undefined
+  if (rawUrl === "about:blank") {
+    if (recreatedFromClosedUrl) {
+      return `Locator failed on about:blank because the previous session page (${formatBoundedPageUrl(recreatedFromClosedUrl)}) was closed. Call page.goto(...) to reopen it before querying controls.`
+    }
+    return "Locator failed on page about:blank. Navigate with page.goto(...) or adopt an attached tab before querying controls."
+  }
+  if (/element is not editable/i.test(error.message)) {
+    return "Target control is readonly or not editable; click it to open its picker or use fillInput(locator, value) for custom controls."
+  }
+  if (/element is outside of the viewport|element is not visible/i.test(error.message)) {
+    return "Resolved element is hidden or offscreen; call snapshot() to target its visible label/trigger or filter for a visible control."
+  }
+  if ((aftermath?.pageErrorCount ?? 0) > 0) {
+    return `Locator timed out after ${aftermath?.pageErrorCount} uncaught pageerror(s) during this execute; check the pageerror log above before retrying the selector.`
+  }
+  return undefined
 }
 
 export async function runUserCode({ code, globals }: { readonly code: string; readonly globals: SandboxGlobals }): Promise<{
@@ -2038,8 +2097,9 @@ const sandboxGlobalKeys = [
   "ghostCursor",
   "handoff",
   "demonstrate",
+  "requestTab",
   "network",
-] as const satisfies readonly (keyof Omit<SandboxGlobals, "handoffTracker">)[]
+] as const satisfies readonly (keyof Omit<SandboxGlobals, "handoffTracker" | "getCurrentPage">)[]
 
 function safePageUrl(page: Page): string | null {
   try {

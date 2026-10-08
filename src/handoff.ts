@@ -29,6 +29,8 @@ export type HandoffWait = {
   readonly outcome: Promise<HandoffOutcome>
   /** End the wait as a timeout if it is still pending. */
   readonly cancel: () => void
+  /** Resolve the wait programmatically (for example when an `until` predicate succeeds). */
+  readonly resolve?: () => void
   /** Defer human completion once, keeping the deadline and target cancellation live while a start action settles. */
   readonly holdCompletion: () => () => void
 }
@@ -154,6 +156,10 @@ export class HandoffRegistry {
       outcome,
       cancel: () => {
         this.cancel(id)
+      },
+      resolve: () => {
+        const current = this.pending.get(options.sessionId)
+        if (current?.id === id) current.resolve("resolved")
       },
       holdCompletion: () => {
         held = true

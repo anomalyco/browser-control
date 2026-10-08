@@ -28,6 +28,7 @@ let reloading = false
 const tabGroupingCommands = new Map<number, Promise<unknown>>()
 const sessionGroups = new Map<string, number>()
 const attachedTabUrls = new Map<number, string>()
+const pendingTabRequests = new Map<string, (approved: boolean) => void>()
 
 const STORAGE_ATTACHED_TABS_KEY = "browserControlAttachedTabs"
 let storageRestored: Promise<void> | undefined
@@ -254,6 +255,25 @@ chrome.debugger.onDetach.addListener((source, reason) => {
     reason,
     sessionId,
   }))
+})
+
+chrome.tabs.onCreated.addListener((tab) => {
+  const tabId = tab.id
+  const openerTabId = tab.openerTabId
+  if (tabId === undefined || openerTabId === undefined || !attachedTabUrls.has(openerTabId)) {
+    return
+  }
+  void (async () => {
+    try {
+      await chrome.debugger.attach({ tabId }, "1.3")
+    } catch (error) {
+      if (!isAlreadyAttachedError(error)) {
+        return
+      }
+    }
+    await recordAttachedTab(tabId)
+    sendMessage({ method: "debugger.attached", params: { tabId, openerTabId } })
+  })()
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -587,6 +607,9 @@ async function handleCommand(command: ShimCommand, currentSocket: WebSocket): Pr
     await sendPageStatusMessage(tabId, { action: "page-status.clear" })
     return {}
   }
+  if (command.method === "tabs.requestAttach") {
+    return requestTabAttach(command.params)
+  }
   if (command.method === "runtime.reload") {
     const owned = await getOwnedDebuggerTabIds(chrome.debugger).catch(() => new Set<number>())
     for (const tabId of owned) {
@@ -901,6 +924,15 @@ async function handleRuntimeMessage(message: unknown, sender: chrome.runtime.Mes
     }
     return
   }
+  const tabDecision = message as { readonly action?: unknown; readonly requestId?: unknown; readonly approved?: unknown }
+  if (tabDecision.action === "tab-request.decision" && typeof tabDecision.requestId === "string") {
+    const resolver = pendingTabRequests.get(tabDecision.requestId)
+    if (resolver) {
+      pendingTabRequests.delete(tabDecision.requestId)
+      resolver(tabDecision.approved === true)
+    }
+    return
+  }
   const offscreenMessage = message as OffscreenOutgoingMessage
   if (offscreenMessage.action === "recording.chunk") {
     await sendBinaryAfterConnection(encodeRecordingFrame({
@@ -914,6 +946,67 @@ async function handleRuntimeMessage(message: unknown, sender: chrome.runtime.Mes
   if (offscreenMessage.action === "recording.cancelled") {
     sendMessage({ method: "recording.cancelled", params: { tabId: offscreenMessage.tabId } })
   }
+}
+
+async function requestTabAttach(params: JsonObject | undefined): Promise<JsonObject> {
+  const urlIncludes = optionalStringParam(params, "urlIncludes")?.toLowerCase()
+  const titleIncludes = optionalStringParam(params, "titleIncludes")?.toLowerCase()
+  const sessionId = optionalStringParam(params, "sessionId")
+  const message = optionalStringParam(params, "message") ?? "Allow Browser Control to use this tab?"
+  const timeoutMs = optionalNumberParam(params, "timeoutMs") ?? 60_000
+  const allTabs = await chrome.tabs.query(urlIncludes || titleIncludes ? {} : { active: true, lastFocusedWindow: true })
+  const webTabs = allTabs.filter((tab) => typeof tab.id === "number" && /^https?:\/\//i.test(tab.url ?? ""))
+  const matched = webTabs.find((tab) => {
+    if (urlIncludes && !(tab.url ?? "").toLowerCase().includes(urlIncludes)) return false
+    if (titleIncludes && !(tab.title ?? "").toLowerCase().includes(titleIncludes)) return false
+    return true
+  })
+  if (!matched || typeof matched.id !== "number") {
+    throw new Error(
+      urlIncludes || titleIncludes
+        ? `No open http(s) browser tab matched ${urlIncludes ?? titleIncludes}`
+        : "No active http(s) browser tab found in the focused window",
+    )
+  }
+  const tabId = matched.id
+  const owned = await getOwnedDebuggerTabIds(chrome.debugger)
+  if (owned.has(tabId)) {
+    await recordAttachedTab(tabId)
+    return { approved: true, tabId, url: matched.url ?? "" }
+  }
+  await chrome.tabs.update(tabId, { active: true }).catch(() => {})
+  const requestId = `${tabId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  await sendPageStatusMessage(
+    tabId,
+    {
+      action: "tab-request.prompt",
+      requestId,
+      ...(sessionId ? { sessionId } : {}),
+      message,
+    },
+    true,
+  )
+  const approved = await new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => {
+      pendingTabRequests.delete(requestId)
+      void sendPageStatusMessage(tabId, { action: "page-status.clear" })
+      resolve(false)
+    }, timeoutMs)
+    pendingTabRequests.set(requestId, (decision) => {
+      clearTimeout(timer)
+      resolve(decision)
+    })
+  })
+  if (!approved) {
+    return { approved: false, tabId, url: matched.url ?? "" }
+  }
+  try {
+    await chrome.debugger.attach({ tabId }, "1.3")
+  } catch (error) {
+    if (!isAlreadyAttachedError(error)) throw error
+  }
+  await recordAttachedTab(tabId)
+  return { approved: true, tabId, url: matched.url ?? "" }
 }
 
 async function sendPageStatusMessage(tabId: number, message: JsonObject, required = false): Promise<void> {
