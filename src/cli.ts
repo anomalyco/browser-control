@@ -312,7 +312,13 @@ const execute = Command.make(
             },
           }
           : {}),
-      })
+      }).pipe(
+        Effect.mapError((error) =>
+          explicitSessionId && error.message === `Session not found: ${explicitSessionId}`
+            ? new Error(`${error.message}. Run \`browser-control session new ${explicitSessionId}\` first, or omit \`--session\` to create a session automatically.`)
+            : error,
+        ),
+      )
       if (!explicitSessionId) {
         yield* Console.error(formatSessionContinuation(result.session.id))
       }

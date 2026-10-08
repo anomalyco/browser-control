@@ -359,6 +359,7 @@ type SandboxGlobals = {
     readonly cancel: () => Promise<{ readonly cancelled: boolean }>
   }
   readonly handoffTracker: { count: number }
+  readonly getCurrentPage?: () => Page
 }
 
 type HandoffCallOptions = {
@@ -611,14 +612,9 @@ export class ExecuteSandbox {
     }).pipe(Effect.uninterruptible)
   }
 
-  private drainWarnings(): string[] {
+  private finalizeWarnings(logSummary: ExecuteLogSummary, ...extraWarnings: Array<string | undefined>): string[] {
     const warnings = this.pendingWarnings
     this.pendingWarnings = []
-    return warnings
-  }
-
-  private finalizeWarnings(logSummary: ExecuteLogSummary, ...extraWarnings: Array<string | undefined>): string[] {
-    const warnings = this.drainWarnings()
     for (const warning of extraWarnings) {
       if (warning) warnings.push(warning)
     }
@@ -974,6 +970,7 @@ export class ExecuteSandbox {
         cancel: () => Effect.runPromise(this.networkCapture.cancel()),
       },
       handoffTracker,
+      getCurrentPage: () => (!hasExplicitTargetSelection(options.targetSelection) && this.page) ? this.page : page,
     }
   }
 
@@ -1083,23 +1080,16 @@ export class ExecuteSandbox {
     if (notify) this.notifyDefaultTargetChange()
   }
 
-  private clearBoundPageListeners(): void {
+  private clearPageListeners(): void {
     const bound = this.boundPageListeners
-    if (!bound) return
-    bound.page.off("close", bound.close)
-    bound.page.off("framenavigated", bound.navigate)
-    this.boundPageListeners = undefined
-  }
-
-  private clearSnapshotRefs(): void {
+    if (bound) {
+      bound.page.off("close", bound.close)
+      bound.page.off("framenavigated", bound.navigate)
+      this.boundPageListeners = undefined
+    }
     this.snapshotRefs.removeNavigationListener?.()
     delete this.snapshotRefs.removeNavigationListener
     invalidateSnapshotDocument(this.snapshotRefs)
-  }
-
-  private clearPageListeners(): void {
-    this.clearBoundPageListeners()
-    this.clearSnapshotRefs()
   }
 
   getStatus(): { readonly sessionId?: string; readonly connected: boolean; readonly pageUrl: string | null; readonly stateKeys: string[] } {
@@ -1165,17 +1155,17 @@ export class ExecuteSandbox {
   private async getSessionPage({ context, targetSelection }: { readonly context: BrowserContext; readonly targetSelection?: ExecuteTargetSelection }): Promise<Page> {
     const selection = targetSelection ?? {}
     if (hasExplicitTargetSelection(selection)) {
-      const selected = selectPage({ pages: context.pages(), selection })
-      if (!selected) {
-        throw new Error("No page matched target selection")
-      }
-      return selected
+      return selectTarget({ targets: context.pages(), selection, getUrl: (page) => page.url() })
     }
     if (!this.page && this.defaultPageTargetId) {
       const targetId = this.defaultPageTargetId
       const rebind = this.pendingTargetRebind
-      const waitTimeoutMs = rebind ? sessionPageHealthCheckTimeoutMs : adoptedPageConnectTimeoutMs
-      const replacement = await waitForPageTarget({ context, targetId, timeoutMs: waitTimeoutMs })
+      const replacement = await waitForExactTarget({
+        targetId,
+        timeoutMs: sessionPageHealthCheckTimeoutMs,
+        candidates: () => context.pages(),
+        getTargetId: resolvePageTargetId,
+      })
       if (!replacement) {
         throw new SessionPageRecoveryError({
           message: `Playwright did not expose session page target ${targetId} after the browser connection or target changed. Retry after the browser transition settles.`,
@@ -1355,19 +1345,6 @@ export class ExecuteSandbox {
   }
 }
 
-async function waitForPageTarget(options: {
-  readonly context: BrowserContext
-  readonly targetId: string
-  readonly timeoutMs: number
-}): Promise<Page | undefined> {
-  return await waitForExactTarget({
-    targetId: options.targetId,
-    timeoutMs: options.timeoutMs,
-    candidates: () => options.context.pages(),
-    getTargetId: resolvePageTargetId,
-  })
-}
-
 export async function waitForExactTarget<T>(options: {
   readonly targetId: string
   readonly timeoutMs: number
@@ -1461,7 +1438,7 @@ async function materializeCapturedDownload(options: {
   }
 }
 
-async function waitForPageDownload(page: Page, optionsOrPredicate?: unknown, rawEvaluate?: Page["evaluate"]): Promise<unknown> {
+async function waitForPageDownload(page: Page, optionsOrPredicate?: unknown): Promise<unknown> {
   const context = typeof page.context === "function" ? page.context() : undefined
   if (!context || typeof context.newCDPSession !== "function") {
     throw new Error(downloadCapabilityErrorMessage)
@@ -1475,13 +1452,18 @@ async function waitForPageDownload(page: Page, optionsOrPredicate?: unknown, raw
     ? optionsOrPredicate.timeout
     : 30_000
 
-  const evaluateOnPage = rawEvaluate ?? page.evaluate.bind(page)
+  const originalEvaluate = typeof page.evaluate === "function" ? page.evaluate : undefined
+  const evaluateOnPage = originalEvaluate ? originalEvaluate.bind(page) : page.evaluate.bind(page)
   const cdp = await context.newCDPSession(page)
   let settled = false
   let timer: ReturnType<typeof setTimeout> | undefined
 
   const cleanup = async () => {
     if (timer) clearTimeout(timer)
+    activeDownloadSetups.delete(page)
+    if (originalEvaluate) {
+      Object.defineProperty(page, "evaluate", { configurable: true, writable: true, value: originalEvaluate })
+    }
     await evaluateOnPage(() => {
       ;(window as Window & { __browserControlDownloadArmed?: boolean }).__browserControlDownloadArmed = false
     }).catch(() => {})
@@ -1642,6 +1624,19 @@ async function waitForPageDownload(page: Page, optionsOrPredicate?: unknown, raw
     ]).then(() => undefined)
 
     activeDownloadSetups.set(page, setup)
+    if (originalEvaluate) {
+      Object.defineProperty(page, "evaluate", {
+        configurable: true,
+        writable: true,
+        value: async (...args: Parameters<Page["evaluate"]>) => {
+          const pendingSetup = activeDownloadSetups.get(page)
+          if (pendingSetup) {
+            await pendingSetup.catch(() => {})
+          }
+          return await evaluateOnPage(...args)
+        },
+      })
+    }
     void setup.catch((err) => finishReject(err instanceof Error ? err : new Error(String(err))))
   })
 }
@@ -1651,24 +1646,11 @@ export function installDownloadCapabilityGuard(page: Page): void {
     return
   }
   const waitForEvent = page.waitForEvent.bind(page) as (event: string, ...args: unknown[]) => Promise<unknown>
-  const rawEvaluate = typeof page.evaluate === "function" ? page.evaluate.bind(page) : undefined
-  if (rawEvaluate) {
-    Object.defineProperty(page, "evaluate", {
-      configurable: true,
-      value: async (...args: Parameters<Page["evaluate"]>) => {
-        const pendingSetup = activeDownloadSetups.get(page)
-        if (pendingSetup) {
-          await pendingSetup.catch(() => {})
-        }
-        return await rawEvaluate(...args)
-      },
-    })
-  }
   Object.defineProperty(page, "waitForEvent", {
     configurable: true,
     value: (event: string, ...args: unknown[]) => {
       if (event === "download") {
-        const promise = waitForPageDownload(page, args[0], rawEvaluate)
+        const promise = waitForPageDownload(page, args[0])
         void promise.catch(() => {})
         return promise
       }
@@ -1703,7 +1685,7 @@ export function selectTarget<T>({
   readonly selection: ExecuteTargetSelection
   readonly getUrl: (target: T) => string
   readonly getIndex?: (target: T, fallbackIndex: number) => number
-}): T | undefined {
+}): T {
   if (selection.urlIncludes && selection.index !== undefined) {
     throw new TargetSelectionError({ reason: "invalid", message: "Use only one target selector: --target-url or --target-index" })
   }
@@ -1724,7 +1706,7 @@ export function selectTarget<T>({
         message: `Multiple attached pages (${matches.length}) match URL ${selection.urlIncludes}; use a more specific --target-url or --target-index. Matches: ${candidates.join(", ")}`,
       })
     }
-    return matches[0]
+    return matches[0]!
   }
   if (selection.index !== undefined) {
     if (selection.index < 0) {
@@ -1752,11 +1734,7 @@ export function selectTarget<T>({
       message: `Multiple attached pages (${targets.length}); use --target-url or --target-index to choose one. Matches: ${candidates.join(", ")}`,
     })
   }
-  return targets[0]
-}
-
-function selectPage({ pages, selection }: { readonly pages: readonly Page[]; readonly selection: ExecuteTargetSelection }): Page | undefined {
-  return selectTarget({ targets: pages, selection, getUrl: (page) => page.url() })
+  return targets[0]!
 }
 
 async function resolvePageTargetId(page: Page): Promise<string | undefined> {
@@ -2011,12 +1989,13 @@ export async function runUserCode({ code, globals }: { readonly code: string; re
   globals.page.on("framenavigated", onFrameNavigated)
   const buildResultMetadata = () => {
     const captured = logCapture.snapshot()
+    const endPage = globals.getCurrentPage?.() ?? globals.page
     return {
       logs: captured.logs,
       logSummary: captured.summary,
       aftermath: {
         startUrl,
-        endUrl: safePageUrl(globals.page),
+        endUrl: safePageUrl(endPage),
         navigations,
         consoleErrorCount: captured.consoleErrorCount,
         pageErrorCount: captured.pageErrorCount,

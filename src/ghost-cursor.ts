@@ -46,10 +46,6 @@ export type GhostCursorMouseAction = {
   readonly path?: readonly { readonly x: number; readonly y: number; readonly u: number }[]
 }
 
-type GhostCursorEvaluatePayload = {
-  readonly cursorOptions?: GhostCursorClientOptions
-}
-
 type GhostCursorCaptionPayload = {
   readonly title: string
   readonly options?: GhostCursorCaptionOptions
@@ -148,7 +144,6 @@ export const ghostCursorClientSource = `(() => {
   const state = {
     element: null,
     arrow: null,
-    stage: null,
     targetX: initialX,
     targetY: initialY,
     renderedX: initialX,
@@ -267,7 +262,6 @@ export const ghostCursorClientSource = `(() => {
   const ensureStage = () => {
     const existing = document.getElementById(stageId);
     if (existing instanceof HTMLDivElement) {
-      state.stage = existing;
       return existing;
     }
     const stage = document.createElement("div");
@@ -275,7 +269,6 @@ export const ghostCursorClientSource = `(() => {
     stage.setAttribute("aria-hidden", "true");
     stage.style.cssText = "position:fixed;inset:0;pointer-events:none;z-index:" + (state.options.zIndex - 1) + ";overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,'Inter','SF Pro Text',sans-serif;";
     document.documentElement.appendChild(stage);
-    state.stage = stage;
     return stage;
   };
   const createSvgOverlay = (x, y, boxSize) => {
@@ -716,7 +709,6 @@ export const ghostCursorClientSource = `(() => {
     state.element = null;
     state.arrow = null;
     document.getElementById(stageId)?.remove();
-    state.stage = null;
   };
   const restore = (position) => {
     if (typeof position?.x !== "number" || typeof position?.y !== "number") return;
@@ -803,6 +795,23 @@ export const ghostCursorClientSource = `(() => {
     const ny = dx / dist;
     flushFlightResolvers();
 
+    const awaitFlightSettle = (timeoutMs) => new Promise((resolve) => {
+      const safetyTimer = window.setTimeout(() => {
+        state.flight = null;
+        state.renderedX = action.x;
+        state.renderedY = action.y;
+        state.vx = 0;
+        state.vy = 0;
+        state.deg = 0;
+        applyPosition();
+        resolve();
+      }, timeoutMs);
+      state.flightResolvers.push(() => {
+        window.clearTimeout(safetyTimer);
+        resolve();
+      });
+    });
+
     if (style === "spring-inertia") {
       const distGate = smoothstep(38, 190, dist);
       const kick = dist * 0.13 * distGate * state.arcSign * 5.2;
@@ -813,21 +822,7 @@ export const ghostCursorClientSource = `(() => {
       state.activeUntil = performance.now() + expectedMs + 140;
       startLoop();
       scheduleIdleFade();
-      return new Promise((resolve) => {
-        const safetyTimer = window.setTimeout(() => {
-          state.renderedX = action.x;
-          state.renderedY = action.y;
-          state.vx = 0;
-          state.vy = 0;
-          state.deg = 0;
-          applyPosition();
-          resolve();
-        }, expectedMs + 140);
-        state.flightResolvers.push(() => {
-          window.clearTimeout(safetyTimer);
-          resolve();
-        });
-      });
+      return awaitFlightSettle(expectedMs + 140);
     }
 
     const farFactor = smoothstep(50, 220, dist);
@@ -867,20 +862,7 @@ export const ghostCursorClientSource = `(() => {
     startLoop();
     scheduleIdleFade();
 
-    return new Promise((resolve) => {
-      const safetyTimer = window.setTimeout(() => {
-        state.flight = null;
-        state.renderedX = action.x;
-        state.renderedY = action.y;
-        state.deg = 0;
-        applyPosition();
-        resolve();
-      }, durationMs + 160);
-      state.flightResolvers.push(() => {
-        window.clearTimeout(safetyTimer);
-        resolve();
-      });
-    });
+    return awaitFlightSettle(durationMs + 160);
   };
   const applyMouseEvent = (action) => {
     const next = state.actionQueue.then(() => runSingleMouseAction(action), () => runSingleMouseAction(action));
@@ -1246,13 +1228,12 @@ async function resolveTargetBox(page: Page, target: Locator | string): Promise<G
 
 export async function showGhostCursor(options: { readonly page: Page; readonly cursorOptions?: GhostCursorClientOptions }): Promise<void> {
   await ensureGhostCursor(options.page)
-  const payload: GhostCursorEvaluatePayload = options.cursorOptions ? { cursorOptions: options.cursorOptions } : {}
   await options.page.evaluate(
-    (payload: GhostCursorEvaluatePayload) => {
+    (cursorOptions: GhostCursorClientOptions | undefined) => {
       const api = (globalThis as { __browserControlGhostCursor?: GhostCursorBrowserApi }).__browserControlGhostCursor
-      api?.show(payload.cursorOptions)
+      api?.show(cursorOptions)
     },
-    payload,
+    options.cursorOptions,
   )
 }
 

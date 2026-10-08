@@ -190,9 +190,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     }
 
     registry.removeNavigationListener?.()
-    registry.selectors.clear()
-    delete registry.page
-    delete registry.url
+    invalidateSnapshotDocument(registry)
     let navigatedDuringCapture = false
     const onFrameNavigated = (frame: Frame) => {
       if (frame !== page.mainFrame()) return
@@ -204,7 +202,6 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
     registry.removeNavigationListener = removeNavigationListener
 
     const capture = (rootOrSettings: Element | typeof settings, locatorSettings?: typeof settings) => {
-      type BrowserEntry = SnapshotEntry
       const settings = locatorSettings ?? rootOrSettings as typeof locatorSettings & typeof rootOrSettings
 
       const normalize = (value: string): string => value.replace(/\s+/g, " ").trim()
@@ -224,6 +221,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         }
         return cached
       }
+      let scopeRoot: Element | null = null
       const visibleCache = new WeakMap<Element, boolean>()
       const visibleAssociatedLabel = (element: Element): HTMLLabelElement | undefined => {
         if (!(element instanceof HTMLInputElement) || (element.type !== "radio" && element.type !== "checkbox")) {
@@ -231,15 +229,26 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         }
         return Array.from(element.labels ?? []).find((label) => isVisible(label))
       }
+      const isAriaOrInertHidden = (node: Element): boolean =>
+        node.hasAttribute("hidden") ||
+        ((node.hasAttribute("inert") || node.getAttribute("aria-hidden") === "true") &&
+          !node.matches?.("body, html, main") &&
+          !node.querySelector?.("main"))
       const isVisible = (element: Element): boolean => {
         const cached = visibleCache.get(element)
         if (cached !== undefined) return cached
+        visibleCache.set(element, false)
         const style = styleOf(element)
+        let associatedLabel: HTMLLabelElement | undefined | null = null
+        const getAssociatedLabel = (): HTMLLabelElement | undefined => {
+          if (associatedLabel === null) associatedLabel = visibleAssociatedLabel(element)
+          return associatedLabel
+        }
         let result = true
-        if (style.display === "none" || style.visibility === "hidden") {
+        if (style.display === "none" || style.visibility === "hidden" || isAriaOrInertHidden(element)) {
           result = false
         } else if (style.opacity === "0") {
-          result = Boolean(visibleAssociatedLabel(element))
+          result = Boolean(getAssociatedLabel())
         } else if (style.display === "contents") {
           const children = [
             ...Array.from(element.children ?? []),
@@ -248,7 +257,39 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           result = children.some(isVisible)
         } else {
           const rect = element.getBoundingClientRect()
-          result = (rect.width >= 1 && rect.height >= 1) || Boolean(visibleAssociatedLabel(element))
+          const scrollX = typeof window !== "undefined" ? (window.scrollX || 0) : 0
+          const scrollY = typeof window !== "undefined" ? (window.scrollY || 0) : 0
+          const offCanvas = rect.right + scrollX <= 0 || rect.bottom + scrollY <= 0
+          result = (rect.width >= 1 && rect.height >= 1 && !offCanvas) || Boolean(getAssociatedLabel())
+        }
+        if (result) {
+          let ancestor = element.parentElement
+          while (ancestor && ancestor !== scopeRoot && !ancestor.contains?.(scopeRoot)) {
+            if (isAriaOrInertHidden(ancestor)) {
+              result = false
+              break
+            }
+            const ancestorStyle = styleOf(ancestor)
+            const clipsChildren =
+              ancestorStyle.overflow === "hidden" ||
+              ancestorStyle.overflow === "clip" ||
+              ancestorStyle.overflowX === "hidden" ||
+              ancestorStyle.overflowX === "clip" ||
+              ancestorStyle.overflowY === "hidden" ||
+              ancestorStyle.overflowY === "clip"
+            const collapsedClip = clipsChildren && (() => {
+              const ancestorRect = ancestor.getBoundingClientRect()
+              return ancestorRect.width < 1 || ancestorRect.height < 1
+            })()
+            if (ancestorStyle.opacity === "0" || collapsedClip) {
+              const label = getAssociatedLabel()
+              if (!label || ancestor.contains?.(label)) {
+                result = false
+                break
+              }
+            }
+            ancestor = ancestor.parentElement
+          }
         }
         visibleCache.set(element, result)
         return result
@@ -499,14 +540,18 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
             const mains = Array.from(document.querySelectorAll("main")).filter(isVisible)
             const mainHidingModal = dialogs.length === 1 && mains.length === 1 && !mains[0]!.contains(dialogs[0]!) && Boolean(mains[0]!.closest("[aria-hidden='true'], [inert]"))
             const modals = dialogs.filter((dialog) => dialog.matches(":modal, [aria-modal='true']") || Boolean(dialog.closest?.("[data-focus-lock-disabled='false']")) || mainHidingModal)
-            if (modals.length === 1) return modals[0] as Element
             const isOpenListboxOrMenu = (menu: Element): boolean => {
               if (!isVisible(menu)) return false
               if (menu.getAttribute("aria-label") === "slider" || menu.getAttribute("aria-roledescription") === "carousel") return false
               const items = Array.from(menu.querySelectorAll("[role='option'], [role^='menuitem']")).filter(isVisible)
-              return items.length > 0 && !items.some((item) => item.getAttribute("role") === "option" && item.querySelector?.("a[href], button"))
+              return items.length > 0 && !items.some((item) => item.getAttribute("role") === "option" && item.querySelector?.("a[href]"))
             }
             const portalMenus = Array.from(document.querySelectorAll("[role='listbox'], [role='menu']")).filter(isOpenListboxOrMenu)
+            if (modals.length === 1) {
+              const modalRoot = modals[0] as Element
+              externalOverlays = portalMenus.filter((overlay) => !modalRoot.contains?.(overlay))
+              return modalRoot
+            }
             if (mains.length === 1) {
               autoScopedMain = true
               let mainRoot = mains[0] as Element
@@ -527,6 +572,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       if (!root) {
         return { entries: [], truncated: false }
       }
+      scopeRoot = root
       if ((settings.rootRole && roleFor(root) !== settings.rootRole) || (settings.rootName && accessibleName(root) !== settings.rootName)) {
         throw new Error("Snapshot ref no longer identifies the captured element; call snapshot() again")
       }
@@ -558,6 +604,12 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         }
         if (element.getAttribute("aria-disabled") === "true" && !details.includes("disabled")) {
           details.push("disabled")
+        }
+        if (
+          ((element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) && element.readOnly) ||
+          element.getAttribute("aria-readonly") === "true"
+        ) {
+          details.push("readonly")
         }
         const expanded = element.getAttribute("aria-expanded")
         if (expanded) details.push(`expanded=${expanded}`)
@@ -698,9 +750,9 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
       const headingDepth = (element: Element): number => {
         const cached = headingDepthCache.get(element)
         if (cached !== undefined) return cached
-        const ownLevel = /^H([1-6])$/.exec(element.tagName)?.[1]
+        const ownLevel = /^H([1-6])$/.exec(element.tagName)?.[1] ?? (element.getAttribute("role") === "heading" ? (element.getAttribute("aria-level") ?? "1") : undefined)
         if (ownLevel) {
-          const depth = Number(ownLevel) - 1
+          const depth = Math.max(0, Number(ownLevel) - 1)
           headingDepthCache.set(element, depth)
           return depth
         }
@@ -710,7 +762,8 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         }
         let level = 0
         for (const { heading, level: candidateLevel } of rootHeadings) {
-          if (heading === treeTarget || (heading.compareDocumentPosition(treeTarget) & Node.DOCUMENT_POSITION_FOLLOWING) === 0) continue
+          if (heading === treeTarget) continue
+          if ((heading.compareDocumentPosition(treeTarget) & Node.DOCUMENT_POSITION_FOLLOWING) === 0) break
           level = candidateLevel
         }
         headingDepthCache.set(element, level)
@@ -880,7 +933,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         return 2
       }
 
-      type PendingEntry = BrowserEntry & { readonly interactiveElement?: Element; readonly inActiveOverlay?: boolean }
+      type PendingEntry = SnapshotEntry & { readonly interactiveElement?: Element; readonly inActiveOverlay?: boolean }
       const entries: PendingEntry[] = []
       let truncated = false
       const add = (entry: PendingEntry): void => {
@@ -956,11 +1009,11 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         if (
           role === "combobox" &&
           !(element instanceof HTMLInputElement || element instanceof HTMLButtonElement || element instanceof HTMLSelectElement || element instanceof HTMLTextAreaElement) &&
-          element.querySelector?.("input, textarea, select")
+          Array.from(element.querySelectorAll?.("input, textarea, select") ?? []).some(isVisible)
         ) {
           continue
         }
-        if (role === "option" && element.querySelector?.("a[href], button")) {
+        if (role === "option" && element.querySelector?.("a[href]")) {
           continue
         }
         const isInteractive = element.matches(interactiveSelector)
@@ -1037,7 +1090,7 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           const label = visibleAssociatedLabel(element)
           if (!label) return undefined
           const rect = element.getBoundingClientRect()
-          if (rect.width < 1 || rect.height < 1) return label
+          if (rect.width < 1 || rect.height < 1 || rect.right <= 0 || rect.bottom <= 0) return label
           if (styleOf(element).opacity !== "0") return undefined
           const hit = document.elementFromPoint?.(rect.left + rect.width / 2, rect.top + rect.height / 2)
           return hit === element ? undefined : label
@@ -1115,22 +1168,21 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           for (const key of entry.parentKeys ?? []) usedParentKeys.add(key)
         }
       }
-      const selected: BrowserEntry[] = rawSelected
+      const selected: SnapshotEntry[] = rawSelected
         .filter(({ entry }) => entry.role !== "list" || !entry.key || usedParentKeys.has(entry.key))
         .map(({ entry: { interactiveElement, inActiveOverlay: _inActiveOverlay, ...rest } }) => ({
           ...rest,
           ...(interactiveElement ? { selector: cssPath(interactiveElement) } : {}),
         }))
-      const hasLoadingIndicator = Boolean(
+      const canSettle = !settings.rootSelector && typeof MutationObserver !== "undefined" && Boolean(document.body)
+      const hasLoadingIndicator = canSettle && Boolean(
         Array.from(document.querySelectorAll?.("[aria-busy='true'], .skeleton:not(.no-skeleton)") ?? []).some(isVisible) ||
         Array.from(document.querySelectorAll?.("[role='status'], [role='progressbar'], main p") ?? []).some(
           (el) => isVisible(el) && /^loading\b/i.test(normalize(el.textContent ?? el.getAttribute("aria-label") ?? "")),
         ),
       )
       const needsSettle = Boolean(
-        !settings.rootSelector &&
-        typeof MutationObserver !== "undefined" &&
-        document.body &&
+        canSettle &&
         (
           hasLoadingIndicator ||
           (selected.length === 0 && typeof performance !== "undefined" && performance.now() < 2_500)

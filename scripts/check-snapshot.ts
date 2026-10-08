@@ -476,6 +476,55 @@ try {
     assert.ok(exRef, svgBtnSnap)
     assert.equal(await ref(exRef).count(), 1)
   })
+
+  await check("offscreen checkbox label proxy, collapsed/hidden ancestors, readonly input, and portal listbox outside modal", async () => {
+    const { snapshot, ref } = createSnapshotHelpers(page, { selectors: new Map() })
+    await page.setContent(`
+      <main>
+        <aside style="width:0px; overflow:hidden">
+          <a href="/benefits" style="display:block; width:180px; height:32px">Benefits</a>
+        </aside>
+        <div class="support-drawer" aria-hidden="true">
+          <button>Close</button>
+        </div>
+        <div class="fade-drawer" style="opacity:0">
+          <button>Dismiss</button>
+        </div>
+        <div>
+          <input id="skip-inbox" type="checkbox" style="position:absolute; left:-9743px; width:13px; height:13px" />
+          <label for="skip-inbox">Skip the Inbox</label>
+        </div>
+        <label for="pickup-date">Select a date</label>
+        <input id="pickup-date" type="text" readonly value="Today" />
+        <div role="combobox" aria-label="Pickup time" aria-expanded="true" style="width:160px; height:36px">
+          <span>Now</span>
+          <input aria-hidden="true" tabindex="-1" style="opacity:0; width:1px; height:1px" />
+        </div>
+      </main>
+    `)
+    const snap = await snapshot()
+    assert.doesNotMatch(snap, /Benefits/)
+    assert.doesNotMatch(snap, /button "Close"/)
+    assert.doesNotMatch(snap, /button "Dismiss"/)
+    assert.match(snap, /textbox "Select a date" \[ref=e\d+ readonly\]/)
+    assert.match(snap, /combobox "Pickup time" \[ref=e\d+ expanded=true\]/)
+    const skipMatch = snap.match(/checkbox "Skip the Inbox" \[ref=(e\d+) unchecked\]/)
+    assert.ok(skipMatch?.[1], snap)
+    await ref(skipMatch[1]).click({ timeout: 2_000 })
+    assert.match(await snapshot(), /checkbox "Skip the Inbox" \[ref=e\d+ checked\]/)
+
+    await page.setContent(`
+      <div role="dialog" aria-modal="true" aria-label="Choose pickup">
+        <input type="text" aria-label="Where from?" value="SFO" />
+      </div>
+      <ul role="listbox" aria-label="Suggestions">
+        <li role="option">San Francisco International Airport (SFO) <button aria-label="Save">★</button></li>
+      </ul>
+    `)
+    const modalPortalSnap = await snapshot()
+    assert.match(modalPortalSnap, /textbox "Where from\?" \[ref=e\d+\]/)
+    assert.match(modalPortalSnap, /option "San Francisco International Airport \(SFO\) Save" \[ref=e\d+\]/)
+  })
 } finally {
   await browser.close()
 }

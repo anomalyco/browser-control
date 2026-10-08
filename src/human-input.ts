@@ -376,24 +376,20 @@ async function paceMouse(tab: TabState, params: JsonObject, send: Send): Promise
 
 async function travel(tab: TabState, to: Point, params: JsonObject, send: Send): Promise<void> {
   const precomputed = tab.lastMove
-  const rawSteps =
+  const midpoints =
     precomputed && Math.hypot(precomputed.toX - to.x, precomputed.toY - to.y) < 1 && precomputed.waypoints.length > 2
-      ? precomputed.waypoints.slice(1, -1).map((wp, _idx, arr) => ({
-          point: { x: wp.x, y: wp.y },
-          delay: precomputed.durationMs / Math.max(1, arr.length + 1),
-          u: wp.u,
-        }))
-      : trajectory(tab.pointer ?? { x: to.x + random(-220, 220), y: to.y + random(-140, 140) }, to)
+      ? precomputed.waypoints.slice(1, -1)
+      : []
 
   // Subsample to at most 8 CDP mouseMoved events so Chrome's main-thread hit-test
   // queue never backs up while GhostCursor renders the full 60fps path in-page.
-  const stride = Math.max(1, Math.ceil(rawSteps.length / 8))
-  const steps = rawSteps.filter((_, index) => index % stride === 0 || index === rawSteps.length - 1)
+  const stride = Math.max(1, Math.ceil(midpoints.length / 8))
+  const steps = midpoints.filter((_, index) => index % stride === 0 || index === midpoints.length - 1)
   const totalBudgetMs = clamp(precomputed?.durationMs ?? 210, 110, 280)
   const stepDelayMs = totalBudgetMs / Math.max(1, steps.length + 1)
   const startedAt = Date.now()
 
-  for (const { point } of steps) {
+  for (const point of steps) {
     if (Date.now() - startedAt >= totalBudgetMs) break
     const stepStarted = Date.now()
     await send("Input.dispatchMouseEvent", {

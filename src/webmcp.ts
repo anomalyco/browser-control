@@ -48,7 +48,9 @@ export function createWebMcpHelper(page: Page): WebMcpHelper {
     },
     call: async (name, input = {}, options = {}) => {
       if (!name.trim()) throw new Error("webmcp.call requires a non-empty tool name")
-      const listing = await collectWebMcpToolsWithFrames(page, options.timeout ?? defaultFrameTimeoutMs)
+      const timeoutMs = options.timeout ?? defaultFrameTimeoutMs
+      const deadline = Date.now() + timeoutMs
+      const listing = await collectWebMcpToolsWithFrames(page, timeoutMs)
       const matches = listing.tools.filter((candidate) => {
         return candidate.tool.name === name &&
           (options.frame === undefined || candidate.tool.frame === options.frame || candidate.tool.frameUrl === options.frame)
@@ -63,7 +65,7 @@ export function createWebMcpHelper(page: Page): WebMcpHelper {
       const match = matches[0]!
       return await withTimeout(
         match.frame.evaluate(callWebMcpToolInPage, { name, inputJson: JSON.stringify(input) }),
-        options.timeout ?? defaultFrameTimeoutMs,
+        Math.max(1, deadline - Date.now()),
         `WebMCP tool ${JSON.stringify(name)} timed out`,
       )
     },
