@@ -1174,7 +1174,8 @@ export class ExecuteSandbox {
     if (!this.page && this.defaultPageTargetId) {
       const targetId = this.defaultPageTargetId
       const rebind = this.pendingTargetRebind
-      const replacement = await waitForPageTarget({ context, targetId, timeoutMs: sessionPageHealthCheckTimeoutMs })
+      const waitTimeoutMs = rebind ? sessionPageHealthCheckTimeoutMs : adoptedPageConnectTimeoutMs
+      const replacement = await waitForPageTarget({ context, targetId, timeoutMs: waitTimeoutMs })
       if (!replacement) {
         throw new SessionPageRecoveryError({
           message: `Playwright did not expose session page target ${targetId} after the browser connection or target changed. Retry after the browser transition settles.`,

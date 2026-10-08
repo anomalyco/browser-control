@@ -76,10 +76,8 @@ function saveAttachedTabUrls(): void {
 async function recordAttachedTab(tabId: number): Promise<void> {
   await restorePersistentState()
   const tab = await chrome.tabs.get(tabId).catch(() => undefined)
-  if (tab?.url) {
-    attachedTabUrls.set(tabId, tab.url)
-    saveAttachedTabUrls()
-  }
+  attachedTabUrls.set(tabId, tab?.url || "about:blank")
+  saveAttachedTabUrls()
 }
 
 function forgetAttachedTab(tabId: number): void {
@@ -429,7 +427,7 @@ async function reannounceAttachedTabs(currentSocket: WebSocket): Promise<void> {
   for (const [tabId, storedUrl] of Array.from(attachedTabUrls)) {
     if (ownedBefore.has(tabId)) continue
     const tab = await chrome.tabs.get(tabId).catch(() => undefined)
-    if (!tab || !storedUrl || tab.url !== storedUrl) {
+    if (!tab || !storedUrl || (storedUrl !== "about:blank" && tab.url !== storedUrl)) {
       attachedTabUrls.delete(tabId)
       continue
     }
@@ -590,6 +588,10 @@ async function handleCommand(command: ShimCommand, currentSocket: WebSocket): Pr
     return {}
   }
   if (command.method === "runtime.reload") {
+    const owned = await getOwnedDebuggerTabIds(chrome.debugger).catch(() => new Set<number>())
+    for (const tabId of owned) {
+      await recordAttachedTab(tabId)
+    }
     reloading = true
     setTimeout(() => {
       currentSocket.close(1000, "Extension reloading")

@@ -411,7 +411,7 @@ try {
   })
 
   await check("select options preview, scrollable container pagination, ancestor-path find, and native PDF embed", async () => {
-    const { snapshot } = createSnapshotHelpers(page, { selectors: new Map() })
+    const { snapshot, ref } = createSnapshotHelpers(page, { selectors: new Map() })
     await page.setContent(`
       <main>
         <h1>Billing Settings</h1>
@@ -460,6 +460,21 @@ try {
     `)
     const sudoSnap = await snapshot()
     assert.match(sudoSnap, /- status "waiting for human: confirm access" \[handoff recommended\]/)
+
+    await page.setContent(`
+      <main>
+        <button id="ex-btn">
+          <span>Back Squat</span>
+          <span>Squat</span>
+          <svg viewBox="0 0 36 36"><text x="18" y="20">0 / 6</text></svg>
+        </button>
+      </main>
+    `)
+    const svgBtnSnap = await snapshot()
+    assert.match(svgBtnSnap, /- button "Back Squat Squat" \[ref=(e\d+)\]/)
+    const exRef = svgBtnSnap.match(/\[ref=(e\d+)\]/)?.[1]
+    assert.ok(exRef, svgBtnSnap)
+    assert.equal(await ref(exRef).count(), 1)
   })
 } finally {
   await browser.close()

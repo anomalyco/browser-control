@@ -312,6 +312,15 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
                 }
                 return NodeFilter.FILTER_REJECT
               }
+              if (node.tagName.toLowerCase() === "svg") {
+                const svgTitle = Array.from(node.children).find((child) => child.tagName.toLowerCase() === "title")
+                const titleText = normalize(svgTitle?.textContent ?? "")
+                if (titleText) {
+                  parts.push(` ${titleText} `)
+                  lastBlock = undefined
+                }
+                return NodeFilter.FILTER_REJECT
+              }
             }
             return NodeFilter.FILTER_ACCEPT
           },
