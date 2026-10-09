@@ -127,8 +127,9 @@ export const ghostCursorClientSource = `(() => {
     style: "distance-glide",
   };
   const svgNamespace = "http://www.w3.org/2000/svg";
+  // Classic macOS system arrow pointer geometry (tip at 2.0, 1.5 in 24x24 viewBox)
   const cursorPathData =
-    "M0.92 2.18C0.61 1.37 1.42 0.58 2.23 0.9L14.39 5.68C15.23 6.01 15.23 7.2 14.39 7.54L9.86 9.37C9.61 9.47 9.41 9.67 9.31 9.92L7.44 14.42C7.09 15.25 5.9 15.23 5.58 14.39L0.92 2.18Z";
+    "M2.1 1.5 L2.1 17.6 L6.0 13.8 L8.5 19.5 C8.75 20.05 9.4 20.3 9.95 20.05 L11.05 19.55 C11.6 19.3 11.85 18.65 11.6 18.1 L9.1 12.4 L14.5 12.4 L2.1 1.5 Z";
 
   const PI = Math.PI;
   const FRAME_MS = 1000 / 60;
@@ -146,9 +147,10 @@ export const ghostCursorClientSource = `(() => {
   const state = {
     element: null,
     arrow: null,
+    blurOuter: null,
+    blurInner: null,
     headGroup: null,
-    trailGroup: null,
-    trailNodes: [],
+    blurNode: null,
     targetX: initialX,
     targetY: initialY,
     renderedX: initialX,
@@ -216,8 +218,8 @@ export const ghostCursorClientSource = `(() => {
   const applyPosition = () => {
     if (!state.element) return;
     const pressed = state.element.dataset.pressed === "true";
-    const pressOffsetX = pressed ? -0.25 : 0;
-    const pressOffsetY = pressed ? 0.65 : 0;
+    const pressOffsetX = pressed ? -0.2 : 0;
+    const pressOffsetY = pressed ? 0.55 : 0;
     state.element.dataset.renderedX = formatCoord(state.renderedX);
     state.element.dataset.renderedY = formatCoord(state.renderedY);
     state.element.dataset.vx = formatCoord(state.vx);
@@ -226,36 +228,30 @@ export const ghostCursorClientSource = `(() => {
     if (state.arrow) {
       const cameraBoost = Math.pow(Math.max(1, state.camera.scale), 0.32);
       const speed = Math.hypot(state.vx, state.vy);
-      const stretch = speed > 140 ? clamp(1 + (speed - 140) / 1800, 1, 1.34) : 1;
-      const squash = 1 / Math.sqrt(stretch);
-      const velDeg = speed > 140 ? (Math.atan2(state.vy, state.vx) * 180) / PI : 0;
-      const stretchTransform = stretch > 1.005
-        ? "rotate(" + formatCoord(velDeg) + "deg) scale(" + formatCoord(stretch) + ", " + formatCoord(squash) + ") rotate(" + formatCoord(-velDeg) + "deg) "
-        : "";
-      const headTransform = stretchTransform + "rotate(" + formatCoord(state.deg) + "deg) scale(" + formatCoord(state.scale * cameraBoost) + ")";
+      // Rigid macOS cursor geometry (no squash-and-stretch), with exact 1D directional
+      // shutter motion blur R(+velDeg) * BlurX(sigma) * R(-velDeg) and subtle warm afterglow.
       const headTarget = state.headGroup || state.arrow;
-      headTarget.style.transform = headTransform;
-      if (state.trailGroup && state.trailNodes.length > 0) {
-        if (speed > 160 && !pressed) {
-          state.trailGroup.style.display = "block";
-          const viewScale = 16 / Math.max(16, state.options.size);
-          const shutterSec = 0.012;
-          const gate = smoothstep(160, 520, speed);
-          for (let i = 0; i < state.trailNodes.length; i++) {
-            const frac = (i + 1) / state.trailNodes.length;
-            const dx = -state.vx * shutterSec * frac * viewScale;
-            const dy = -state.vy * shutterSec * frac * viewScale;
-            const node = state.trailNodes[i];
-            node.style.transform = "translate(" + formatCoord(dx) + "px, " + formatCoord(dy) + "px) " + headTransform;
-            node.setAttribute("opacity", formatCoord(Math.pow(1 - frac * 0.85, 1.6) * 0.36 * gate));
-          }
+      headTarget.style.transform = "rotate(" + formatCoord(state.deg) + "deg) scale(" + formatCoord(state.scale * cameraBoost) + ")";
+      if (state.blurOuter && state.blurInner && state.blurNode) {
+        if (speed > 110 && !pressed) {
+          const velDeg = (Math.atan2(state.vy, state.vx) * 180) / PI;
+          const sigmaX = clamp((speed - 110) * 0.0028, 0, 4.2);
+          state.blurOuter.style.transform = "rotate(" + formatCoord(velDeg) + "deg)";
+          state.blurInner.style.transform = "rotate(" + formatCoord(-velDeg) + "deg)";
+          state.blurNode.setAttribute("stdDeviation", formatCoord(sigmaX) + " 0");
         } else {
-          state.trailGroup.style.display = "none";
+          state.blurOuter.style.transform = "";
+          state.blurInner.style.transform = "";
+          state.blurNode.setAttribute("stdDeviation", "0 0");
         }
       }
+      const glowAlpha = clamp(speed / 1600, 0, 0.32);
+      const afterglow = glowAlpha > 0.03
+        ? "drop-shadow(0 0 10px rgba(244, 243, 239, " + formatCoord(glowAlpha) + ")) "
+        : "";
       state.arrow.style.filter = pressed
-        ? "drop-shadow(0 1px 2px rgba(0,0,0,0.52))"
-        : "drop-shadow(0 2.5px 5px rgba(0,0,0,0.34)) drop-shadow(0 0.5px 1.5px rgba(0,0,0,0.22))";
+        ? "drop-shadow(0 1px 2px rgba(0,0,0,0.48)) drop-shadow(0 0 8px rgba(244,243,239,0.22))"
+        : afterglow + "drop-shadow(0 2.5px 5px rgba(0,0,0,0.34)) drop-shadow(0 0.5px 1.5px rgba(0,0,0,0.22))";
     }
   };
 
@@ -401,7 +397,7 @@ export const ghostCursorClientSource = `(() => {
     if (!halo) {
       halo = document.createElement("div");
       halo.id = "__bc_target_halo__";
-      halo.style.cssText = "position:fixed;pointer-events:none;box-sizing:border-box;border:1.5px solid rgba(52,211,153,0.65);box-shadow:0 0 16px rgba(52,211,153,0.22),inset 0 0 8px rgba(52,211,153,0.12);transition:left 150ms cubic-bezier(0.22,1,0.36,1),top 150ms cubic-bezier(0.22,1,0.36,1),width 150ms cubic-bezier(0.22,1,0.36,1),height 150ms cubic-bezier(0.22,1,0.36,1),transform 110ms ease,opacity 180ms ease;opacity:0;";
+      halo.style.cssText = "position:fixed;pointer-events:none;box-sizing:border-box;border:1px solid rgba(244,243,239,0.34);box-shadow:0 0 0 1px rgba(10,10,12,0.22);transition:left 150ms cubic-bezier(0.22,1,0.36,1),top 150ms cubic-bezier(0.22,1,0.36,1),width 150ms cubic-bezier(0.22,1,0.36,1),height 150ms cubic-bezier(0.22,1,0.36,1),transform 110ms ease,opacity 180ms ease;opacity:0;";
       stage.appendChild(halo);
     }
     const pad = phase === "down" ? 1 : 3;
@@ -411,16 +407,16 @@ export const ghostCursorClientSource = `(() => {
     halo.style.height = formatCoord(info.rect.height + pad * 2) + "px";
     halo.style.borderRadius = info.radius;
     if (phase === "down") {
-      halo.style.transform = "scale(0.975)";
-      halo.style.borderColor = "rgba(110, 231, 183, 0.92)";
-      halo.style.opacity = "0.95";
+      halo.style.transform = "scale(0.985)";
+      halo.style.borderColor = "rgba(244, 243, 239, 0.62)";
+      halo.style.opacity = "0.85";
     } else if (phase === "up") {
-      halo.style.transform = "scale(1.035)";
+      halo.style.transform = "scale(1.02)";
       halo.style.opacity = "0";
     } else {
       halo.style.transform = "scale(1)";
-      halo.style.borderColor = "rgba(52, 211, 153, 0.58)";
-      halo.style.opacity = "0.78";
+      halo.style.borderColor = "rgba(244, 243, 239, 0.30)";
+      halo.style.opacity = "0.65";
     }
   };
   const spawnClickPulse = (x, y, phase) => {
@@ -726,9 +722,10 @@ export const ghostCursorClientSource = `(() => {
     if (existing instanceof HTMLDivElement) {
       state.element = existing;
       state.arrow = existing.querySelector("svg");
+      state.blurOuter = existing.querySelector("#__bc_cursor_blur_outer__");
+      state.blurInner = existing.querySelector("#__bc_cursor_blur_inner__");
       state.headGroup = existing.querySelector("#__bc_cursor_head__");
-      state.trailGroup = existing.querySelector("#__bc_cursor_trail__");
-      state.trailNodes = Array.from(existing.querySelectorAll("#__bc_cursor_trail__ path"));
+      state.blurNode = existing.querySelector("feGaussianBlur");
       return existing;
     }
     const element = document.createElement("div");
@@ -745,7 +742,7 @@ export const ghostCursorClientSource = `(() => {
     element.style.opacity = "0";
     element.dataset.motion = "spring";
     const arrow = document.createElementNS(svgNamespace, "svg");
-    arrow.setAttribute("viewBox", "0 0 16 16");
+    arrow.setAttribute("viewBox", "0 0 24 24");
     arrow.style.display = "block";
     arrow.style.width = "100%";
     arrow.style.height = "100%";
@@ -755,54 +752,47 @@ export const ghostCursorClientSource = `(() => {
     const filter = document.createElementNS(svgNamespace, "filter");
     filter.setAttribute("id", "__bc_cursor_motion_blur__");
     filter.setAttribute("filterUnits", "userSpaceOnUse");
-    filter.setAttribute("x", "-80");
-    filter.setAttribute("y", "-80");
-    filter.setAttribute("width", "176");
-    filter.setAttribute("height", "176");
+    filter.setAttribute("x", "-36");
+    filter.setAttribute("y", "-36");
+    filter.setAttribute("width", "96");
+    filter.setAttribute("height", "96");
     const blurNode = document.createElementNS(svgNamespace, "feGaussianBlur");
     blurNode.setAttribute("in", "SourceGraphic");
-    blurNode.setAttribute("stdDeviation", "1.6 1.6");
+    blurNode.setAttribute("stdDeviation", "0 0");
     filter.appendChild(blurNode);
     defs.appendChild(filter);
     arrow.appendChild(defs);
+    const blurOuter = document.createElementNS(svgNamespace, "g");
+    blurOuter.setAttribute("id", "__bc_cursor_blur_outer__");
+    blurOuter.style.transformOrigin = "2.1px 1.5px";
+    const blurInner = document.createElementNS(svgNamespace, "g");
+    blurInner.setAttribute("id", "__bc_cursor_blur_inner__");
+    blurInner.setAttribute("filter", "url(#__bc_cursor_motion_blur__)");
+    blurInner.style.transformOrigin = "2.1px 1.5px";
     const headGroup = document.createElementNS(svgNamespace, "g");
     headGroup.setAttribute("id", "__bc_cursor_head__");
-    headGroup.style.transformOrigin = "1.4px 1.4px";
+    headGroup.style.transformOrigin = "2.1px 1.5px";
     const arrowPath = document.createElementNS(svgNamespace, "path");
     arrowPath.setAttribute("id", "__bc_cursor_dart__");
     arrowPath.setAttribute("d", cursorPathData);
     arrowPath.setAttribute("fill", state.options.color);
     arrowPath.setAttribute("stroke", "#fafafa");
-    arrowPath.setAttribute("stroke-width", "1.5");
+    arrowPath.setAttribute("stroke-width", "1.6");
     arrowPath.setAttribute("stroke-linejoin", "round");
+    arrowPath.setAttribute("stroke-linecap", "round");
     arrowPath.setAttribute("paint-order", "stroke");
     headGroup.appendChild(arrowPath);
-    const trailGroup = document.createElementNS(svgNamespace, "g");
-    trailGroup.setAttribute("id", "__bc_cursor_trail__");
-    trailGroup.setAttribute("filter", "url(#__bc_cursor_motion_blur__)");
-    trailGroup.style.display = "none";
-    const trailNodes = [];
-    for (let i = 0; i < 8; i++) {
-      const p = document.createElementNS(svgNamespace, "path");
-      p.setAttribute("d", cursorPathData);
-      p.setAttribute("fill", state.options.color);
-      p.setAttribute("stroke", "rgba(250, 250, 250, 0.35)");
-      p.setAttribute("stroke-width", "1.1");
-      p.setAttribute("stroke-linejoin", "round");
-      p.setAttribute("paint-order", "stroke");
-      p.style.transformOrigin = "1.4px 1.4px";
-      trailGroup.appendChild(p);
-      trailNodes.push(p);
-    }
-    arrow.appendChild(trailGroup);
-    arrow.appendChild(headGroup);
+    blurInner.appendChild(headGroup);
+    blurOuter.appendChild(blurInner);
+    arrow.appendChild(blurOuter);
     element.appendChild(arrow);
     document.documentElement.appendChild(element);
     state.element = element;
     state.arrow = arrow;
+    state.blurOuter = blurOuter;
+    state.blurInner = blurInner;
     state.headGroup = headGroup;
-    state.trailGroup = trailGroup;
-    state.trailNodes = trailNodes;
+    state.blurNode = blurNode;
     return element;
   };
   const clearIdleTimers = () => {
@@ -820,9 +810,10 @@ export const ghostCursorClientSource = `(() => {
         state.element?.remove();
         state.element = null;
         state.arrow = null;
+        state.blurOuter = null;
+        state.blurInner = null;
         state.headGroup = null;
-        state.trailGroup = null;
-        state.trailNodes = [];
+        state.blurNode = null;
         state.removeTimer = undefined;
       }, 160);
       state.fadeTimer = undefined;
@@ -855,9 +846,10 @@ export const ghostCursorClientSource = `(() => {
     state.element?.remove();
     state.element = null;
     state.arrow = null;
+    state.blurOuter = null;
+    state.blurInner = null;
     state.headGroup = null;
-    state.trailGroup = null;
-    state.trailNodes = [];
+    state.blurNode = null;
     document.getElementById(stageId)?.remove();
   };
   const restore = (position) => {

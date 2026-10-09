@@ -278,22 +278,22 @@ function renderStatus(): void {
       button {
         box-sizing: border-box;
         flex: 1;
-        padding: 5px 11px;
-        border: 1px solid rgba(255, 255, 255, 0.18);
+        padding: 5.5px 12px;
+        border: 0;
         border-radius: 999px;
-        background: linear-gradient(180deg, rgba(59, 130, 246, 0.95), rgba(37, 99, 235, 0.92));
-        box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.35), 0 2px 8px rgba(37, 99, 235, 0.35);
-        color: #fff;
+        background: #f4f3ef;
+        box-shadow: inset 0 0.5px 0 #ffffff, 0 1px 2px rgba(0, 0, 0, 0.32);
+        color: #09090b;
         cursor: pointer;
         font: 600 11.5px/1.2 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
         letter-spacing: -0.01em;
         pointer-events: auto;
-        transition: transform 120ms ease, filter 120ms ease;
+        transition: transform 120ms ease, opacity 120ms ease;
       }
-      button:hover { filter: brightness(1.08); }
-      button:active { transform: scale(0.97); }
-      button:disabled { cursor: default; opacity: 0.72; }
-      button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+      button:hover { opacity: 0.92; }
+      button:active { transform: scale(0.975); }
+      button:disabled { cursor: default; opacity: 0.65; }
+      button:focus-visible { outline: 2px solid #f4f3ef; outline-offset: 2px; }
     `
     const canvas = document.createElement("canvas")
     canvas.id = "__browser_control_island_canvas__"
@@ -348,7 +348,6 @@ function renderStatus(): void {
     if (pendingTabRequest) {
       const requestId = pendingTabRequest.requestId
       button.textContent = "Allow · ⌘↵"
-      button.style.background = "linear-gradient(180deg, rgba(245, 158, 11, 0.95), rgba(217, 119, 6, 0.92))"
       button.addEventListener("click", () => {
         button.disabled = true
         button.textContent = "Attaching…"
@@ -357,9 +356,9 @@ function renderStatus(): void {
       const decline = document.createElement("button")
       decline.type = "button"
       decline.textContent = "Not now"
-      decline.style.background = "rgba(148, 163, 184, 0.16)"
-      decline.style.boxShadow = "none"
-      decline.style.color = "#e2e8f0"
+      decline.style.background = "rgba(255, 255, 255, 0.10)"
+      decline.style.boxShadow = "inset 0 0.5px 0 rgba(255, 255, 255, 0.14)"
+      decline.style.color = "#d4d4d8"
       decline.addEventListener("click", () => {
         decideTabRequest(requestId, false)
       })
@@ -392,17 +391,14 @@ function renderStatus(): void {
 function highlightGhostCursor(cursor: HTMLElement): void {
   attendedCursor = cursor
   cursorFilter = cursor.style.filter
-  const path = cursor.querySelector("svg path")
-  cursorFill = path?.getAttribute("fill")
-  path?.setAttribute("fill", "#2563eb")
   const baseFilter = cursorFilter || "drop-shadow(0 2px 4px rgba(0,0,0,0.3))"
   cursorAnimation = cursor.animate(
     [
-      { filter: `${baseFilter} drop-shadow(0 0 2px rgba(37,99,235,0.45))` },
-      { filter: `${baseFilter} drop-shadow(0 0 8px rgba(37,99,235,0.95))` },
-      { filter: `${baseFilter} drop-shadow(0 0 2px rgba(37,99,235,0.45))` },
+      { filter: `${baseFilter} drop-shadow(0 0 3px rgba(244,243,239,0.25))` },
+      { filter: `${baseFilter} drop-shadow(0 0 10px rgba(244,243,239,0.65))` },
+      { filter: `${baseFilter} drop-shadow(0 0 3px rgba(244,243,239,0.25))` },
     ],
-    { duration: 1500, iterations: Infinity, easing: "ease-in-out" },
+    { duration: 1600, iterations: Infinity, easing: "ease-in-out" },
   )
 }
 

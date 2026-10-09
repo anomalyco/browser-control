@@ -217,48 +217,47 @@ fn shadeMatrix(p: vec2f, center: vec2f, radius: f32, dpr: f32, time: f32, tint: 
     return vec4f(0.0);
   }
 
-  var tint = vec3f(0.34, 0.88, 0.64);
-  if (tone > 1.5 && tone < 2.5) {
-    tint = vec3f(0.36, 0.64, 1.0);
-  } else if (tone >= 2.5) {
-    tint = vec3f(0.98, 0.72, 0.22);
+  // Tasteful hardware palette: warm ivory/silver spinner & hairline, subtle sage/amber status dot
+  var dotTint = vec3f(0.66, 0.76, 0.62); // muted sage when attached/running
+  if (tone > 1.5) {
+    dotTint = vec3f(0.88, 0.72, 0.42); // warm brass/amber when waiting for human
   }
+  let ivory = vec3f(0.95, 0.94, 0.91);
 
-  // Deep jet-black Apple hardware surface (#09090b) with a crisp 1px inner specular hairline
+  // Deep jet-black hardware surface (#0a0a0c) with a neutral 1px specular hairline
   let hairMask = clamp(1.0 - abs(d * dpr + 0.75), 0.0, 1.0);
   let topFactor = 1.0 - smoothstep(topY, topY + h * 0.5, p.y);
-  var rgb = vec3f(0.035, 0.036, 0.042) + vec3f(topFactor * 0.022);
-  var rimAlpha = 0.13 + topFactor * 0.14;
+  var rgb = vec3f(0.038, 0.038, 0.043) + vec3f(topFactor * 0.018);
+  var rimAlpha = 0.12 + topFactor * 0.14;
 
-  // Subtle proximity catchlight on the 1px hairline near the status dot & cursor
-  let dnOrb = length(p - orbCenter) / 48.0;
-  let orbRim = exp(-dnOrb * dnOrb * 2.4) * (0.42 + clickPulse * 0.35);
-  rgb += mix(vec3f(1.0), tint, 0.65) * hairMask * (rimAlpha + orbRim);
+  let dnOrb = length(p - orbCenter) / 44.0;
+  let orbRim = exp(-dnOrb * dnOrb * 2.8) * (0.18 + clickPulse * 0.22);
+  rgb += ivory * hairMask * (rimAlpha + orbRim);
 
-  let dnCur = length(p - cursor) / 96.0;
+  let dnCur = length(p - cursor) / 92.0;
   if (dnCur < 1.4) {
-    let curRim = exp(-dnCur * dnCur * 2.5) * 0.55;
-    rgb += vec3f(0.85, 0.95, 1.0) * hairMask * curRim;
+    let curRim = exp(-dnCur * dnCur * 2.6) * 0.35;
+    rgb += ivory * hairMask * curRim;
   }
 
   if (sheenPhase > 0.01 && sheenPhase < 0.99) {
     let sweepX = mix(cMain.x - w * 0.6, cMain.x + w * 0.6, sheenPhase);
     let diag = (p.x - sweepX) + (p.y - topY) * 0.38;
     let ribbon = exp(-(diag * diag) / 280.0) * sin(sheenPhase * 3.14159265);
-    rgb += vec3f(1.0) * ribbon * (0.04 + hairMask * 0.45);
+    rgb += ivory * ribbon * (0.03 + hairMask * 0.32);
   }
 
-  // Left status dot
-  let dotCol = shadeStatusDot(p, orbCenter, dpr, time, activity, tint);
+  // Left status dot (subtle sage or warm brass)
+  let dotCol = shadeStatusDot(p, orbCenter, dpr, time, activity, dotTint);
   rgb = rgb * (1.0 - dotCol.a) + dotCol.rgb;
 
-  // Right detached satellite indicator (crisp Comet Spinner or 3x3 Matrix)
+  // Right detached satellite indicator in monochrome warm ivory
   if (satR > 4.0) {
     var ind = vec4f(0.0);
     if (round(workStyle) < 0.5) {
-      ind = shadeSpinner(p, cSat, satR * 0.56, dpr, time, tint);
+      ind = shadeSpinner(p, cSat, satR * 0.54, dpr, time, ivory);
     } else {
-      ind = shadeMatrix(p, cSat, satR * 0.58, dpr, time, tint);
+      ind = shadeMatrix(p, cSat, satR * 0.56, dpr, time, ivory);
     }
     rgb = rgb * (1.0 - ind.a) + ind.rgb;
   }
@@ -418,44 +417,43 @@ void main() {
     return;
   }
 
-  vec3 tint = vec3(0.34, 0.88, 0.64);
-  if (tone > 1.5 && tone < 2.5) {
-    tint = vec3(0.36, 0.64, 1.0);
-  } else if (tone >= 2.5) {
-    tint = vec3(0.98, 0.72, 0.22);
+  vec3 dotTint = vec3(0.66, 0.76, 0.62);
+  if (tone > 1.5) {
+    dotTint = vec3(0.88, 0.72, 0.42);
   }
+  vec3 ivory = vec3(0.95, 0.94, 0.91);
 
   float hairMask = clamp(1.0 - abs(d * dpr + 0.75), 0.0, 1.0);
   float topFactor = 1.0 - smoothstep(topY, topY + h * 0.5, p.y);
-  vec3 rgb = vec3(0.035, 0.036, 0.042) + vec3(topFactor * 0.022);
-  float rimAlpha = 0.13 + topFactor * 0.14;
+  vec3 rgb = vec3(0.038, 0.038, 0.043) + vec3(topFactor * 0.018);
+  float rimAlpha = 0.12 + topFactor * 0.14;
 
-  float dnOrb = length(p - orbCenter) / 48.0;
-  float orbRim = exp(-dnOrb * dnOrb * 2.4) * (0.42 + clickPulse * 0.35);
-  rgb += mix(vec3(1.0), tint, 0.65) * hairMask * (rimAlpha + orbRim);
+  float dnOrb = length(p - orbCenter) / 44.0;
+  float orbRim = exp(-dnOrb * dnOrb * 2.8) * (0.18 + clickPulse * 0.22);
+  rgb += ivory * hairMask * (rimAlpha + orbRim);
 
-  float dnCur = length(p - cursor) / 96.0;
+  float dnCur = length(p - cursor) / 92.0;
   if (dnCur < 1.4) {
-    float curRim = exp(-dnCur * dnCur * 2.5) * 0.55;
-    rgb += vec3(0.85, 0.95, 1.0) * hairMask * curRim;
+    float curRim = exp(-dnCur * dnCur * 2.6) * 0.35;
+    rgb += ivory * hairMask * curRim;
   }
 
   if (sheenPhase > 0.01 && sheenPhase < 0.99) {
     float sweepX = mix(cMain.x - w * 0.6, cMain.x + w * 0.6, sheenPhase);
     float diag = (p.x - sweepX) + (p.y - topY) * 0.38;
     float ribbon = exp(-(diag * diag) / 280.0) * sin(sheenPhase * 3.14159265);
-    rgb += vec3(1.0) * ribbon * (0.04 + hairMask * 0.45);
+    rgb += ivory * ribbon * (0.03 + hairMask * 0.32);
   }
 
-  vec4 dotCol = shadeStatusDot(p, orbCenter, dpr, time, activity, tint);
+  vec4 dotCol = shadeStatusDot(p, orbCenter, dpr, time, activity, dotTint);
   rgb = rgb * (1.0 - dotCol.a) + dotCol.rgb;
 
   if (satR > 4.0) {
     vec4 ind = vec4(0.0);
     if (floor(workStyle + 0.5) < 0.5) {
-      ind = shadeSpinner(p, cSat, satR * 0.56, dpr, time, tint);
+      ind = shadeSpinner(p, cSat, satR * 0.54, dpr, time, ivory);
     } else {
-      ind = shadeMatrix(p, cSat, satR * 0.58, dpr, time, tint);
+      ind = shadeMatrix(p, cSat, satR * 0.56, dpr, time, ivory);
     }
     rgb = rgb * (1.0 - ind.a) + ind.rgb;
   }

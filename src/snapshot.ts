@@ -1953,19 +1953,13 @@ async function showScreenshotLabels(page: Page): Promise<readonly ScreenshotLabe
     `
     container.appendChild(style)
 
-    const markers = labels.flatMap((label) => {
-      const ring = document.createElement("div")
-      ring.className = `${markerClass}-ring`
-      ring.style.left = `${Math.max(0, label.rect.x - 1)}px`
-      ring.style.top = `${Math.max(0, label.rect.y - 1)}px`
-      ring.style.width = `${Math.max(4, label.rect.width + 2)}px`
-      ring.style.height = `${Math.max(4, label.rect.height + 2)}px`
+    const markers = labels.map((label) => {
       const marker = document.createElement("div")
       marker.className = markerClass
       marker.textContent = label.ref
       marker.style.left = `${Math.max(2, label.rect.x - 4)}px`
       marker.style.top = `${Math.max(2, label.rect.y - 16)}px`
-      return [ring, marker]
+      return marker
     })
     container.append(...markers)
 
