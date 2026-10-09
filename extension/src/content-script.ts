@@ -1,5 +1,5 @@
 import type { PageStatus } from "../../src/protocol.ts"
-import { DynamicIslandRig, ISLAND_CANVAS_H, ISLAND_CANVAS_W } from "./dynamic-island-gpu.ts"
+import { DynamicIslandRig, ISLAND_CANVAS_H, ISLAND_CANVAS_W, springCss } from "./dynamic-island-gpu.ts"
 import { pageStatusFromJson, pageStatusView } from "./page-status.ts"
 
 const hostId = "__browser_control_page_status__"
@@ -174,10 +174,6 @@ function renderStatus(): void {
         pointer-events: none !important;
         user-select: none !important;
         contain: layout style !important;
-        transition: opacity 280ms ease !important;
-      }
-      :host([data-idle-hidden="true"]) {
-        opacity: 0 !important;
       }
       :host([data-interactive="true"]) {
         user-select: text !important;
@@ -189,7 +185,6 @@ function renderStatus(): void {
         width: ${ISLAND_CANVAS_W}px;
         height: ${ISLAND_CANVAS_H}px;
         pointer-events: none;
-        filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.14)) drop-shadow(0 1px 2px rgba(0, 0, 0, 0.08));
       }
       #__browser_control_status__ {
         position: absolute;
@@ -204,6 +199,10 @@ function renderStatus(): void {
         letter-spacing: -0.012em;
         pointer-events: none;
         opacity: 0;
+      }
+      #__browser_control_prompt__, #__browser_control_actions__ {
+        opacity: 0;
+        transform-origin: 50% 0%;
         will-change: transform, opacity;
       }
       #__browser_control_prompt__ {
@@ -234,10 +233,10 @@ function renderStatus(): void {
         font: 600 11.5px/1.2 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
         letter-spacing: -0.01em;
         pointer-events: auto;
-        transition: transform 120ms ease, opacity 120ms ease;
+        transition: transform ${springCss({ visualDuration: 0.3, bounce: 0.3 })}, opacity 120ms ease;
       }
       button:hover { opacity: 0.92; }
-      button:active { transform: scale(0.975); }
+      button:active { transform: scale(0.96); transition-duration: 90ms; transition-timing-function: ease-out; }
       button:disabled { cursor: default; opacity: 0.65; }
       button:focus-visible { outline: 2px solid #f4f3ef; outline-offset: 2px; }
     `
@@ -277,10 +276,9 @@ function renderStatus(): void {
     clearTimeout(idleHideTimer)
     idleHideTimer = undefined
   }
-  host.removeAttribute("data-idle-hidden")
   if (view.tone === "active") {
     idleHideTimer = setTimeout(() => {
-      host?.setAttribute("data-idle-hidden", "true")
+      islandRig?.setVisible(false)
     }, 1_800)
   }
   clearGhostCursorAttention()
@@ -330,11 +328,7 @@ function renderStatus(): void {
   if (!host.isConnected) {
     document.documentElement.append(host)
   }
-  islandRig?.configure({
-    tone: view.tone,
-    isTabRequest: Boolean(pendingTabRequest),
-    ...(view.message ? { message: view.message } : {}),
-  })
+  islandRig?.configure(view.tone)
   observeHost()
 }
 
@@ -373,12 +367,29 @@ function clearStatus(): void {
     clearTimeout(idleHideTimer)
     idleHideTimer = undefined
   }
+  if (collapseCleanupTimer !== undefined) {
+    clearTimeout(collapseCleanupTimer)
+    collapseCleanupTimer = undefined
+  }
   clearGhostCursorAttention()
-  islandRig?.destroy()
-  islandRig = undefined
   observer?.disconnect()
   observer = undefined
-  document.getElementById(hostId)?.remove()
+  const host = document.getElementById(hostId)
+  const rig = islandRig
+  islandRig = undefined
+  if (!host) {
+    rig?.destroy()
+    return
+  }
+  // Release the id so a new status can mount immediately while this island animates out.
+  host.removeAttribute("id")
+  host.inert = true
+  const remove = () => {
+    rig?.destroy()
+    host.remove()
+  }
+  if (!rig) return remove()
+  void Promise.race([rig.exit(), new Promise((resolve) => setTimeout(resolve, 700))]).then(remove)
 }
 
 function decideTabRequest(requestId: string, approved: boolean): void {

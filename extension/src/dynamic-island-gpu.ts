@@ -1,30 +1,61 @@
-// Minimal, single-capsule GPU Dynamic Island for Browser Control.
-// Compact state: a quiet 48x26px carbon pill with three breathing warm-ivory dots (no text, no second circle).
-// Expanded state: smoothly unfolds into a 324x82px permission / handoff card.
-// Both expansion and collapse drive inner content opacity/scale as a continuous function of live spring progress `u`,
-// so DOM nodes are never abruptly removed mid-transition.
+// Minimal GPU Dynamic Island for Browser Control.
+// Compact: a quiet carbon pill with three breathing ivory dots.
+// Expanded: the same shape unfolds into the permission / handoff card.
+// Every property is an interruptible spring parameterised like Motion (visualDuration + bounce),
+// so retargeting mid-flight keeps velocity instead of restarting.
+
+type SpringTransition = {
+  readonly visualDuration: number
+  readonly bounce?: number
+  readonly delay?: number
+}
+
+const reducedMotion = (): boolean => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false
+
+// Motion's mapping: visualDuration is the time to first reach the target, bounce trades damping for overshoot.
+function springConstants(transition: SpringTransition): { readonly omega: number; readonly zeta: number } {
+  const omega = (2 * Math.PI) / (transition.visualDuration * 1.2)
+  return { omega, zeta: Math.min(1, Math.max(0.05, 1 - (transition.bounce ?? 0))) }
+}
 
 class Spring {
   v = 0
   target: number
+  private omega = 20
+  private zeta = 1
+  private delay = 0
+
   constructor(
     public x: number,
-    public omega = 20,
-    public zeta = 0.88,
+    private readonly precision = 0.02,
   ) {
     this.target = x
   }
-  set(target: number): this {
+
+  to(target: number, transition: SpringTransition): this {
+    if (reducedMotion()) return this.snap(target)
+    const { omega, zeta } = springConstants(transition)
+    this.omega = omega
+    this.zeta = zeta
+    this.delay = transition.delay ?? 0
     this.target = target
     return this
   }
+
   snap(x: number): this {
     this.x = this.target = x
     this.v = 0
+    this.delay = 0
     return this
   }
+
   step(dt: number): number {
-    if (this.x === this.target && this.v === 0) return this.x
+    if (this.delay > 0) {
+      const wait = Math.min(this.delay, dt)
+      this.delay -= wait
+      dt -= wait
+    }
+    if (dt <= 0 || (this.x === this.target && this.v === 0)) return this.x
     const h = 1 / 480
     for (let t = 0; t < dt; t += h) {
       const k = Math.min(h, dt - t)
@@ -32,15 +63,35 @@ class Spring {
       this.v += a * k
       this.x += this.v * k
     }
-    if (Math.abs(this.x - this.target) < 0.01 && Math.abs(this.v) < 0.01) {
-      this.x = this.target
-      this.v = 0
-    }
+    if (this.resting) this.snap(this.target)
     return this.x
   }
+
   get resting(): boolean {
-    return Math.abs(this.x - this.target) < 0.02 && Math.abs(this.v) < 0.08
+    return this.delay <= 0 && Math.abs(this.x - this.target) < this.precision && Math.abs(this.v) < this.precision * 10
   }
+}
+
+// Samples a critically/under-damped spring into a CSS linear() easing, the same trick Motion uses for CSS springs.
+export function springCss(transition: SpringTransition): string {
+  const { omega, zeta } = springConstants(transition)
+  const h = 1 / 480
+  const points = [0]
+  let x = 0
+  let v = 0
+  let elapsed = 0
+  while (elapsed < 2 && (Math.abs(1 - x) > 0.0005 || Math.abs(v) > 0.005)) {
+    for (let i = 0; i < 8; i++) {
+      v += (-omega * omega * (x - 1) - 2 * zeta * omega * v) * h
+      x += v * h
+    }
+    elapsed += 8 * h
+    points.push(x)
+  }
+  points[points.length - 1] = 1
+  const stride = Math.max(1, Math.round(points.length / 40))
+  const sampled = points.filter((_, index) => index % stride === 0 || index === points.length - 1)
+  return `${Math.round(elapsed * 1000)}ms linear(${sampled.map((value) => value.toFixed(4)).join(", ")})`
 }
 
 export const ISLAND_CANVAS_W = 420
@@ -48,19 +99,17 @@ export const ISLAND_CANVAS_H = 128
 
 const COMPACT_W = 52
 const COMPACT_H = 26
+const COMPACT_R = 13
 const EXPANDED_W = 324
 const EXPANDED_H = 82
-
-function smoothstep(edge0: number, edge1: number, x: number): number {
-  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)))
-  return t * t * (3 - 2 * t)
-}
+const EXPANDED_R = 22
+const TOP_Y = 8
 
 const WGSL_SOURCE = /* wgsl */ `
 struct Uniforms {
   u0: vec4f, // canvasW, canvasH, dpr, time
   u1: vec4f, // islandW, islandH, radius, topY
-  u2: vec4f, // dotsAlpha, active, pad, pad
+  u2: vec4f, // dotsAlpha, running, presence, dotScale
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -86,10 +135,10 @@ fn sdRoundedBox(p: vec2f, b: vec2f, r: f32) -> f32 {
   return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
-fn shadeThreeDots(p: vec2f, center: vec2f, dpr: f32, time: f32, running: f32) -> vec4f {
-  let q = p - center;
+fn shadeThreeDots(p: vec2f, center: vec2f, dpr: f32, time: f32, running: f32, scale: f32) -> vec4f {
+  let q = (p - center) / max(scale, 0.05);
   if (abs(q.x) > 18.0 || abs(q.y) > 8.0) { return vec4f(0.0); }
-  let aa = 0.55 / dpr;
+  let aa = 0.55 / (dpr * max(scale, 0.05));
   let ivory = vec3f(0.95, 0.94, 0.91);
   var totalA = 0.0;
   for (var i = 0; i < 3; i++) {
@@ -116,14 +165,18 @@ fn shadeThreeDots(p: vec2f, center: vec2f, dpr: f32, time: f32, running: f32) ->
   let topY = u.u1.w;
   let dotsAlpha = clamp(u.u2.x, 0.0, 1.0);
   let running = clamp(u.u2.y, 0.0, 1.0);
+  let presence = clamp(u.u2.z, 0.0, 1.0);
+  let dotScale = u.u2.w;
 
   let center = vec2f(u.u0.x * 0.5, topY + h * 0.5);
   let halfSize = max(vec2f(w, h) * 0.5, vec2f(6.0));
   let rr = min(r, min(halfSize.x, halfSize.y));
   let d = sdRoundedBox(p - center, halfSize, rr);
   let cov = clamp(0.5 - d * dpr, 0.0, 1.0);
+  let fall = 1.0 - smoothstep(-4.0, 14.0, sdRoundedBox(p - center - vec2f(0.0, 3.0), halfSize, rr));
+  let shadow = 0.14 * fall * fall * presence;
   if (cov <= 0.001) {
-    return vec4f(0.0);
+    return vec4f(0.0, 0.0, 0.0, shadow);
   }
 
   let ivory = vec3f(0.95, 0.94, 0.91);
@@ -131,11 +184,12 @@ fn shadeThreeDots(p: vec2f, center: vec2f, dpr: f32, time: f32, running: f32) ->
   var rgb = vec3f(0.039, 0.039, 0.045) + ivory * hairMask * 0.14;
 
   if (dotsAlpha > 0.005) {
-    let dots = shadeThreeDots(p, center, dpr, time, running) * dotsAlpha;
+    let dots = shadeThreeDots(p, center, dpr, time, running, dotScale) * dotsAlpha;
     rgb = rgb * (1.0 - dots.a) + dots.rgb;
   }
 
-  return vec4f(min(rgb, vec3f(1.0)) * cov, cov);
+  let a = cov * presence;
+  return vec4f(min(rgb, vec3f(1.0)) * a, a + shadow * (1.0 - a));
 }
 `
 
@@ -154,17 +208,17 @@ in vec2 v_uv;
 out vec4 fragColor;
 uniform vec4 u0; // canvasW, canvasH, dpr, time
 uniform vec4 u1; // islandW, islandH, radius, topY
-uniform vec4 u2; // dotsAlpha, running, pad, pad
+uniform vec4 u2; // dotsAlpha, running, presence, dotScale
 
 float sdRoundedBox(vec2 p, vec2 b, float r) {
   vec2 q = abs(p) - b + r;
   return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
-vec4 shadeThreeDots(vec2 p, vec2 center, float dpr, float time, float running) {
-  vec2 q = p - center;
+vec4 shadeThreeDots(vec2 p, vec2 center, float dpr, float time, float running, float scale) {
+  vec2 q = (p - center) / max(scale, 0.05);
   if (abs(q.x) > 18.0 || abs(q.y) > 8.0) return vec4(0.0);
-  float aa = 0.55 / dpr;
+  float aa = 0.55 / (dpr * max(scale, 0.05));
   vec3 ivory = vec3(0.95, 0.94, 0.91);
   float totalA = 0.0;
   for (int i = 0; i < 3; i++) {
@@ -188,14 +242,18 @@ void main() {
   float w = u1.x, h = u1.y, r = u1.z, topY = u1.w;
   float dotsAlpha = clamp(u2.x, 0.0, 1.0);
   float running = clamp(u2.y, 0.0, 1.0);
+  float presence = clamp(u2.z, 0.0, 1.0);
+  float dotScale = u2.w;
 
   vec2 center = vec2(u0.x * 0.5, topY + h * 0.5);
   vec2 halfSize = max(vec2(w, h) * 0.5, vec2(6.0));
   float rr = min(r, min(halfSize.x, halfSize.y));
   float d = sdRoundedBox(p - center, halfSize, rr);
   float cov = clamp(0.5 - d * dpr, 0.0, 1.0);
+  float fall = 1.0 - smoothstep(-4.0, 14.0, sdRoundedBox(p - center - vec2(0.0, 3.0), halfSize, rr));
+  float shadow = 0.14 * fall * fall * presence;
   if (cov <= 0.001) {
-    fragColor = vec4(0.0);
+    fragColor = vec4(0.0, 0.0, 0.0, shadow);
     return;
   }
 
@@ -204,11 +262,12 @@ void main() {
   vec3 rgb = vec3(0.039, 0.039, 0.045) + ivory * hairMask * 0.14;
 
   if (dotsAlpha > 0.005) {
-    vec4 dots = shadeThreeDots(p, center, dpr, time, running) * dotsAlpha;
+    vec4 dots = shadeThreeDots(p, center, dpr, time, running, dotScale) * dotsAlpha;
     rgb = rgb * (1.0 - dots.a) + dots.rgb;
   }
 
-  fragColor = vec4(min(rgb, vec3(1.0)) * cov, cov);
+  float a = cov * presence;
+  fragColor = vec4(min(rgb, vec3(1.0)) * a, a + shadow * (1.0 - a));
 }
 `
 
@@ -325,13 +384,44 @@ function initWebGl2Backend(canvas: HTMLCanvasElement): GpuBackend | null {
   }
 }
 
+export type IslandTone = "active" | "running" | "waiting"
+
+const UNFOLD = {
+  width: { visualDuration: 0.5, bounce: 0.2 },
+  height: { visualDuration: 0.55, bounce: 0.16, delay: 0.025 },
+  dots: { visualDuration: 0.14 },
+  prompt: { visualDuration: 0.4, bounce: 0.12, delay: 0.12 },
+  actions: { visualDuration: 0.4, bounce: 0.12, delay: 0.17 },
+} satisfies Record<string, SpringTransition>
+
+const FOLD = {
+  content: { visualDuration: 0.1 },
+  height: { visualDuration: 0.34, bounce: 0.1, delay: 0.04 },
+  width: { visualDuration: 0.36, bounce: 0.18, delay: 0.07 },
+  dots: { visualDuration: 0.3, delay: 0.2 },
+} satisfies Record<string, SpringTransition>
+
+const APPEAR = { visualDuration: 0.45, bounce: 0.24 } satisfies SpringTransition
+const DISAPPEAR = { visualDuration: 0.26 } satisfies SpringTransition
+
+const clamp01 = (value: number): number => Math.max(0, Math.min(1, value))
+
+function smoothstep(edge0: number, edge1: number, x: number): number {
+  const t = clamp01((x - edge0) / (edge1 - edge0))
+  return t * t * (3 - 2 * t)
+}
+
 export class DynamicIslandRig {
-  // Asymmetric critically-damped springs: width slightly leads height for a natural pillowy unfold
-  readonly w = new Spring(COMPACT_W, 20, 0.88)
-  readonly h = new Spring(COMPACT_H, 18, 0.86)
-  readonly r = new Spring(13, 22, 0.90)
-  readonly topY = new Spring(8, 22, 0.90)
-  toneMode = 0
+  private readonly w = new Spring(COMPACT_W)
+  private readonly h = new Spring(COMPACT_H)
+  private readonly presence = new Spring(0, 0.001)
+  private readonly running = new Spring(0, 0.001)
+  private readonly dots = new Spring(1, 0.001)
+  private readonly prompt = new Spring(0, 0.001)
+  private readonly actions = new Spring(0, 0.001)
+  private expanded = false
+  private visible = false
+  private exitResolve: (() => void) | undefined
   private backend: GpuBackend | null = null
   private initializing = false
   private rafId = 0
@@ -344,7 +434,12 @@ export class DynamicIslandRig {
     private readonly canvas: HTMLCanvasElement,
     private readonly contentEl: HTMLElement,
   ) {
+    contentEl.style.width = `${EXPANDED_W}px`
+    contentEl.style.height = `${EXPANDED_H}px`
+    contentEl.style.left = `${(ISLAND_CANVAS_W - EXPANDED_W) / 2}px`
+    contentEl.style.top = `${TOP_Y}px`
     this.syncCanvasResolution()
+    this.setVisible(true)
     void this.ensureBackend()
   }
 
@@ -367,57 +462,83 @@ export class DynamicIslandRig {
     this.startLoop()
   }
 
-  configure(options: {
-    readonly tone: "active" | "running" | "waiting"
-    readonly isTabRequest: boolean
-    readonly label?: string
-    readonly message?: string
-  }): void {
-    if (options.tone === "waiting") {
-      this.w.set(EXPANDED_W)
-      this.h.set(EXPANDED_H)
-      this.r.set(20)
-      this.topY.set(10)
-      this.toneMode = options.isTabRequest ? 3 : 2
-    } else if (options.tone === "running") {
-      this.w.set(COMPACT_W)
-      this.h.set(COMPACT_H)
-      this.r.set(13)
-      this.topY.set(8)
-      this.toneMode = 1
-    } else {
-      this.w.set(COMPACT_W)
-      this.h.set(COMPACT_H)
-      this.r.set(13)
-      this.topY.set(8)
-      this.toneMode = 0
-    }
+  configure(tone: IslandTone): void {
+    this.setVisible(true)
+    this.running.to(tone === "running" ? 1 : 0, { visualDuration: 0.4 })
+    this.setExpanded(tone === "waiting")
+    // Apply current reveal styles to freshly rendered content even when every spring is at rest.
+    this.stepFrame(0)
     this.startLoop()
+  }
+
+  setVisible(visible: boolean): void {
+    if (visible === this.visible) return
+    this.visible = visible
+    this.presence.to(visible ? 1 : 0, visible ? APPEAR : DISAPPEAR)
+    this.startLoop()
+  }
+
+  // Folds the content away and shrinks the island out; resolves once it is fully transparent.
+  exit(): Promise<void> {
+    this.prompt.to(0, FOLD.content)
+    this.actions.to(0, FOLD.content)
+    this.setVisible(false)
+    return new Promise((resolve) => {
+      this.exitResolve = resolve
+      this.startLoop()
+    })
+  }
+
+  private setExpanded(expanded: boolean): void {
+    if (expanded === this.expanded) return
+    this.expanded = expanded
+    if (expanded) {
+      this.w.to(EXPANDED_W, UNFOLD.width)
+      this.h.to(EXPANDED_H, UNFOLD.height)
+      this.dots.to(0, UNFOLD.dots)
+      this.prompt.to(1, UNFOLD.prompt)
+      this.actions.to(1, UNFOLD.actions)
+    } else {
+      this.prompt.to(0, FOLD.content)
+      this.actions.to(0, FOLD.content)
+      this.h.to(COMPACT_H, FOLD.height)
+      this.w.to(COMPACT_W, FOLD.width)
+      this.dots.to(1, FOLD.dots)
+    }
+  }
+
+  private get animating(): boolean {
+    const springs = [this.w, this.h, this.presence, this.running, this.dots, this.prompt, this.actions]
+    return springs.some((spring) => !spring.resting) || (this.running.x > 0.001 && this.presence.x > 0.001)
   }
 
   stepFrame(dt: number): void {
     this.simTime += dt
-    const w = this.w.step(dt)
-    const h = this.h.step(dt)
-    const r = this.r.step(dt)
-    const topY = this.topY.step(dt)
+    const presence = this.presence.step(dt)
+    const running = this.running.step(dt)
+    const dots = this.dots.step(dt)
+    const prompt = this.prompt.step(dt)
+    const actions = this.actions.step(dt)
+    const scale = 0.45 + 0.55 * presence
+    const w = this.w.step(dt) * scale
+    const h = this.h.step(dt) * scale
+    const unfold = clamp01((this.h.x - COMPACT_H) / (EXPANDED_H - COMPACT_H))
+    const room = smoothstep(0.45, 0.9, Math.min(unfold, clamp01((this.w.x - COMPACT_W) / (EXPANDED_W - COMPACT_W))))
+    const r = (COMPACT_R + (EXPANDED_R - COMPACT_R) * unfold) * scale
 
-    // Continuous expansion ratio u in [0, 1] drives both the 3-dot dissolve and the permission card reveal
-    const u = Math.max(0, Math.min(1, (w - COMPACT_W) / (EXPANDED_W - COMPACT_W)))
-    const dotsAlpha = 1 - smoothstep(0.0, 0.34, u)
-    const cardAlpha = smoothstep(0.38, 0.94, u)
-    const cardScale = 0.92 + 0.08 * cardAlpha
-    const cardShiftY = (1 - cardAlpha) * -4
+    // Clip the fixed-layout card to the live island shape so text is masked by the surface instead of reflowing.
+    const side = (EXPANDED_W - w) / 2
+    const bottom = EXPANDED_H - h
+    this.contentEl.style.clipPath = `inset(0 ${side.toFixed(2)}px ${bottom.toFixed(2)}px ${side.toFixed(2)}px round ${r.toFixed(2)}px)`
+    this.contentEl.style.opacity = presence > 0.001 ? "1" : "0"
+    this.contentEl.style.pointerEvents = this.expanded && actions > 0.6 ? "auto" : "none"
+    reveal(this.contentEl.querySelector<HTMLElement>("#__browser_control_prompt__"), prompt, room, 6)
+    reveal(this.contentEl.querySelector<HTMLElement>("#__browser_control_actions__"), actions, room, 8)
 
-    // Keep contentEl at the fixed expanded layout size so text never reflows during morphs
-    this.contentEl.style.width = `${EXPANDED_W}px`
-    this.contentEl.style.height = `${EXPANDED_H}px`
-    this.contentEl.style.left = `${(ISLAND_CANVAS_W * 0.5 - EXPANDED_W * 0.5).toFixed(1)}px`
-    this.contentEl.style.top = `${topY.toFixed(1)}px`
-    this.contentEl.style.opacity = cardAlpha.toFixed(3)
-    this.contentEl.style.transformOrigin = "50% 0%"
-    this.contentEl.style.transform = `translate3d(0, ${cardShiftY.toFixed(2)}px, 0) scale(${cardScale.toFixed(3)})`
-    this.contentEl.style.pointerEvents = cardAlpha > 0.8 ? "auto" : "none"
+    if (this.exitResolve && this.presence.resting && this.presence.target === 0) {
+      this.exitResolve()
+      this.exitResolve = undefined
+    }
 
     if (this.backend) {
       const dpr = this.syncCanvasResolution()
@@ -429,11 +550,11 @@ export class DynamicIslandRig {
       buf[4] = w
       buf[5] = h
       buf[6] = r
-      buf[7] = topY
-      buf[8] = dotsAlpha
-      buf[9] = this.toneMode >= 1 ? 1 : 0
-      buf[10] = 0
-      buf[11] = 0
+      buf[7] = TOP_Y
+      buf[8] = clamp01(dots)
+      buf[9] = clamp01(running)
+      buf[10] = smoothstep(0, 0.4, presence)
+      buf[11] = scale * (0.55 + 0.45 * clamp01(dots))
       this.backend.draw(buf)
     }
   }
@@ -454,11 +575,7 @@ export class DynamicIslandRig {
       const dt = Math.min(0.05, Math.max(1 / 240, (now - this.lastTime) / 1000))
       this.lastTime = now
       this.stepFrame(dt)
-      const animating =
-        this.toneMode === 1 ||
-        !this.w.resting ||
-        !this.h.resting
-      if (animating && this.canvas.isConnected) {
+      if (this.animating && this.canvas.isConnected) {
         this.rafId = window.requestAnimationFrame(tick)
       }
     }
@@ -470,5 +587,15 @@ export class DynamicIslandRig {
       window.cancelAnimationFrame(this.rafId)
       this.rafId = 0
     }
+    this.exitResolve?.()
+    this.exitResolve = undefined
   }
+}
+
+// Transform follows the spring; opacity resolves faster and is gated by the room the shape has opened up,
+// so content never shows clipped by a half-open island.
+function reveal(element: HTMLElement | null, progress: number, room: number, lift: number): void {
+  if (!element) return
+  element.style.opacity = (smoothstep(0, 0.6, progress) * room).toFixed(3)
+  element.style.transform = `translate3d(0, ${((progress - 1) * lift).toFixed(2)}px, 0) scale(${(0.96 + 0.04 * progress).toFixed(4)})`
 }
