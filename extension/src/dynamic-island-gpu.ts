@@ -1,16 +1,15 @@
 // GPU-accelerated Dynamic Island for Browser Control.
-// Uses gpu-gallery's 1/480 Hz substep Spring integrator, polynomial smooth-minimum (fsmin)
-// metaball splitting, Interleaved Gradient Noise (IGN) shutter motion blur, bioluminescent
-// pulse orb (shadeOrb), harmonic working wave (workWave), and 1px hairline proximity lighting.
-// Runs on WebGPU (navigator.gpu) with an automatic WebGL2 fallback using identical math.
+// Uses gpu-gallery's 1/480 Hz substep Spring integrator, transient smooth-minimum (fsmin)
+// metaball bridge during split/merge, 11-sample Interleaved Gradient Noise (IGN) shutter
+// motion blur during high-velocity morphs, and crisp geometric indicators (shadeSpinner / workMatrix).
 
 class Spring {
   v = 0
   target: number
   constructor(
     public x: number,
-    public omega = 24,
-    public zeta = 0.76,
+    public omega = 22,
+    public zeta = 0.74,
   ) {
     this.target = x
   }
@@ -43,15 +42,16 @@ class Spring {
   }
 }
 
-export const ISLAND_CANVAS_W = 540
-export const ISLAND_CANVAS_H = 176
+export const ISLAND_CANVAS_W = 560
+export const ISLAND_CANVAS_H = 168
 
 const WGSL_SOURCE = /* wgsl */ `
 struct Uniforms {
   u0: vec4f, // canvasW, canvasH, dpr, time
   u1: vec4f, // islandW, islandH, radius, topY
-  u2: vec4f, // velW, velH, satOffset, satRadius
+  u2: vec4f, // velW, velH, satGap, satRadius
   u3: vec4f, // cursorX, cursorY, toneMode (0=attached,1=running,2=waiting,3=request), activity
+  u4: vec4f, // workStyle (0=spinner,1=matrix), sheenPhase, clickPulse, pad
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -83,73 +83,86 @@ fn fsmin(a: f32, b: f32, k: f32) -> f32 {
   return min(a, b) - h * h * k * 0.25;
 }
 
-fn evalField(p: vec2f, w: f32, h: f32, r: f32, topY: f32, satOff: f32, satR: f32, cursor: vec2f) -> f32 {
-  let cMain = vec2f(u.u0.x * 0.5 - satOff * 0.26, topY + h * 0.5);
+fn minJerk(x: f32) -> f32 {
+  let uVal = clamp(x, 0.0, 1.0);
+  return uVal * uVal * uVal * (10.0 + uVal * (6.0 * uVal - 15.0));
+}
+
+fn evalField(p: vec2f, w: f32, h: f32, r: f32, topY: f32, satGap: f32, satR: f32) -> f32 {
+  let totalShift = max(0.0, satGap + satR * 2.0) * 0.5;
+  let cMain = vec2f(u.u0.x * 0.5 - totalShift, topY + h * 0.5);
   let halfSize = max(vec2f(w, h) * 0.5, vec2f(8.0));
   let rr = min(r, min(halfSize.x, halfSize.y));
   var d = sdRoundedBox(p - cMain, halfSize, rr);
   if (satR > 0.5) {
-    let cSat = vec2f(cMain.x + halfSize.x + satOff, topY + 18.0);
+    let cSat = vec2f(cMain.x + halfSize.x + satGap + satR, topY + h * 0.5);
     let dSat = length(p - cSat) - satR;
-    d = fsmin(d, dSat, 17.5);
-  }
-  let dCursor = length(p - cursor);
-  if (dCursor < 78.0 && d < 46.0) {
-    d = fsmin(d, dCursor - 6.0, 16.0);
+    // Transient liquid bridge: only active while pinching off or merging (-14px < satGap < 5.5px).
+    // At rest (satGap == 7.0px), kBridge is 0.0 so the two shapes are 100% crisp and separate!
+    let kBridge = 11.5 * (1.0 - smoothstep(1.0, 5.8, satGap)) * clamp(satR / 14.0, 0.0, 1.0);
+    d = fsmin(d, dSat, kBridge);
   }
   return d;
 }
 
-fn shadeOrb(p: vec2f, center: vec2f, radius: f32, time: f32, activity: f32, tint: vec3f, secTint: vec3f) -> vec4f {
-  let p0 = (p - center) / max(radius, 1.0);
-  let r = length(p0);
-  if (r > 1.35) { return vec4f(0.0); }
-  let breathe = 0.5 + 0.5 * sin(time * mix(2.0, 4.6, activity));
-  let outerHalo = exp(-r * r * 3.8) * mix(0.26, 0.52, activity);
-  let ringSpeed = mix(0.38, 0.96, activity);
-  let ph1 = fract(time * ringSpeed);
-  let r1 = mix(0.16, 0.86, ph1);
-  let ring1 = exp(-pow((r - r1) / 0.065, 2.0)) * (1.0 - ph1) * (1.0 - ph1) * 0.58;
-  let ph2 = fract(time * ringSpeed + 0.5);
-  let r2 = mix(0.16, 0.86, ph2);
-  let ring2 = exp(-pow((r - r2) / 0.065, 2.0)) * (1.0 - ph2) * (1.0 - ph2) * 0.44;
-  let coreR = 0.24 * (0.95 + 0.08 * breathe);
-  let midGlow = exp(-(r * r) / (coreR * coreR * 2.8)) * 0.88;
-  let innerCore = smoothstep(coreR, coreR * 0.2, r);
-  let satAng = time * mix(2.8, 5.8, activity);
-  let satPos = vec2f(cos(satAng), sin(satAng) * 0.78) * 0.48;
-  let dSat = length(p0 - satPos);
-  let satGlow = exp(-dSat * dSat * 85.0) * 0.85 * activity;
-  let bodyTint = mix(tint, secTint, clamp(0.5 + p0.x * 0.6, 0.0, 1.0));
-  let rgb = bodyTint * (outerHalo + midGlow * 0.75) + secTint * (ring1 + ring2) + vec3f(0.98, 0.99, 1.0) * (innerCore + satGlow);
-  let a = clamp(outerHalo + midGlow * 0.8 + ring1 + ring2 + innerCore + satGlow, 0.0, 1.0) * smoothstep(1.35, 0.75, r);
+// Crisp geometric status dot on the left
+fn shadeStatusDot(p: vec2f, center: vec2f, dpr: f32, time: f32, activity: f32, tint: vec3f) -> vec4f {
+  let d = length(p - center);
+  if (d > 11.0) { return vec4f(0.0); }
+  let aa = 0.65 / dpr;
+  let breathe = 0.5 + 0.5 * sin(time * 3.2);
+  let coreR = 3.2 + 0.25 * breathe * activity;
+  let core = 1.0 - smoothstep(coreR - aa, coreR + aa, d);
+  let halo = exp(-(d * d) / 22.0) * (0.28 + 0.18 * breathe * activity);
+  let ph = fract(time * 0.65);
+  let ringR = mix(3.4, 8.8, ph);
+  let ring = exp(-pow((d - ringR) / 0.85, 2.0)) * (1.0 - ph) * (1.0 - ph) * 0.55 * activity;
+  let rgb = mix(tint, vec3f(0.98, 1.0, 0.99), core * 0.55);
+  let a = clamp(core + halo + ring, 0.0, 1.0);
+  return vec4f(rgb * a, a);
+}
+
+// Crisp Comet Spinner from gpu-gallery tiles.wgsl.ts (kind 10)
+fn shadeSpinner(p: vec2f, center: vec2f, radius: f32, dpr: f32, time: f32, tint: vec3f) -> vec4f {
+  let q = p - center;
+  let rad = length(q);
+  if (rad > radius + 2.0) { return vec4f(0.0); }
+  let aa = 0.65 / dpr;
+  let strokeW = 1.65;
+  let R = radius - 1.2;
+  let ring = 1.0 - smoothstep(strokeW * 0.5 - aa, strokeW * 0.5 + aa, abs(rad - R));
+  let head = fract(time * 0.92);
+  let ang = atan2(q.x, -q.y) / 6.2831853;
+  let behind = fract(head - ang);
+  let arc = exp(-behind * 5.2) * ring;
+  let hp = vec2f(sin(head * 6.2831853), -cos(head * 6.2831853)) * R;
+  let hd = length(q - hp);
+  let cap = 1.0 - smoothstep(strokeW * 0.65 - aa, strokeW * 0.65 + aa, hd);
+  let track = ring * 0.16;
+  let hot = mix(tint, vec3f(1.0), 0.72);
+  let rgb = tint * (track + arc * 0.92) + hot * cap;
+  let a = clamp(track + arc * 0.92 + cap, 0.0, 1.0);
   return vec4f(min(rgb, vec3f(1.0)) * a, a);
 }
 
-fn shadeWorkWave(p: vec2f, center: vec2f, radius: f32, time: f32, tint: vec3f) -> vec4f {
-  let local = p - (center - vec2f(radius * 0.72, radius * 0.55));
-  let size = vec2f(radius * 1.44, radius * 1.1);
-  let uCoord = local.x / max(size.x, 1.0);
-  if (uCoord < 0.0 || uCoord > 1.0 || abs(local.y - size.y * 0.5) > radius) { return vec4f(0.0); }
-  let env = pow(max(sin(3.14159265 * clamp(uCoord, 0.0, 1.0)), 0.0), 0.75);
-  let amp = size.y * 0.34;
-  var line = 0.0;
-  var glows = array<f32, 3>(0.0, 0.0, 0.0);
-  for (var i = 0; i < 3; i++) {
-    let fi = f32(i);
-    let k = 6.2831853 * (1.25 + 0.38 * fi) / size.x;
-    let om = 2.8 + 0.65 * fi;
-    let arg = local.x * k - time * om + fi * 1.7;
-    let y = size.y * 0.5 + amp * env * sin(arg);
-    let slope = amp * env * cos(arg) * k;
-    let d = abs(local.y - y) / sqrt(1.0 + slope * slope);
-    line += (1.0 - smoothstep(0.45, 1.25, d)) * (0.56 - 0.08 * fi);
-    glows[i] = exp(-d * d / 2.2);
-  }
-  let cross = glows[0] * glows[1] + glows[1] * glows[2] + glows[0] * glows[2];
-  let a = clamp((line + cross * 0.55) * env, 0.0, 1.0);
-  let rgb = mix(tint, vec3f(0.97, 1.0, 0.99), clamp(cross * 0.9, 0.0, 1.0));
-  return vec4f(rgb * a, a);
+// Crisp 3x3 Dot Matrix from gpu-gallery tiles.wgsl.ts (workMatrix)
+fn shadeMatrix(p: vec2f, center: vec2f, radius: f32, dpr: f32, time: f32, tint: vec3f) -> vec4f {
+  let span = radius * 1.42;
+  let local = p - (center - vec2f(span * 0.5));
+  if (any(local < vec2f(0.0)) || any(local > vec2f(span))) { return vec4f(0.0); }
+  let cell = span / 3.0;
+  let ci = clamp(floor(local / cell), vec2f(0.0), vec2f(2.0));
+  let cc = (ci + 0.5) * cell;
+  let ph = fract(time * 0.75 - (ci.x + ci.y * 1.4) / 5.2);
+  let b = select(minJerk(2.0 - ph * 2.0), minJerk(ph * 2.0), ph < 0.5);
+  let bump = pow(b, 2.0);
+  let dotR = cell * mix(0.16, 0.34, bump);
+  let d = length(local - cc) - dotR;
+  let cov = clamp(0.5 - d * dpr, 0.0, 1.0);
+  let lum = mix(0.28, 1.0, bump);
+  let rgb = mix(tint, vec3f(0.98, 1.0, 0.99), bump * 0.6) * lum;
+  let a = cov * lum;
+  return vec4f(rgb * cov, a);
 }
 
 @fragment fn fs_main(in: VSOut) -> @location(0) vec4f {
@@ -162,104 +175,95 @@ fn shadeWorkWave(p: vec2f, center: vec2f, radius: f32, time: f32, tint: vec3f) -
   let topY = u.u1.w;
   let velW = u.u2.x;
   let velH = u.u2.y;
-  let satOff = u.u2.z;
+  let satGap = u.u2.z;
   let satR = u.u2.w;
   let cursor = u.u3.xy;
   let tone = u.u3.z;
-  let activity = clamp(u.u3.w, 0.0, 1.2);
+  let activity = clamp(u.u3.w, 0.0, 1.3);
+  let workStyle = u.u4.x;
+  let sheenPhase = u.u4.y;
+  let clickPulse = u.u4.z;
 
-  let cMain = vec2f(u.u0.x * 0.5 - satOff * 0.26, topY + h * 0.5);
-  let cSat = vec2f(cMain.x + w * 0.5 + satOff, topY + 18.0);
-  let orbCenter = vec2f(cMain.x - w * 0.5 + 18.0, topY + 18.0);
+  let totalShift = max(0.0, satGap + satR * 2.0) * 0.5;
+  let cMain = vec2f(u.u0.x * 0.5 - totalShift, topY + h * 0.5);
+  let cSat = vec2f(cMain.x + w * 0.5 + satGap + satR, topY + h * 0.5);
+  let orbCenter = vec2f(cMain.x - w * 0.5 + 16.0, topY + 16.0);
 
-  // Interleaved Gradient Noise shutter motion blur across morph velocity
-  let blurVec = vec2f(velW, velH) * 0.032;
+  // Interleaved Gradient Noise shutter motion blur ONLY during fast spring transitions
+  let blurVec = vec2f(velW, velH) * 0.024;
   let blurMag = length(blurVec);
   var d = 0.0;
   var cov = 0.0;
-  if (blurMag > 0.35) {
+  if (blurMag > 0.6) {
     let ign = fract(52.9829189 * fract(dot(in.pos.xy, vec2f(0.06711056, 0.00583715))));
-    let samples = 11;
+    let samples = 9;
     var accCov = 0.0;
     var midD = 0.0;
     for (var k = 0; k < samples; k++) {
       let f = (f32(k) + ign) / f32(samples) - 0.5;
-      let dk = evalField(p, max(40.0, w + blurVec.x * f), max(24.0, h + blurVec.y * f), r, topY, max(0.0, satOff + blurVec.x * 0.32 * f), satR, cursor);
+      let dk = evalField(p, max(40.0, w + blurVec.x * f), max(24.0, h + blurVec.y * f), r, topY, satGap + blurVec.x * 0.25 * f, satR);
       accCov += clamp(0.5 - dk * dpr, 0.0, 1.0);
-      if (k == 5) { midD = dk; }
+      if (k == 4) { midD = dk; }
     }
     cov = accCov / f32(samples);
     d = midD;
   } else {
-    d = evalField(p, w, h, r, topY, satOff, satR, cursor);
+    d = evalField(p, w, h, r, topY, satGap, satR);
     cov = clamp(0.5 - d * dpr, 0.0, 1.0);
   }
 
-  // Soft ambient drop shadow below the Dynamic Island
-  let dShadow = evalField(p - vec2f(0.0, 5.5), w, h, r, topY, satOff, satR, cursor);
-  let shadowAlpha = (1.0 - smoothstep(-6.0, 16.0, dShadow)) * 0.46;
-
+  // Zero dark halo smudge outside the crisp capsule edge!
   if (cov <= 0.001) {
-    return vec4f(0.0, 0.0, 0.0, shadowAlpha);
+    return vec4f(0.0);
   }
 
-  // Palette by tone: 0=attached (emerald), 1=running (mint/cyan), 2=waiting (sapphire/indigo), 3=request (amber/gold)
-  var tint = vec3f(0.38, 0.90, 0.66);
-  var secTint = vec3f(0.44, 0.91, 0.96);
+  var tint = vec3f(0.34, 0.88, 0.64);
   if (tone > 1.5 && tone < 2.5) {
-    tint = vec3f(0.38, 0.65, 1.0);
-    secTint = vec3f(0.68, 0.55, 0.98);
+    tint = vec3f(0.36, 0.64, 1.0);
   } else if (tone >= 2.5) {
-    tint = vec3f(0.98, 0.75, 0.24);
-    secTint = vec3f(0.99, 0.56, 0.38);
+    tint = vec3f(0.98, 0.72, 0.22);
   }
 
-  // 3D bevel normal & 1px specular hairline (from gpu-gallery shadeCard)
-  let eps = 0.8;
-  let gx = evalField(p + vec2f(eps, 0.0), w, h, r, topY, satOff, satR, cursor) - d;
-  let gy = evalField(p + vec2f(0.0, eps), w, h, r, topY, satOff, satR, cursor) - d;
-  let bevelH = clamp(-d / 9.0, 0.0, 1.0);
-  let N = normalize(vec3f(normalize(vec2f(gx, gy) + vec2f(1e-5)) * (1.0 - bevelH) * 0.9, sqrt(bevelH) + 0.22));
-  let L = normalize(vec3f(-0.4, -0.7, 0.58));
-  let spec = pow(max(dot(reflect(-L, N), vec3f(0.0, 0.0, 1.0)), 0.0), 28.0);
+  // Deep jet-black Apple hardware surface (#09090b) with a crisp 1px inner specular hairline
+  let hairMask = clamp(1.0 - abs(d * dpr + 0.75), 0.0, 1.0);
+  let topFactor = 1.0 - smoothstep(topY, topY + h * 0.5, p.y);
+  var rgb = vec3f(0.035, 0.036, 0.042) + vec3f(topFactor * 0.022);
+  var rimAlpha = 0.13 + topFactor * 0.14;
 
-  let hairMask = clamp(1.0 - abs(d * dpr + 0.85), 0.0, 1.0);
-  let topGloss = (1.0 - smoothstep(topY, topY + h * 0.55, p.y)) * 0.045;
-  var rgb = vec3f(0.048, 0.050, 0.058) + vec3f(topGloss + spec * 0.14 + hairMask * 0.14);
+  // Subtle proximity catchlight on the 1px hairline near the status dot & cursor
+  let dnOrb = length(p - orbCenter) / 48.0;
+  let orbRim = exp(-dnOrb * dnOrb * 2.4) * (0.42 + clickPulse * 0.35);
+  rgb += mix(vec3f(1.0), tint, 0.65) * hairMask * (rimAlpha + orbRim);
 
-  // Proximity lighting from the left bioluminescent orb
-  let dnOrb = length(p - orbCenter) / 88.0;
-  let orbBorderGlow = exp(-dnOrb * dnOrb * 1.85);
-  let orbSurfaceGlow = exp(-dnOrb * dnOrb * 3.1) * 0.065;
-  rgb += tint * (orbSurfaceGlow + hairMask * orbBorderGlow * 0.68);
-
-  // Proximity lighting from the right satellite pod (when detached)
-  if (satR > 1.0) {
-    let dnSat = length(p - cSat) / 64.0;
-    let satGlow = exp(-dnSat * dnSat * 2.1);
-    rgb += secTint * (satGlow * 0.045 + hairMask * satGlow * 0.55);
+  let dnCur = length(p - cursor) / 96.0;
+  if (dnCur < 1.4) {
+    let curRim = exp(-dnCur * dnCur * 2.5) * 0.55;
+    rgb += vec3f(0.85, 0.95, 1.0) * hairMask * curRim;
   }
 
-  // Proximity catchlight from the Ghost Cursor / pointer
-  let dnCur = length(p - cursor) / 120.0;
-  if (dnCur < 1.8) {
-    let curGlow = exp(-dnCur * dnCur * 2.0);
-    rgb += mix(secTint, vec3f(1.0), 0.45) * (curGlow * 0.05 + hairMask * curGlow * 0.75);
+  if (sheenPhase > 0.01 && sheenPhase < 0.99) {
+    let sweepX = mix(cMain.x - w * 0.6, cMain.x + w * 0.6, sheenPhase);
+    let diag = (p.x - sweepX) + (p.y - topY) * 0.38;
+    let ribbon = exp(-(diag * diag) / 280.0) * sin(sheenPhase * 3.14159265);
+    rgb += vec3f(1.0) * ribbon * (0.04 + hairMask * 0.45);
   }
 
-  // Composite the left bioluminescent orb inside the capsule
-  let orb = shadeOrb(p, orbCenter, 9.5, time, activity, tint, secTint);
-  rgb = rgb * (1.0 - orb.a) + orb.rgb;
+  // Left status dot
+  let dotCol = shadeStatusDot(p, orbCenter, dpr, time, activity, tint);
+  rgb = rgb * (1.0 - dotCol.a) + dotCol.rgb;
 
-  // Composite the harmonic working wave inside the satellite pod when running
+  // Right detached satellite indicator (crisp Comet Spinner or 3x3 Matrix)
   if (satR > 4.0) {
-    let wave = shadeWorkWave(p, cSat, satR * 0.78, time, secTint);
-    rgb = rgb * (1.0 - wave.a) + wave.rgb;
+    var ind = vec4f(0.0);
+    if (round(workStyle) < 0.5) {
+      ind = shadeSpinner(p, cSat, satR * 0.56, dpr, time, tint);
+    } else {
+      ind = shadeMatrix(p, cSat, satR * 0.58, dpr, time, tint);
+    }
+    rgb = rgb * (1.0 - ind.a) + ind.rgb;
   }
 
-  let bodyPremul = vec4f(min(rgb, vec3f(1.0)) * cov, cov);
-  let shadowPremul = vec4f(0.0, 0.0, 0.0, shadowAlpha);
-  return bodyPremul + shadowPremul * (1.0 - cov);
+  return vec4f(min(rgb, vec3f(1.0)) * cov, cov);
 }
 `
 
@@ -278,8 +282,9 @@ in vec2 v_uv;
 out vec4 fragColor;
 uniform vec4 u0; // canvasW, canvasH, dpr, time
 uniform vec4 u1; // islandW, islandH, radius, topY
-uniform vec4 u2; // velW, velH, satOffset, satRadius
+uniform vec4 u2; // velW, velH, satGap, satRadius
 uniform vec4 u3; // cursorX, cursorY, toneMode, activity
+uniform vec4 u4; // workStyle, sheenPhase, clickPulse, pad
 
 float sdRoundedBox(vec2 p, vec2 b, float r) {
   vec2 q = abs(p) - b + r;
@@ -292,74 +297,81 @@ float fsmin(float a, float b, float k) {
   return min(a, b) - h * h * k * 0.25;
 }
 
-float evalField(vec2 p, float w, float h, float r, float topY, float satOff, float satR, vec2 cursor) {
-  vec2 cMain = vec2(u0.x * 0.5 - satOff * 0.26, topY + h * 0.5);
+float minJerk(float x) {
+  float uVal = clamp(x, 0.0, 1.0);
+  return uVal * uVal * uVal * (10.0 + uVal * (6.0 * uVal - 15.0));
+}
+
+float evalField(vec2 p, float w, float h, float r, float topY, float satGap, float satR) {
+  float totalShift = max(0.0, satGap + satR * 2.0) * 0.5;
+  vec2 cMain = vec2(u0.x * 0.5 - totalShift, topY + h * 0.5);
   vec2 halfSize = max(vec2(w, h) * 0.5, vec2(8.0));
   float rr = min(r, min(halfSize.x, halfSize.y));
   float d = sdRoundedBox(p - cMain, halfSize, rr);
   if (satR > 0.5) {
-    vec2 cSat = vec2(cMain.x + halfSize.x + satOff, topY + 18.0);
+    vec2 cSat = vec2(cMain.x + halfSize.x + satGap + satR, topY + h * 0.5);
     float dSat = length(p - cSat) - satR;
-    d = fsmin(d, dSat, 17.5);
-  }
-  float dCursor = length(p - cursor);
-  if (dCursor < 78.0 && d < 46.0) {
-    d = fsmin(d, dCursor - 6.0, 16.0);
+    float kBridge = 11.5 * (1.0 - smoothstep(1.0, 5.8, satGap)) * clamp(satR / 14.0, 0.0, 1.0);
+    d = fsmin(d, dSat, kBridge);
   }
   return d;
 }
 
-vec4 shadeOrb(vec2 p, vec2 center, float radius, float time, float activity, vec3 tint, vec3 secTint) {
-  vec2 p0 = (p - center) / max(radius, 1.0);
-  float r = length(p0);
-  if (r > 1.35) return vec4(0.0);
-  float breathe = 0.5 + 0.5 * sin(time * mix(2.0, 4.6, activity));
-  float outerHalo = exp(-r * r * 3.8) * mix(0.26, 0.52, activity);
-  float ringSpeed = mix(0.38, 0.96, activity);
-  float ph1 = fract(time * ringSpeed);
-  float r1 = mix(0.16, 0.86, ph1);
-  float ring1 = exp(-pow((r - r1) / 0.065, 2.0)) * (1.0 - ph1) * (1.0 - ph1) * 0.58;
-  float ph2 = fract(time * ringSpeed + 0.5);
-  float r2 = mix(0.16, 0.86, ph2);
-  float ring2 = exp(-pow((r - r2) / 0.065, 2.0)) * (1.0 - ph2) * (1.0 - ph2) * 0.44;
-  float coreR = 0.24 * (0.95 + 0.08 * breathe);
-  float midGlow = exp(-(r * r) / (coreR * coreR * 2.8)) * 0.88;
-  float innerCore = smoothstep(coreR, coreR * 0.2, r);
-  float satAng = time * mix(2.8, 5.8, activity);
-  vec2 satPos = vec2(cos(satAng), sin(satAng) * 0.78) * 0.48;
-  float dSat = length(p0 - satPos);
-  float satGlow = exp(-dSat * dSat * 85.0) * 0.85 * activity;
-  vec3 bodyTint = mix(tint, secTint, clamp(0.5 + p0.x * 0.6, 0.0, 1.0));
-  vec3 rgb = bodyTint * (outerHalo + midGlow * 0.75) + secTint * (ring1 + ring2) + vec3(0.98, 0.99, 1.0) * (innerCore + satGlow);
-  float a = clamp(outerHalo + midGlow * 0.8 + ring1 + ring2 + innerCore + satGlow, 0.0, 1.0) * smoothstep(1.35, 0.75, r);
+vec4 shadeStatusDot(vec2 p, vec2 center, float dpr, float time, float activity, vec3 tint) {
+  float d = length(p - center);
+  if (d > 11.0) return vec4(0.0);
+  float aa = 0.65 / dpr;
+  float breathe = 0.5 + 0.5 * sin(time * 3.2);
+  float coreR = 3.2 + 0.25 * breathe * activity;
+  float core = 1.0 - smoothstep(coreR - aa, coreR + aa, d);
+  float halo = exp(-(d * d) / 22.0) * (0.28 + 0.18 * breathe * activity);
+  float ph = fract(time * 0.65);
+  float ringR = mix(3.4, 8.8, ph);
+  float ring = exp(-pow((d - ringR) / 0.85, 2.0)) * (1.0 - ph) * (1.0 - ph) * 0.55 * activity;
+  vec3 rgb = mix(tint, vec3(0.98, 1.0, 0.99), core * 0.55);
+  float a = clamp(core + halo + ring, 0.0, 1.0);
+  return vec4(rgb * a, a);
+}
+
+vec4 shadeSpinner(vec2 p, vec2 center, float radius, float dpr, float time, vec3 tint) {
+  vec2 q = p - center;
+  float rad = length(q);
+  if (rad > radius + 2.0) return vec4(0.0);
+  float aa = 0.65 / dpr;
+  float strokeW = 1.65;
+  float R = radius - 1.2;
+  float ring = 1.0 - smoothstep(strokeW * 0.5 - aa, strokeW * 0.5 + aa, abs(rad - R));
+  float head = fract(time * 0.92);
+  float ang = atan(q.x, -q.y) / 6.2831853;
+  float behind = fract(head - ang);
+  float arc = exp(-behind * 5.2) * ring;
+  vec2 hp = vec2(sin(head * 6.2831853), -cos(head * 6.2831853)) * R;
+  float hd = length(q - hp);
+  float cap = 1.0 - smoothstep(strokeW * 0.65 - aa, strokeW * 0.65 + aa, hd);
+  float track = ring * 0.16;
+  vec3 hot = mix(tint, vec3(1.0), 0.72);
+  vec3 rgb = tint * (track + arc * 0.92) + hot * cap;
+  float a = clamp(track + arc * 0.92 + cap, 0.0, 1.0);
   return vec4(min(rgb, vec3(1.0)) * a, a);
 }
 
-vec4 shadeWorkWave(vec2 p, vec2 center, float radius, float time, vec3 tint) {
-  vec2 local = p - (center - vec2(radius * 0.72, radius * 0.55));
-  vec2 size = vec2(radius * 1.44, radius * 1.1);
-  float uCoord = local.x / max(size.x, 1.0);
-  if (uCoord < 0.0 || uCoord > 1.0 || abs(local.y - size.y * 0.5) > radius) return vec4(0.0);
-  float env = pow(max(sin(3.14159265 * clamp(uCoord, 0.0, 1.0)), 0.0), 0.75);
-  float amp = size.y * 0.34;
-  float line = 0.0;
-  float g0 = 0.0, g1 = 0.0, g2 = 0.0;
-  for (int i = 0; i < 3; i++) {
-    float fi = float(i);
-    float k = 6.2831853 * (1.25 + 0.38 * fi) / size.x;
-    float om = 2.8 + 0.65 * fi;
-    float arg = local.x * k - time * om + fi * 1.7;
-    float y = size.y * 0.5 + amp * env * sin(arg);
-    float slope = amp * env * cos(arg) * k;
-    float d = abs(local.y - y) / sqrt(1.0 + slope * slope);
-    line += (1.0 - smoothstep(0.45, 1.25, d)) * (0.56 - 0.08 * fi);
-    float g = exp(-d * d / 2.2);
-    if (i == 0) g0 = g; else if (i == 1) g1 = g; else g2 = g;
-  }
-  float crossG = g0 * g1 + g1 * g2 + g0 * g2;
-  float a = clamp((line + crossG * 0.55) * env, 0.0, 1.0);
-  vec3 rgb = mix(tint, vec3(0.97, 1.0, 0.99), clamp(crossG * 0.9, 0.0, 1.0));
-  return vec4(rgb * a, a);
+vec4 shadeMatrix(vec2 p, vec2 center, float radius, float dpr, float time, vec3 tint) {
+  float span = radius * 1.42;
+  vec2 local = p - (center - vec2(span * 0.5));
+  if (local.x < 0.0 || local.y < 0.0 || local.x > span || local.y > span) return vec4(0.0);
+  float cell = span / 3.0;
+  vec2 ci = clamp(floor(local / cell), vec2(0.0), vec2(2.0));
+  vec2 cc = (ci + 0.5) * cell;
+  float ph = fract(time * 0.75 - (ci.x + ci.y * 1.4) / 5.2);
+  float b = ph < 0.5 ? minJerk(ph * 2.0) : minJerk(2.0 - ph * 2.0);
+  float bump = pow(b, 2.0);
+  float dotR = cell * mix(0.16, 0.34, bump);
+  float d = length(local - cc) - dotR;
+  float cov = clamp(0.5 - d * dpr, 0.0, 1.0);
+  float lum = mix(0.28, 1.0, bump);
+  vec3 rgb = mix(tint, vec3(0.98, 1.0, 0.99), bump * 0.6) * lum;
+  float a = cov * lum;
+  return vec4(rgb * cov, a);
 }
 
 void main() {
@@ -367,94 +379,88 @@ void main() {
   float dpr = max(u0.z, 1.0);
   float time = u0.w;
   float w = u1.x, h = u1.y, r = u1.z, topY = u1.w;
-  float velW = u2.x, velH = u2.y, satOff = u2.z, satR = u2.w;
+  float velW = u2.x, velH = u2.y, satGap = u2.z, satR = u2.w;
   vec2 cursor = u3.xy;
   float tone = u3.z;
-  float activity = clamp(u3.w, 0.0, 1.2);
+  float activity = clamp(u3.w, 0.0, 1.3);
+  float workStyle = u4.x;
+  float sheenPhase = u4.y;
+  float clickPulse = u4.z;
 
-  vec2 cMain = vec2(u0.x * 0.5 - satOff * 0.26, topY + h * 0.5);
-  vec2 cSat = vec2(cMain.x + w * 0.5 + satOff, topY + 18.0);
-  vec2 orbCenter = vec2(cMain.x - w * 0.5 + 18.0, topY + 18.0);
+  float totalShift = max(0.0, satGap + satR * 2.0) * 0.5;
+  vec2 cMain = vec2(u0.x * 0.5 - totalShift, topY + h * 0.5);
+  vec2 cSat = vec2(cMain.x + w * 0.5 + satGap + satR, topY + h * 0.5);
+  vec2 orbCenter = vec2(cMain.x - w * 0.5 + 16.0, topY + 16.0);
 
-  vec2 blurVec = vec2(velW, velH) * 0.032;
+  vec2 blurVec = vec2(velW, velH) * 0.024;
   float blurMag = length(blurVec);
   float d = 0.0;
   float cov = 0.0;
-  if (blurMag > 0.35) {
+  if (blurMag > 0.6) {
     float ign = fract(52.9829189 * fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
     float accCov = 0.0;
     float midD = 0.0;
-    for (int k = 0; k < 11; k++) {
-      float f = (float(k) + ign) / 11.0 - 0.5;
-      float dk = evalField(p, max(40.0, w + blurVec.x * f), max(24.0, h + blurVec.y * f), r, topY, max(0.0, satOff + blurVec.x * 0.32 * f), satR, cursor);
+    for (int k = 0; k < 9; k++) {
+      float f = (float(k) + ign) / 9.0 - 0.5;
+      float dk = evalField(p, max(40.0, w + blurVec.x * f), max(24.0, h + blurVec.y * f), r, topY, satGap + blurVec.x * 0.25 * f, satR);
       accCov += clamp(0.5 - dk * dpr, 0.0, 1.0);
-      if (k == 5) midD = dk;
+      if (k == 4) midD = dk;
     }
-    cov = accCov / 11.0;
+    cov = accCov / 9.0;
     d = midD;
   } else {
-    d = evalField(p, w, h, r, topY, satOff, satR, cursor);
+    d = evalField(p, w, h, r, topY, satGap, satR);
     cov = clamp(0.5 - d * dpr, 0.0, 1.0);
   }
 
-  float dShadow = evalField(p - vec2(0.0, 5.5), w, h, r, topY, satOff, satR, cursor);
-  float shadowAlpha = (1.0 - smoothstep(-6.0, 16.0, dShadow)) * 0.46;
-
   if (cov <= 0.001) {
-    fragColor = vec4(0.0, 0.0, 0.0, shadowAlpha);
+    fragColor = vec4(0.0);
     return;
   }
 
-  vec3 tint = vec3(0.38, 0.90, 0.66);
-  vec3 secTint = vec3(0.44, 0.91, 0.96);
+  vec3 tint = vec3(0.34, 0.88, 0.64);
   if (tone > 1.5 && tone < 2.5) {
-    tint = vec3(0.38, 0.65, 1.0);
-    secTint = vec3(0.68, 0.55, 0.98);
+    tint = vec3(0.36, 0.64, 1.0);
   } else if (tone >= 2.5) {
-    tint = vec3(0.98, 0.75, 0.24);
-    secTint = vec3(0.99, 0.56, 0.38);
+    tint = vec3(0.98, 0.72, 0.22);
   }
 
-  float eps = 0.8;
-  float gx = evalField(p + vec2(eps, 0.0), w, h, r, topY, satOff, satR, cursor) - d;
-  float gy = evalField(p + vec2(0.0, eps), w, h, r, topY, satOff, satR, cursor) - d;
-  float bevelH = clamp(-d / 9.0, 0.0, 1.0);
-  vec3 N = normalize(vec3(normalize(vec2(gx, gy) + vec2(1e-5)) * (1.0 - bevelH) * 0.9, sqrt(bevelH) + 0.22));
-  vec3 L = normalize(vec3(-0.4, -0.7, 0.58));
-  float spec = pow(max(dot(reflect(-L, N), vec3(0.0, 0.0, 1.0)), 0.0), 28.0);
+  float hairMask = clamp(1.0 - abs(d * dpr + 0.75), 0.0, 1.0);
+  float topFactor = 1.0 - smoothstep(topY, topY + h * 0.5, p.y);
+  vec3 rgb = vec3(0.035, 0.036, 0.042) + vec3(topFactor * 0.022);
+  float rimAlpha = 0.13 + topFactor * 0.14;
 
-  float hairMask = clamp(1.0 - abs(d * dpr + 0.85), 0.0, 1.0);
-  float topGloss = (1.0 - smoothstep(topY, topY + h * 0.55, p.y)) * 0.045;
-  vec3 rgb = vec3(0.048, 0.050, 0.058) + vec3(topGloss + spec * 0.14 + hairMask * 0.14);
+  float dnOrb = length(p - orbCenter) / 48.0;
+  float orbRim = exp(-dnOrb * dnOrb * 2.4) * (0.42 + clickPulse * 0.35);
+  rgb += mix(vec3(1.0), tint, 0.65) * hairMask * (rimAlpha + orbRim);
 
-  float dnOrb = length(p - orbCenter) / 88.0;
-  float orbBorderGlow = exp(-dnOrb * dnOrb * 1.85);
-  float orbSurfaceGlow = exp(-dnOrb * dnOrb * 3.1) * 0.065;
-  rgb += tint * (orbSurfaceGlow + hairMask * orbBorderGlow * 0.68);
-
-  if (satR > 1.0) {
-    float dnSat = length(p - cSat) / 64.0;
-    float satGlow = exp(-dnSat * dnSat * 2.1);
-    rgb += secTint * (satGlow * 0.045 + hairMask * satGlow * 0.55);
+  float dnCur = length(p - cursor) / 96.0;
+  if (dnCur < 1.4) {
+    float curRim = exp(-dnCur * dnCur * 2.5) * 0.55;
+    rgb += vec3(0.85, 0.95, 1.0) * hairMask * curRim;
   }
 
-  float dnCur = length(p - cursor) / 120.0;
-  if (dnCur < 1.8) {
-    float curGlow = exp(-dnCur * dnCur * 2.0);
-    rgb += mix(secTint, vec3(1.0), 0.45) * (curGlow * 0.05 + hairMask * curGlow * 0.75);
+  if (sheenPhase > 0.01 && sheenPhase < 0.99) {
+    float sweepX = mix(cMain.x - w * 0.6, cMain.x + w * 0.6, sheenPhase);
+    float diag = (p.x - sweepX) + (p.y - topY) * 0.38;
+    float ribbon = exp(-(diag * diag) / 280.0) * sin(sheenPhase * 3.14159265);
+    rgb += vec3(1.0) * ribbon * (0.04 + hairMask * 0.45);
   }
 
-  vec4 orb = shadeOrb(p, orbCenter, 9.5, time, activity, tint, secTint);
-  rgb = rgb * (1.0 - orb.a) + orb.rgb;
+  vec4 dotCol = shadeStatusDot(p, orbCenter, dpr, time, activity, tint);
+  rgb = rgb * (1.0 - dotCol.a) + dotCol.rgb;
 
   if (satR > 4.0) {
-    vec4 wave = shadeWorkWave(p, cSat, satR * 0.78, time, secTint);
-    rgb = rgb * (1.0 - wave.a) + wave.rgb;
+    vec4 ind = vec4(0.0);
+    if (floor(workStyle + 0.5) < 0.5) {
+      ind = shadeSpinner(p, cSat, satR * 0.56, dpr, time, tint);
+    } else {
+      ind = shadeMatrix(p, cSat, satR * 0.58, dpr, time, tint);
+    }
+    rgb = rgb * (1.0 - ind.a) + ind.rgb;
   }
 
-  vec4 bodyPremul = vec4(min(rgb, vec3(1.0)) * cov, cov);
-  vec4 shadowPremul = vec4(0.0, 0.0, 0.0, shadowAlpha);
-  fragColor = bodyPremul + shadowPremul * (1.0 - cov);
+  fragColor = vec4(min(rgb, vec3(1.0)) * cov, cov);
 }
 `
 
@@ -475,8 +481,8 @@ async function initWebGpuBackend(canvas: HTMLCanvasElement): Promise<GpuBackend 
     context.configure({ device, format, alphaMode: "premultiplied" })
     const module = device.createShaderModule({ code: WGSL_SOURCE })
     const uniformBuffer = device.createBuffer({
-      size: 64,
-      usage: 0x0040 | 0x0008, // UNIFORM | COPY_DST
+      size: 80,
+      usage: 0x0040 | 0x0008,
     })
     const bindGroupLayout = device.createBindGroupLayout({
       entries: [{ binding: 0, visibility: 0x1 | 0x2, buffer: { type: "uniform" } }],
@@ -503,7 +509,7 @@ async function initWebGpuBackend(canvas: HTMLCanvasElement): Promise<GpuBackend 
     })
     return {
       draw(uniforms: Float32Array) {
-        device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer, uniforms.byteOffset, 64)
+        device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer, uniforms.byteOffset, 80)
         const encoder = device.createCommandEncoder()
         const pass = encoder.beginRenderPass({
           colorAttachments: [{
@@ -555,6 +561,7 @@ function initWebGl2Backend(canvas: HTMLCanvasElement): GpuBackend | null {
     const u1Loc = gl.getUniformLocation(prog, "u1")
     const u2Loc = gl.getUniformLocation(prog, "u2")
     const u3Loc = gl.getUniformLocation(prog, "u3")
+    const u4Loc = gl.getUniformLocation(prog, "u4")
     return {
       draw(uniforms: Float32Array) {
         gl.viewport(0, 0, canvas.width, canvas.height)
@@ -565,6 +572,7 @@ function initWebGl2Backend(canvas: HTMLCanvasElement): GpuBackend | null {
         gl.uniform4fv(u1Loc, uniforms.subarray(4, 8))
         gl.uniform4fv(u2Loc, uniforms.subarray(8, 12))
         gl.uniform4fv(u3Loc, uniforms.subarray(12, 16))
+        gl.uniform4fv(u4Loc, uniforms.subarray(16, 20))
         gl.drawArrays(gl.TRIANGLES, 0, 6)
       },
     }
@@ -574,23 +582,30 @@ function initWebGl2Backend(canvas: HTMLCanvasElement): GpuBackend | null {
 }
 
 export class DynamicIslandRig {
-  readonly w = new Spring(192, 19, 0.66)
-  readonly h = new Spring(34, 19, 0.68)
-  readonly r = new Spring(17, 22, 0.78)
-  readonly topY = new Spring(10, 22, 0.76)
-  readonly satOffset = new Spring(0, 18, 0.62)
-  readonly satRadius = new Spring(0, 20, 0.68)
-  readonly defocus = new Spring(0, 26, 0.82)
-  readonly activity = new Spring(0.25, 16, 0.85)
+  readonly w = new Spring(168, 22, 0.72)
+  readonly h = new Spring(32, 22, 0.74)
+  readonly r = new Spring(16, 24, 0.82)
+  readonly topY = new Spring(10, 24, 0.80)
+  // satGap: negative (-20) means tucked inside the main pill; +7.0 means cleanly separated by 7px of air
+  readonly satGap = new Spring(-20, 20, 0.68)
+  readonly satRadius = new Spring(0, 22, 0.72)
+  readonly defocus = new Spring(0, 28, 0.84)
+  readonly slideY = new Spring(0, 30, 0.82)
+  readonly activity = new Spring(0.25, 18, 0.85)
+  readonly clickPulse = new Spring(0, 26, 0.74)
   toneMode = 0
+  workStyle = 0
+  sheenPhase = 1
   private backend: GpuBackend | null = null
   private initializing = false
   private rafId = 0
   private lastTime = 0
-  private readonly uniforms = new Float32Array(16)
+  private simTime = 0
+  private readonly uniforms = new Float32Array(20)
   private lastSignature = ""
   private pointerX = -999
   private pointerY = -999
+  private lastCursorPressed = false
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -626,52 +641,153 @@ export class DynamicIslandRig {
     this.startLoop()
   }
 
+  pulseClick(): void {
+    this.clickPulse.v = 12
+    this.w.v += 45
+    this.startLoop()
+  }
+
+  private measureLabelWidth(fallbackText: string): number {
+    const labelEl = this.contentEl.querySelector("#__browser_control_label__") as HTMLElement | null
+    if (labelEl) {
+      const prevWidth = this.contentEl.style.width
+      this.contentEl.style.width = "max-content"
+      const measured = Math.ceil(labelEl.getBoundingClientRect().width)
+      this.contentEl.style.width = prevWidth
+      if (measured > 10) {
+        return Math.min(340, Math.max(108, measured + 42))
+      }
+    }
+    return Math.min(340, Math.max(116, fallbackText.length * 6.5 + 42))
+  }
+
   configure(options: {
     readonly tone: "active" | "running" | "waiting"
     readonly isTabRequest: boolean
     readonly label: string
     readonly message?: string
+    readonly workStyle?: number
   }): void {
     const signature = `${options.tone}:${options.isTabRequest}:${options.label}:${options.message ?? ""}`
     if (signature !== this.lastSignature) {
       if (this.lastSignature !== "") {
-        this.defocus.v = 110
+        this.defocus.v = 95
+        this.slideY.snap(5)
+        this.slideY.set(0)
+        this.sheenPhase = 0.01
+        if (options.tone === "running") {
+          this.workStyle = options.workStyle !== undefined ? options.workStyle : (this.workStyle + 1) % 2
+        }
       }
       this.lastSignature = signature
     }
-    const labelWidth = Math.min(340, Math.max(148, options.label.length * 7.2 + 54))
+    if (options.workStyle !== undefined) {
+      this.workStyle = options.workStyle
+    }
+    const exactWidth = this.measureLabelWidth(options.label)
     if (options.tone === "waiting") {
       const msgLen = (options.message ?? "").length
-      const targetW = Math.min(412, Math.max(320, Math.min(msgLen * 6.2 + 80, 396)))
-      const targetH = msgLen > 48 ? 108 : 96
+      const targetW = Math.min(396, Math.max(296, Math.min(msgLen * 6.2 + 64, 384)))
+      const targetH = msgLen > 48 ? 104 : 92
       this.w.set(targetW)
       this.h.set(targetH)
-      this.r.set(24)
-      this.topY.set(12)
-      this.satOffset.set(0)
+      this.r.set(22)
+      this.topY.set(10)
+      this.satGap.set(-20)
       this.satRadius.set(0)
       this.activity.set(0.95)
       this.toneMode = options.isTabRequest ? 3 : 2
     } else if (options.tone === "running") {
-      this.w.set(labelWidth)
-      this.h.set(36)
-      this.r.set(18)
-      this.topY.set(10)
-      this.satOffset.set(22)
+      this.w.set(exactWidth)
+      this.h.set(32)
+      this.r.set(16)
+      this.topY.set(8)
+      this.satGap.set(7)
       this.satRadius.set(16)
       this.activity.set(1.0)
       this.toneMode = 1
     } else {
-      this.w.set(labelWidth)
-      this.h.set(34)
-      this.r.set(17)
-      this.topY.set(10)
-      this.satOffset.set(0)
+      this.w.set(exactWidth)
+      this.h.set(32)
+      this.r.set(16)
+      this.topY.set(8)
+      this.satGap.set(-20)
       this.satRadius.set(0)
-      this.activity.set(0.28)
+      this.activity.set(0.25)
       this.toneMode = 0
     }
     this.startLoop()
+  }
+
+  stepFrame(dt: number): void {
+    this.simTime += dt
+    if (this.sheenPhase < 1) {
+      this.sheenPhase = Math.min(1, this.sheenPhase + dt * 2.1)
+    }
+    const w = this.w.step(dt)
+    const h = this.h.step(dt)
+    const r = this.r.step(dt)
+    const topY = this.topY.step(dt)
+    const satGap = this.satGap.step(dt)
+    const satR = this.satRadius.step(dt)
+    const defocus = Math.max(0, this.defocus.step(dt))
+    const slideY = this.slideY.step(dt)
+    const act = this.activity.step(dt)
+    const pulse = Math.max(0, this.clickPulse.step(dt))
+
+    const totalShift = Math.max(0, satGap + satR * 2) * 0.5
+    const mainCenterX = ISLAND_CANVAS_W * 0.5 - totalShift
+    this.contentEl.style.width = `${w.toFixed(1)}px`
+    this.contentEl.style.height = `${h.toFixed(1)}px`
+    this.contentEl.style.left = `${(mainCenterX - w * 0.5).toFixed(1)}px`
+    this.contentEl.style.top = `${topY.toFixed(1)}px`
+    this.contentEl.style.borderRadius = `${r.toFixed(1)}px`
+    this.contentEl.style.transform = Math.abs(slideY) > 0.1 ? `translate3d(0, ${slideY.toFixed(2)}px, 0)` : ""
+    this.contentEl.style.filter = defocus > 0.15 ? `blur(${Math.min(3.5, defocus * 0.15).toFixed(2)}px)` : ""
+
+    let curX = this.pointerX
+    let curY = this.pointerY
+    const ghost = document.getElementById("__browser_control_ghost_cursor__")
+    if (ghost) {
+      const gx = Number(ghost.dataset.renderedX ?? ghost.dataset.targetX)
+      const gy = Number(ghost.dataset.renderedY ?? ghost.dataset.targetY)
+      if (Number.isFinite(gx) && Number.isFinite(gy)) {
+        const rect = this.canvas.getBoundingClientRect()
+        curX = gx - rect.left
+        curY = gy - rect.top
+      }
+      const pressed = ghost.dataset.pressed === "true"
+      if (pressed && !this.lastCursorPressed) {
+        this.pulseClick()
+      }
+      this.lastCursorPressed = pressed
+    }
+
+    if (this.backend) {
+      const dpr = this.syncCanvasResolution()
+      const u = this.uniforms
+      u[0] = ISLAND_CANVAS_W
+      u[1] = ISLAND_CANVAS_H
+      u[2] = dpr
+      u[3] = this.simTime
+      u[4] = w
+      u[5] = h
+      u[6] = r
+      u[7] = topY
+      u[8] = this.w.v
+      u[9] = this.h.v
+      u[10] = satGap
+      u[11] = satR
+      u[12] = curX
+      u[13] = curY
+      u[14] = this.toneMode
+      u[15] = act
+      u[16] = this.workStyle
+      u[17] = this.sheenPhase
+      u[18] = pulse
+      u[19] = 0
+      this.backend.draw(u)
+    }
   }
 
   startLoop(): void {
@@ -681,65 +797,17 @@ export class DynamicIslandRig {
       this.rafId = 0
       const dt = Math.min(0.05, Math.max(1 / 240, (now - this.lastTime) / 1000))
       this.lastTime = now
-      const w = this.w.step(dt)
-      const h = this.h.step(dt)
-      const r = this.r.step(dt)
-      const topY = this.topY.step(dt)
-      const satOff = this.satOffset.step(dt)
-      const satR = this.satRadius.step(dt)
-      const defocus = Math.max(0, this.defocus.step(dt))
-      const act = this.activity.step(dt)
-
-      const mainCenterX = ISLAND_CANVAS_W * 0.5 - satOff * 0.26
-      this.contentEl.style.width = `${w.toFixed(1)}px`
-      this.contentEl.style.height = `${h.toFixed(1)}px`
-      this.contentEl.style.left = `${(mainCenterX - w * 0.5).toFixed(1)}px`
-      this.contentEl.style.top = `${topY.toFixed(1)}px`
-      this.contentEl.style.borderRadius = `${r.toFixed(1)}px`
-      this.contentEl.style.filter = defocus > 0.15 ? `blur(${Math.min(4.5, defocus * 0.18).toFixed(2)}px)` : ""
-
-      let curX = this.pointerX
-      let curY = this.pointerY
-      const ghost = document.getElementById("__browser_control_ghost_cursor__")
-      if (ghost) {
-        const gx = Number(ghost.dataset.renderedX ?? ghost.dataset.targetX)
-        const gy = Number(ghost.dataset.renderedY ?? ghost.dataset.targetY)
-        if (Number.isFinite(gx) && Number.isFinite(gy)) {
-          const rect = this.canvas.getBoundingClientRect()
-          curX = gx - rect.left
-          curY = gy - rect.top
-        }
-      }
-
-      if (this.backend) {
-        const dpr = this.syncCanvasResolution()
-        const u = this.uniforms
-        u[0] = ISLAND_CANVAS_W
-        u[1] = ISLAND_CANVAS_H
-        u[2] = dpr
-        u[3] = now / 1000
-        u[4] = w
-        u[5] = h
-        u[6] = r
-        u[7] = topY
-        u[8] = this.w.v
-        u[9] = this.h.v
-        u[10] = satOff
-        u[11] = satR
-        u[12] = curX
-        u[13] = curY
-        u[14] = this.toneMode
-        u[15] = act
-        this.backend.draw(u)
-      }
-
+      this.stepFrame(dt)
       const animating =
         this.toneMode >= 1 ||
+        this.sheenPhase < 1 ||
         !this.w.resting ||
         !this.h.resting ||
-        !this.satOffset.resting ||
+        !this.satGap.resting ||
         !this.satRadius.resting ||
-        !this.defocus.resting
+        !this.defocus.resting ||
+        !this.slideY.resting ||
+        !this.clickPulse.resting
       if (animating && this.canvas.isConnected) {
         this.rafId = window.requestAnimationFrame(tick)
       }

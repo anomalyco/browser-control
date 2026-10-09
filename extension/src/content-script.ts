@@ -12,6 +12,7 @@ let cursorAnimation: Animation | undefined
 let cursorFill: string | null | undefined
 let cursorFilter: string | undefined
 let islandRig: DynamicIslandRig | undefined
+let idleHideTimer: ReturnType<typeof setTimeout> | undefined
 
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
   if (!message || typeof message !== "object" || Array.isArray(message)) {
@@ -172,6 +173,10 @@ function renderStatus(): void {
         pointer-events: none !important;
         user-select: none !important;
         contain: layout style !important;
+        transition: opacity 280ms ease !important;
+      }
+      :host([data-idle-hidden="true"]) {
+        opacity: 0 !important;
       }
       :host([data-interactive="true"]) {
         user-select: text !important;
@@ -183,17 +188,18 @@ function renderStatus(): void {
         width: ${ISLAND_CANVAS_W}px;
         height: ${ISLAND_CANVAS_H}px;
         pointer-events: none;
+        filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.14)) drop-shadow(0 1px 2px rgba(0, 0, 0, 0.08));
       }
       #__browser_control_status__ {
         position: absolute;
         box-sizing: border-box;
         overflow: hidden;
-        padding: 0 14px 0 32px;
+        padding: 0 13px 0 29px;
         display: flex;
         flex-direction: column;
         justify-content: center;
-        color: rgba(245, 245, 247, 0.96);
-        font: 540 11.5px/1.25 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+        color: rgba(248, 248, 250, 0.96);
+        font: 540 11.5px/1.2 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
         letter-spacing: -0.012em;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -201,19 +207,21 @@ function renderStatus(): void {
         will-change: width, height, left, top, filter;
       }
       #__browser_control_status__[data-tone="waiting"] {
-        padding: 9px 14px 10px 14px;
+        padding: 8px 13px 9px 13px;
         white-space: normal;
         pointer-events: auto;
         justify-content: space-between;
       }
       #__browser_control_label__ {
+        width: max-content;
+        max-width: 100%;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
-        color: rgba(245, 245, 247, 0.92);
+        color: rgba(248, 248, 250, 0.94);
       }
       #__browser_control_status__[data-tone="waiting"] #__browser_control_label__ {
-        padding-left: 20px;
+        padding-left: 18px;
         font-size: 10.5px;
         font-weight: 500;
         color: rgba(161, 161, 170, 0.88);
@@ -268,9 +276,12 @@ function renderStatus(): void {
     return
   }
   const view = pageStatusView(currentStatus)
+  const displayLabel = view.tone === "waiting"
+    ? view.label
+    : view.label.replace(/\s*·\s*(running|attached)$/i, "")
   const labelNode = document.createElement("div")
   labelNode.id = "__browser_control_label__"
-  labelNode.textContent = view.label
+  labelNode.textContent = displayLabel
   statusElement.replaceChildren(labelNode)
   statusElement.title = view.title
   statusElement.setAttribute("aria-label", view.title)
@@ -278,6 +289,16 @@ function renderStatus(): void {
   host.setAttribute("aria-hidden", String(view.completion === undefined))
   host.dataset.interactive = String(view.completion !== undefined)
   host.dataset.waiting = String(view.completion !== undefined)
+  if (idleHideTimer !== undefined) {
+    clearTimeout(idleHideTimer)
+    idleHideTimer = undefined
+  }
+  host.removeAttribute("data-idle-hidden")
+  if (view.tone === "active") {
+    idleHideTimer = setTimeout(() => {
+      host?.setAttribute("data-idle-hidden", "true")
+    }, 2_200)
+  }
   clearGhostCursorAttention()
   if (view.message) {
     const prompt = document.createElement("div")
@@ -329,7 +350,7 @@ function renderStatus(): void {
   islandRig?.configure({
     tone: view.tone,
     isTabRequest: Boolean(pendingTabRequest),
-    label: view.label,
+    label: displayLabel,
     ...(view.message ? { message: view.message } : {}),
   })
   observeHost()
@@ -369,6 +390,10 @@ function clearGhostCursorAttention(): void {
 function clearStatus(): void {
   currentStatus = undefined
   completingHandoffId = undefined
+  if (idleHideTimer !== undefined) {
+    clearTimeout(idleHideTimer)
+    idleHideTimer = undefined
+  }
   clearGhostCursorAttention()
   islandRig?.destroy()
   islandRig = undefined
