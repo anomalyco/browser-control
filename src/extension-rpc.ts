@@ -139,6 +139,8 @@ export class ExtensionRpc {
       let completed = false
       const timeoutMs = command.method === "debugger.sendCommand"
         ? this.timeouts.debuggerCommandTimeoutMs ?? 60_000
+        : command.method === "tabs.requestAttach" && Predicate.isNumber(command.params?.timeoutMs)
+        ? command.params.timeoutMs + 2_000
         : this.timeouts.commandTimeoutMs ?? 15_000
       const finish = (effect: Effect.Effect<JsonObject, Error>) => {
         if (completed) {

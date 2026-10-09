@@ -508,7 +508,7 @@ export class ExecuteSandbox {
   execute(code: string, options: ExecuteOptions = {}): Effect.Effect<ExecuteResult> {
     return Effect.tryPromise({
       try: async () => {
-        const globals = await this.getGlobals(options)
+        const globals = await this.getGlobals(options, code)
         const initialPages = new Set(typeof globals.context.pages === "function" ? globals.context.pages() : [])
         const { result, logs, logSummary, aftermath } = await runUserCode({ code, globals })
         const openedPages = (typeof globals.context.pages === "function" ? globals.context.pages() : [])
@@ -834,11 +834,25 @@ export class ExecuteSandbox {
     }
   }
 
-  private async acquireSessionPage(targetSelection?: ExecuteTargetSelection): Promise<{
+  private async acquireSessionPage(
+    targetSelection?: ExecuteTargetSelection,
+    requestTabHint?: RequestTabOptions,
+  ): Promise<{
     readonly browser: Browser
     readonly context: BrowserContext
     readonly page: Page
+    readonly preApprovedTab?: boolean
   }> {
+    if (!this.page && !this.defaultPageTargetId && !hasExplicitTargetSelection(targetSelection) && requestTabHint && this.options.requestTabAttach) {
+      const { targetId } = await this.options.requestTabAttach(requestTabHint)
+      this.unbindDefaultPage(targetId, { ownsPage: false })
+      const { browser, context } = await this.connectContext()
+      const page = await this.getSessionPage({ context })
+      installPageReadTimeout(page)
+      this.installViewportZoomGuard(page)
+      this.networkCapture.bindPage(page)
+      return { browser, context, page, preApprovedTab: true }
+    }
     let { browser, context } = await this.connectContext()
     let page: Page
     try {
@@ -862,8 +876,13 @@ export class ExecuteSandbox {
     })
   }
 
-  private async getGlobals(options: ExecuteOptions): Promise<SandboxGlobals> {
-    const { browser, context, page } = await this.acquireSessionPage(options.targetSelection)
+  private async getGlobals(options: ExecuteOptions, code = ""): Promise<SandboxGlobals> {
+    const requestTabCallMatch = /\brequestTab\s*\(\s*(?:(["'`])([^"'`]*)\1)?\s*\)/.exec(code)
+    const requestTabHint: RequestTabOptions | undefined = requestTabCallMatch
+      ? (requestTabCallMatch[2] ? { urlIncludes: requestTabCallMatch[2] } : {})
+      : undefined
+    const { browser, context, page, preApprovedTab } = await this.acquireSessionPage(options.targetSelection, requestTabHint)
+    let consumedPreApprovedTab = false
     const showGhostCursor = async (options?: ShowGhostCursorOptions) => {
       const { page: targetPage = page, ...cursorOptions } = options ?? {}
       await showGhostCursorOnPage({ page: targetPage, cursorOptions })
@@ -929,12 +948,22 @@ export class ExecuteSandbox {
       return await recorder.stop()
     }
     const requestTab = async (queryOrOptions?: string | RequestTabOptions): Promise<Page> => {
+      if (preApprovedTab && !consumedPreApprovedTab) {
+        consumedPreApprovedTab = true
+        return page
+      }
       const opts: RequestTabOptions = typeof queryOrOptions === "string"
         ? { urlIncludes: queryOrOptions }
         : (queryOrOptions ?? {})
       if (!this.options.requestTabAttach) {
         throw new Error("requestTab requires a relay-backed Browser Control session")
       }
+      const previousPage = this.page
+      const shouldClosePrevious = Boolean(
+        previousPage &&
+        this.ownsPage &&
+        isDisposableSessionPage({ url: safePageUrl(previousPage) ?? "", crashed: this.pageCrashed }),
+      )
       const { targetId } = await this.options.requestTabAttach(opts)
       const matched = await waitForExactTarget({
         targetId,
@@ -944,6 +973,9 @@ export class ExecuteSandbox {
       })
       if (!matched) {
         throw new Error(`Approved tab target ${targetId} did not become available in Playwright context`)
+      }
+      if (shouldClosePrevious && previousPage && previousPage !== matched) {
+        await previousPage.close().catch(() => {})
       }
       this.bindDefaultPage(matched, targetId, false, true)
       return matched

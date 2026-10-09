@@ -954,21 +954,27 @@ async function requestTabAttach(params: JsonObject | undefined): Promise<JsonObj
   const sessionId = optionalStringParam(params, "sessionId")
   const message = optionalStringParam(params, "message") ?? "Allow Browser Control to use this tab?"
   const timeoutMs = optionalNumberParam(params, "timeoutMs") ?? 60_000
-  const allTabs = await chrome.tabs.query(urlIncludes || titleIncludes ? {} : { active: true, lastFocusedWindow: true })
-  const webTabs = allTabs.filter((tab) => typeof tab.id === "number" && /^https?:\/\//i.test(tab.url ?? ""))
-  const matched = webTabs.find((tab) => {
-    if (urlIncludes && !(tab.url ?? "").toLowerCase().includes(urlIncludes)) return false
-    if (titleIncludes && !(tab.title ?? "").toLowerCase().includes(titleIncludes)) return false
+  const targets = await chrome.debugger.getTargets()
+  const activeTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => [])
+  const activeTabId = activeTabs[0]?.id
+  const webTargets = targets.filter(
+    (t) => t.type === "page" && typeof t.tabId === "number" && /^https?:\/\//i.test(t.url ?? ""),
+  )
+  // Sort active tab first so bare `requestTab()` picks the user's focused tab
+  webTargets.sort((a, b) => (a.tabId === activeTabId ? -1 : b.tabId === activeTabId ? 1 : 0))
+  const matched = webTargets.find((t) => {
+    if (urlIncludes && !(t.url ?? "").toLowerCase().includes(urlIncludes)) return false
+    if (titleIncludes && !(t.title ?? "").toLowerCase().includes(titleIncludes)) return false
     return true
   })
-  if (!matched || typeof matched.id !== "number") {
+  if (!matched || typeof matched.tabId !== "number") {
     throw new Error(
       urlIncludes || titleIncludes
         ? `No open http(s) browser tab matched ${urlIncludes ?? titleIncludes}`
-        : "No active http(s) browser tab found in the focused window",
+        : "No active http(s) browser tab found",
     )
   }
-  const tabId = matched.id
+  const tabId = matched.tabId
   const owned = await getOwnedDebuggerTabIds(chrome.debugger)
   if (owned.has(tabId)) {
     await recordAttachedTab(tabId)
@@ -976,34 +982,172 @@ async function requestTabAttach(params: JsonObject | undefined): Promise<JsonObj
   }
   await chrome.tabs.update(tabId, { active: true }).catch(() => {})
   const requestId = `${tabId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-  await sendPageStatusMessage(
-    tabId,
-    {
-      action: "tab-request.prompt",
-      requestId,
-      ...(sessionId ? { sessionId } : {}),
-      message,
-    },
-    true,
-  )
-  const approved = await new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => {
-      pendingTabRequests.delete(requestId)
-      void sendPageStatusMessage(tabId, { action: "page-status.clear" })
-      resolve(false)
-    }, timeoutMs)
-    pendingTabRequests.set(requestId, (decision) => {
-      clearTimeout(timer)
-      resolve(decision)
-    })
-  })
-  if (!approved) {
-    return { approved: false, tabId, url: matched.url ?? "" }
+  let contentScriptReached = false
+  try {
+    await sendPageStatusMessage(
+      tabId,
+      {
+        action: "tab-request.prompt",
+        requestId,
+        ...(sessionId ? { sessionId } : {}),
+        message,
+      },
+      true,
+    )
+    contentScriptReached = true
+  } catch {
+    contentScriptReached = false
   }
+  if (contentScriptReached) {
+    const approved = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        pendingTabRequests.delete(requestId)
+        void sendPageStatusMessage(tabId, { action: "page-status.clear" })
+        resolve(false)
+      }, timeoutMs)
+      pendingTabRequests.set(requestId, (decision) => {
+        clearTimeout(timer)
+        resolve(decision)
+      })
+    })
+    if (!approved) {
+      return { approved: false, tabId, url: matched.url ?? "" }
+    }
+    try {
+      await chrome.debugger.attach({ tabId }, "1.3")
+    } catch (error) {
+      if (!isAlreadyAttachedError(error)) throw error
+    }
+    await recordAttachedTab(tabId)
+    return { approved: true, tabId, url: matched.url ?? "" }
+  }
+
+  // Fallback for tabs opened before the extension was loaded/reloaded (orphaned content script):
+  // temporarily attach debugger to render the Dynamic Island approval prompt in-page, and detach if declined.
   try {
     await chrome.debugger.attach({ tabId }, "1.3")
   } catch (error) {
     if (!isAlreadyAttachedError(error)) throw error
+  }
+  const evalResult = await chrome.debugger
+    .sendCommand(
+      { tabId },
+      "Runtime.evaluate",
+      {
+        awaitPromise: true,
+        returnByValue: true,
+        expression: `new Promise((resolve) => {
+          const existing = document.getElementById("__browser_control_tab_request__");
+          if (existing) existing.remove();
+          const host = document.createElement("div");
+          host.id = "__browser_control_tab_request__";
+          const shadow = host.attachShadow({ mode: "open" });
+          shadow.innerHTML = \`
+            <style>
+              :host {
+                all: initial !important;
+                position: fixed !important;
+                top: 10px !important;
+                left: 50% !important;
+                transform: translateX(-50%) !important;
+                z-index: 2147483647 !important;
+                font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif !important;
+              }
+              .island {
+                box-sizing: border-box;
+                width: 368px;
+                padding: 10px 14px 11px;
+                border-radius: 24px;
+                background: #09090b;
+                border: 1px solid rgba(251, 191, 36, 0.38);
+                box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28), 0 2px 6px rgba(0, 0, 0, 0.16);
+                color: #fafafa;
+                animation: pop 280ms cubic-bezier(0.22, 1.28, 0.36, 1);
+                transform-origin: 50% 0%;
+              }
+              @keyframes pop {
+                from { opacity: 0; transform: scale3d(0.45, 0.32, 1); filter: blur(5px); }
+                to { opacity: 1; transform: scale3d(1, 1, 1); filter: blur(0px); }
+              }
+              .hdr {
+                display: flex;
+                align-items: center;
+                gap: 7px;
+                font-size: 10.5px;
+                font-weight: 500;
+                color: rgba(161, 161, 170, 0.9);
+              }
+              .dot {
+                width: 7px;
+                height: 7px;
+                border-radius: 50%;
+                background: #fbbf24;
+                box-shadow: 0 0 8px #fbbf24;
+              }
+              .msg {
+                margin: 5px 0 9px;
+                font-size: 12.5px;
+                font-weight: 560;
+                letter-spacing: -0.01em;
+                color: #fafafa;
+              }
+              .btns {
+                display: flex;
+                gap: 6px;
+              }
+              button {
+                flex: 1;
+                padding: 6px 12px;
+                border-radius: 999px;
+                border: 1px solid rgba(255,255,255,0.16);
+                font: 600 11.5px/1.2 -apple-system, BlinkMacSystemFont, sans-serif;
+                color: #fff;
+                cursor: pointer;
+              }
+              .allow {
+                background: linear-gradient(180deg, rgba(245, 158, 11, 0.96), rgba(217, 119, 6, 0.92));
+              }
+              .deny {
+                background: rgba(148, 163, 184, 0.16);
+                color: #e2e8f0;
+              }
+            </style>
+            <div class="island">
+              <div class="hdr"><span class="dot"></span><span>${(sessionId || "Browser Control").replace(/[<>&"']/g, "")} · requesting tab</span></div>
+              <div class="msg">${message.replace(/[<>&"']/g, "")}</div>
+              <div class="btns">
+                <button class="allow" type="button">Allow · ⌘↵</button>
+                <button class="deny" type="button">Not now</button>
+              </div>
+            </div>
+          \`;
+          const finish = (ok) => {
+            window.removeEventListener("keydown", onKey, true);
+            host.remove();
+            resolve(ok);
+          };
+          const onKey = (e) => {
+            if (e.key === "Escape") { e.preventDefault(); finish(false); }
+            else if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); finish(true); }
+          };
+          window.addEventListener("keydown", onKey, true);
+          shadow.querySelector(".allow").addEventListener("click", () => finish(true));
+          shadow.querySelector(".deny").addEventListener("click", () => finish(false));
+          document.documentElement.appendChild(host);
+          setTimeout(() => finish(false), ${timeoutMs});
+        })`,
+      },
+    )
+    .catch(() => ({ result: { value: false } }))
+  const approved = (evalResult as { readonly result?: { readonly value?: unknown } })?.result?.value === true
+  if (!approved) {
+    explicitlyDetachingTabs.add(tabId)
+    try {
+      await chrome.debugger.detach({ tabId }).catch(() => {})
+    } finally {
+      explicitlyDetachingTabs.delete(tabId)
+    }
+    return { approved: false, tabId, url: matched.url ?? "" }
   }
   await recordAttachedTab(tabId)
   return { approved: true, tabId, url: matched.url ?? "" }
