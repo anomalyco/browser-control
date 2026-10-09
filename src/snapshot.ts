@@ -1189,17 +1189,6 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           (selected.length === 0 && typeof performance !== "undefined" && performance.now() < 2_500)
         ),
       )
-      try {
-        if (typeof document !== "undefined" && document.documentElement && typeof window !== "undefined") {
-          document.documentElement.dataset.bcTelemetry = JSON.stringify({
-            phase: "snapshot",
-            label: `${selected.length} controls`,
-            workStyle: 1,
-            ts: Date.now(),
-          })
-          window.dispatchEvent(new Event("__browser_control_telemetry__"))
-        }
-      } catch {}
       return {
         entries: selected,
         truncated: truncated || selected.length < entries.length,

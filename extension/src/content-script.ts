@@ -122,39 +122,6 @@ function evictForeignExtensionFrames(): number {
 }
 
 chrome.runtime.sendMessage({ action: "page-status.ready" }).catch(() => {})
-window.addEventListener("__browser_control_telemetry__", () => {
-  if (!currentStatus || currentStatus.state !== "running" || pendingTabRequest) return
-  try {
-    const raw = document.documentElement?.dataset.bcTelemetry
-    if (!raw) return
-    const parsed = JSON.parse(raw) as { readonly phase?: string; readonly label?: string; readonly workStyle?: number }
-    const view = pageStatusView(currentStatus)
-    const baseLabel = view.label.replace(/\s*·\s*(running|attached)$/i, "")
-    const shortTarget = (parsed.label || "").trim()
-    const suffix = parsed.phase === "down"
-      ? (shortTarget ? ` · Clicking “${shortTarget}”` : " · Clicking…")
-      : parsed.phase === "move"
-      ? (shortTarget ? ` → ${shortTarget}` : "")
-      : parsed.phase === "snapshot"
-      ? ` · Inspecting ${shortTarget || "DOM"}`
-      : ""
-    const nextLabel = `${baseLabel}${suffix}`
-    const host = document.getElementById(hostId)
-    const labelEl = host?.shadowRoot?.getElementById("__browser_control_label__")
-    if (labelEl && labelEl.textContent !== nextLabel) {
-      labelEl.textContent = nextLabel
-      islandRig?.configure({
-        tone: "running",
-        isTabRequest: false,
-        label: nextLabel,
-        workStyle: typeof parsed.workStyle === "number" ? parsed.workStyle : 0,
-      })
-    }
-    if (parsed.phase === "down") {
-      islandRig?.pulseClick()
-    }
-  } catch {}
-})
 window.addEventListener("keydown", (event) => {
   if (pendingTabRequest && event.key === "Escape") {
     event.preventDefault()
@@ -246,12 +213,12 @@ function renderStatus(): void {
         justify-content: space-between;
       }
       #__browser_control_label__ {
-        width: max-content;
-        max-width: 100%;
+        width: 100%;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
         color: rgba(248, 248, 250, 0.94);
+        animation: bc-fade 150ms ease both;
       }
       #__browser_control_status__[data-tone="waiting"] #__browser_control_label__ {
         padding-left: 18px;
@@ -269,11 +236,17 @@ function renderStatus(): void {
         -webkit-line-clamp: 2;
         -webkit-box-orient: vertical;
         overflow: hidden;
+        animation: bc-fade 180ms 35ms ease both;
       }
       #__browser_control_actions__ {
         display: flex;
         align-items: center;
         gap: 6px;
+        animation: bc-fade 180ms 55ms ease both;
+      }
+      @keyframes bc-fade {
+        from { opacity: 0; transform: translateY(2px); }
+        to { opacity: 1; transform: translateY(0); }
       }
       button {
         box-sizing: border-box;

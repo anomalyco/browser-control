@@ -147,10 +147,7 @@ export const ghostCursorClientSource = `(() => {
   const state = {
     element: null,
     arrow: null,
-    blurOuter: null,
-    blurInner: null,
     headGroup: null,
-    blurNode: null,
     targetX: initialX,
     targetY: initialY,
     renderedX: initialX,
@@ -228,24 +225,9 @@ export const ghostCursorClientSource = `(() => {
     if (state.arrow) {
       const cameraBoost = Math.pow(Math.max(1, state.camera.scale), 0.32);
       const speed = Math.hypot(state.vx, state.vy);
-      // Rigid macOS cursor geometry (no squash-and-stretch), with exact 1D directional
-      // shutter motion blur R(+velDeg) * BlurX(sigma) * R(-velDeg) and subtle warm afterglow.
       const headTarget = state.headGroup || state.arrow;
       headTarget.style.transform = "rotate(" + formatCoord(state.deg) + "deg) scale(" + formatCoord(state.scale * cameraBoost) + ")";
-      if (state.blurOuter && state.blurInner && state.blurNode) {
-        if (speed > 110 && !pressed) {
-          const velDeg = (Math.atan2(state.vy, state.vx) * 180) / PI;
-          const sigmaX = clamp((speed - 110) * 0.0028, 0, 4.2);
-          state.blurOuter.style.transform = "rotate(" + formatCoord(velDeg) + "deg)";
-          state.blurInner.style.transform = "rotate(" + formatCoord(-velDeg) + "deg)";
-          state.blurNode.setAttribute("stdDeviation", formatCoord(sigmaX) + " 0");
-        } else {
-          state.blurOuter.style.transform = "";
-          state.blurInner.style.transform = "";
-          state.blurNode.setAttribute("stdDeviation", "0 0");
-        }
-      }
-      const glowAlpha = clamp(speed / 1600, 0, 0.32);
+      const glowAlpha = clamp(speed / 1500, 0, 0.34);
       const afterglow = glowAlpha > 0.03
         ? "drop-shadow(0 0 10px rgba(244, 243, 239, " + formatCoord(glowAlpha) + ")) "
         : "";
@@ -374,20 +356,8 @@ export const ghostCursorClientSource = `(() => {
     const radius = validRect ? (window.getComputedStyle(el).borderRadius || "8px") : "8px";
     return { label, rect: validRect ? rect : null, radius };
   };
-  const emitTelemetry = (phase, label, workStyle = 0) => {
-    try {
-      if (!document.documentElement) return;
-      document.documentElement.dataset.bcTelemetry = JSON.stringify({ phase, label: label || "", workStyle, ts: Date.now() });
-      window.dispatchEvent(new Event("__browser_control_telemetry__"));
-    } catch {}
-  };
   const updateTargetHalo = (x, y, phase) => {
     const info = inspectTargetAt(x, y);
-    if (phase === "move" && info?.label) {
-      emitTelemetry("move", info.label, 0);
-    } else if (phase === "down") {
-      emitTelemetry("down", info?.label || "", 0);
-    }
     const stage = ensureStage();
     let halo = document.getElementById("__bc_target_halo__");
     if (!info?.rect) {
@@ -722,10 +692,7 @@ export const ghostCursorClientSource = `(() => {
     if (existing instanceof HTMLDivElement) {
       state.element = existing;
       state.arrow = existing.querySelector("svg");
-      state.blurOuter = existing.querySelector("#__bc_cursor_blur_outer__");
-      state.blurInner = existing.querySelector("#__bc_cursor_blur_inner__");
       state.headGroup = existing.querySelector("#__bc_cursor_head__");
-      state.blurNode = existing.querySelector("feGaussianBlur");
       return existing;
     }
     const element = document.createElement("div");
@@ -748,27 +715,6 @@ export const ghostCursorClientSource = `(() => {
     arrow.style.height = "100%";
     arrow.style.overflow = "visible";
     arrow.style.filter = "drop-shadow(0 2.5px 5px rgba(0,0,0,0.34)) drop-shadow(0 0.5px 1.5px rgba(0,0,0,0.22))";
-    const defs = document.createElementNS(svgNamespace, "defs");
-    const filter = document.createElementNS(svgNamespace, "filter");
-    filter.setAttribute("id", "__bc_cursor_motion_blur__");
-    filter.setAttribute("filterUnits", "userSpaceOnUse");
-    filter.setAttribute("x", "-36");
-    filter.setAttribute("y", "-36");
-    filter.setAttribute("width", "96");
-    filter.setAttribute("height", "96");
-    const blurNode = document.createElementNS(svgNamespace, "feGaussianBlur");
-    blurNode.setAttribute("in", "SourceGraphic");
-    blurNode.setAttribute("stdDeviation", "0 0");
-    filter.appendChild(blurNode);
-    defs.appendChild(filter);
-    arrow.appendChild(defs);
-    const blurOuter = document.createElementNS(svgNamespace, "g");
-    blurOuter.setAttribute("id", "__bc_cursor_blur_outer__");
-    blurOuter.style.transformOrigin = "2.1px 1.5px";
-    const blurInner = document.createElementNS(svgNamespace, "g");
-    blurInner.setAttribute("id", "__bc_cursor_blur_inner__");
-    blurInner.setAttribute("filter", "url(#__bc_cursor_motion_blur__)");
-    blurInner.style.transformOrigin = "2.1px 1.5px";
     const headGroup = document.createElementNS(svgNamespace, "g");
     headGroup.setAttribute("id", "__bc_cursor_head__");
     headGroup.style.transformOrigin = "2.1px 1.5px";
@@ -782,17 +728,12 @@ export const ghostCursorClientSource = `(() => {
     arrowPath.setAttribute("stroke-linecap", "round");
     arrowPath.setAttribute("paint-order", "stroke");
     headGroup.appendChild(arrowPath);
-    blurInner.appendChild(headGroup);
-    blurOuter.appendChild(blurInner);
-    arrow.appendChild(blurOuter);
+    arrow.appendChild(headGroup);
     element.appendChild(arrow);
     document.documentElement.appendChild(element);
     state.element = element;
     state.arrow = arrow;
-    state.blurOuter = blurOuter;
-    state.blurInner = blurInner;
     state.headGroup = headGroup;
-    state.blurNode = blurNode;
     return element;
   };
   const clearIdleTimers = () => {
@@ -810,10 +751,7 @@ export const ghostCursorClientSource = `(() => {
         state.element?.remove();
         state.element = null;
         state.arrow = null;
-        state.blurOuter = null;
-        state.blurInner = null;
         state.headGroup = null;
-        state.blurNode = null;
         state.removeTimer = undefined;
       }, 160);
       state.fadeTimer = undefined;
@@ -846,10 +784,7 @@ export const ghostCursorClientSource = `(() => {
     state.element?.remove();
     state.element = null;
     state.arrow = null;
-    state.blurOuter = null;
-    state.blurInner = null;
     state.headGroup = null;
-    state.blurNode = null;
     document.getElementById(stageId)?.remove();
   };
   const restore = (position) => {
