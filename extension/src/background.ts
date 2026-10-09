@@ -957,10 +957,11 @@ async function requestTabAttach(params: JsonObject | undefined): Promise<JsonObj
   const targets = await chrome.debugger.getTargets()
   const activeTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => [])
   const activeTabId = activeTabs[0]?.id
+  const owned = await getOwnedDebuggerTabIds(chrome.debugger)
   const webTargets = targets.filter(
-    (t) => t.type === "page" && typeof t.tabId === "number" && /^https?:\/\//i.test(t.url ?? ""),
+    (t) => t.type === "page" && typeof t.tabId === "number" && /^https?:\/\//i.test(t.url ?? "") && !t.attached && !owned.has(t.tabId),
   )
-  // Sort active tab first so bare `requestTab()` picks the user's focused tab
+  // Sort active tab first so bare `requestTab()` picks the user's focused unattached tab
   webTargets.sort((a, b) => (a.tabId === activeTabId ? -1 : b.tabId === activeTabId ? 1 : 0))
   const matched = webTargets.find((t) => {
     if (urlIncludes && !(t.url ?? "").toLowerCase().includes(urlIncludes)) return false
@@ -970,16 +971,11 @@ async function requestTabAttach(params: JsonObject | undefined): Promise<JsonObj
   if (!matched || typeof matched.tabId !== "number") {
     throw new Error(
       urlIncludes || titleIncludes
-        ? `No open http(s) browser tab matched ${urlIncludes ?? titleIncludes}`
-        : "No active http(s) browser tab found",
+        ? `No unattached http(s) browser tab matched ${urlIncludes ?? titleIncludes}`
+        : "No unattached http(s) browser tab found",
     )
   }
   const tabId = matched.tabId
-  const owned = await getOwnedDebuggerTabIds(chrome.debugger)
-  if (owned.has(tabId)) {
-    await recordAttachedTab(tabId)
-    return { approved: true, tabId, url: matched.url ?? "" }
-  }
   await chrome.tabs.update(tabId, { active: true }).catch(() => {})
   const requestId = `${tabId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   let contentScriptReached = false
