@@ -13,6 +13,7 @@ let cursorFill: string | null | undefined
 let cursorFilter: string | undefined
 let islandRig: DynamicIslandRig | undefined
 let idleHideTimer: ReturnType<typeof setTimeout> | undefined
+let collapseCleanupTimer: ReturnType<typeof setTimeout> | undefined
 
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
   if (!message || typeof message !== "object" || Array.isArray(message)) {
@@ -194,59 +195,31 @@ function renderStatus(): void {
         position: absolute;
         box-sizing: border-box;
         overflow: hidden;
-        padding: 0 13px 0 29px;
+        padding: 12px 14px;
         display: flex;
         flex-direction: column;
-        justify-content: center;
-        color: rgba(248, 248, 250, 0.96);
-        font: 540 11.5px/1.2 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
-        letter-spacing: -0.012em;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        pointer-events: none;
-        will-change: width, height, left, top, filter;
-      }
-      #__browser_control_status__[data-tone="waiting"] {
-        padding: 8px 13px 9px 13px;
-        white-space: normal;
-        pointer-events: auto;
         justify-content: space-between;
-      }
-      #__browser_control_label__ {
-        width: 100%;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        color: rgba(248, 248, 250, 0.94);
-        animation: bc-fade 150ms ease both;
-      }
-      #__browser_control_status__[data-tone="waiting"] #__browser_control_label__ {
-        padding-left: 18px;
-        font-size: 10.5px;
-        font-weight: 500;
-        color: rgba(161, 161, 170, 0.88);
-        letter-spacing: 0.01em;
+        color: rgba(248, 248, 250, 0.96);
+        font: 540 12.5px/1.28 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+        letter-spacing: -0.012em;
+        pointer-events: none;
+        opacity: 0;
+        will-change: transform, opacity;
       }
       #__browser_control_prompt__ {
-        margin: 3px 0 7px;
-        color: #fafafa;
-        font: 560 12.5px/1.32 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-        letter-spacing: -0.01em;
-        display: -webkit-box;
-        -webkit-line-clamp: 2;
-        -webkit-box-orient: vertical;
+        margin: 0;
+        color: #f4f3ef;
+        font: 560 12.5px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+        letter-spacing: -0.012em;
+        text-align: center;
+        white-space: nowrap;
         overflow: hidden;
-        animation: bc-fade 180ms 35ms ease both;
+        text-overflow: ellipsis;
       }
       #__browser_control_actions__ {
         display: flex;
         align-items: center;
         gap: 6px;
-        animation: bc-fade 180ms 55ms ease both;
-      }
-      @keyframes bc-fade {
-        from { opacity: 0; transform: translateY(2px); }
-        to { opacity: 1; transform: translateY(0); }
       }
       button {
         box-sizing: border-box;
@@ -282,13 +255,18 @@ function renderStatus(): void {
     return
   }
   const view = pageStatusView(currentStatus)
-  const displayLabel = view.tone === "waiting"
-    ? view.label
-    : view.label.replace(/\s*·\s*(running|attached)$/i, "")
-  const labelNode = document.createElement("div")
-  labelNode.id = "__browser_control_label__"
-  labelNode.textContent = displayLabel
-  statusElement.replaceChildren(labelNode)
+  if (collapseCleanupTimer !== undefined) {
+    clearTimeout(collapseCleanupTimer)
+    collapseCleanupTimer = undefined
+  }
+  if (view.tone === "waiting") {
+    statusElement.replaceChildren()
+  } else if (statusElement.children.length > 0) {
+    collapseCleanupTimer = setTimeout(() => {
+      statusElement.replaceChildren()
+      collapseCleanupTimer = undefined
+    }, 180)
+  }
   statusElement.title = view.title
   statusElement.setAttribute("aria-label", view.title)
   statusElement.dataset.tone = view.tone
@@ -303,7 +281,7 @@ function renderStatus(): void {
   if (view.tone === "active") {
     idleHideTimer = setTimeout(() => {
       host?.setAttribute("data-idle-hidden", "true")
-    }, 2_200)
+    }, 1_800)
   }
   clearGhostCursorAttention()
   if (view.message) {
@@ -355,7 +333,6 @@ function renderStatus(): void {
   islandRig?.configure({
     tone: view.tone,
     isTabRequest: Boolean(pendingTabRequest),
-    label: displayLabel,
     ...(view.message ? { message: view.message } : {}),
   })
   observeHost()

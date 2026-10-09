@@ -1,6 +1,8 @@
-// GPU-accelerated Dynamic Island for Browser Control.
-// Clean, fixed-width states, smooth critically-damped 1/480 Hz spring transitions,
-// transient fsmin metaball split/merge, and razor-sharp 2x Retina anti-aliased SDF rendering.
+// Minimal, single-capsule GPU Dynamic Island for Browser Control.
+// Compact state: a quiet 48x26px carbon pill with three breathing warm-ivory dots (no text, no second circle).
+// Expanded state: smoothly unfolds into a 324x82px permission / handoff card.
+// Both expansion and collapse drive inner content opacity/scale as a continuous function of live spring progress `u`,
+// so DOM nodes are never abruptly removed mid-transition.
 
 class Spring {
   v = 0
@@ -41,21 +43,24 @@ class Spring {
   }
 }
 
-export const ISLAND_CANVAS_W = 520
-export const ISLAND_CANVAS_H = 148
+export const ISLAND_CANVAS_W = 420
+export const ISLAND_CANVAS_H = 128
 
-const RUNNING_W = 184
-const RUNNING_H = 32
-const ATTACHED_W = 164
-const ATTACHED_H = 30
-const WAITING_W = 344
-const WAITING_H = 92
+const COMPACT_W = 52
+const COMPACT_H = 26
+const EXPANDED_W = 324
+const EXPANDED_H = 82
+
+function smoothstep(edge0: number, edge1: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)))
+  return t * t * (3 - 2 * t)
+}
 
 const WGSL_SOURCE = /* wgsl */ `
 struct Uniforms {
   u0: vec4f, // canvasW, canvasH, dpr, time
   u1: vec4f, // islandW, islandH, radius, topY
-  u2: vec4f, // satGap, satRadius, toneMode (0=attached,1=running,2=waiting,3=request), activity
+  u2: vec4f, // dotsAlpha, active, pad, pad
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -81,53 +86,24 @@ fn sdRoundedBox(p: vec2f, b: vec2f, r: f32) -> f32 {
   return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
-fn fsmin(a: f32, b: f32, k: f32) -> f32 {
-  if (k <= 0.001) { return min(a, b); }
-  let h = max(k - abs(a - b), 0.0) / k;
-  return min(a, b) - h * h * k * 0.25;
-}
-
-fn evalField(p: vec2f, w: f32, h: f32, r: f32, topY: f32, satGap: f32, satR: f32) -> f32 {
-  let totalShift = max(0.0, satGap + satR * 2.0) * 0.5;
-  let cMain = vec2f(u.u0.x * 0.5 - totalShift, topY + h * 0.5);
-  let halfSize = max(vec2f(w, h) * 0.5, vec2f(8.0));
-  let rr = min(r, min(halfSize.x, halfSize.y));
-  var d = sdRoundedBox(p - cMain, halfSize, rr);
-  if (satR > 0.5) {
-    let cSat = vec2f(cMain.x + halfSize.x + satGap + satR, topY + h * 0.5);
-    let dSat = length(p - cSat) - satR;
-    let kBridge = 10.5 * (1.0 - smoothstep(0.5, 5.5, satGap)) * clamp(satR / 14.0, 0.0, 1.0);
-    d = fsmin(d, dSat, kBridge);
-  }
-  return d;
-}
-
-fn shadeStatusDot(p: vec2f, center: vec2f, dpr: f32, tint: vec3f) -> vec4f {
-  let d = length(p - center);
-  if (d > 6.0) { return vec4f(0.0); }
-  let aa = 0.6 / dpr;
-  let core = 1.0 - smoothstep(3.0 - aa, 3.0 + aa, d);
-  return vec4f(tint * core, core);
-}
-
-fn shadeSpinner(p: vec2f, center: vec2f, radius: f32, dpr: f32, time: f32, tint: vec3f) -> vec4f {
+fn shadeThreeDots(p: vec2f, center: vec2f, dpr: f32, time: f32, running: f32) -> vec4f {
   let q = p - center;
-  let rad = length(q);
-  if (rad > radius + 2.0) { return vec4f(0.0); }
-  let aa = 0.6 / dpr;
-  let strokeW = 1.55;
-  let R = radius - 1.2;
-  let ring = 1.0 - smoothstep(strokeW * 0.5 - aa, strokeW * 0.5 + aa, abs(rad - R));
-  let head = fract(time * 0.85);
-  let ang = atan2(q.x, -q.y) / 6.2831853;
-  let behind = fract(head - ang);
-  let arc = exp(-behind * 4.8) * ring;
-  let hp = vec2f(sin(head * 6.2831853), -cos(head * 6.2831853)) * R;
-  let hd = length(q - hp);
-  let cap = 1.0 - smoothstep(strokeW * 0.6 - aa, strokeW * 0.6 + aa, hd);
-  let track = ring * 0.16;
-  let a = clamp(track + arc * 0.9 + cap, 0.0, 1.0);
-  return vec4f(tint * a, a);
+  if (abs(q.x) > 18.0 || abs(q.y) > 8.0) { return vec4f(0.0); }
+  let aa = 0.55 / dpr;
+  let ivory = vec3f(0.95, 0.94, 0.91);
+  var totalA = 0.0;
+  for (var i = 0; i < 3; i++) {
+    let fi = f32(i) - 1.0;
+    let dotPos = vec2f(fi * 8.0, 0.0);
+    let phase = time * 3.4 - f32(i) * 0.85;
+    let wave = mix(0.35, 0.5 + 0.5 * sin(phase), running);
+    let r = mix(1.75, 2.35, wave);
+    let lum = mix(0.32, 0.96, wave);
+    let d = length(q - dotPos) - r;
+    let cov = 1.0 - smoothstep(-aa, aa, d);
+    totalA = max(totalA, cov * lum);
+  }
+  return vec4f(ivory * totalA, totalA);
 }
 
 @fragment fn fs_main(in: VSOut) -> @location(0) vec4f {
@@ -138,37 +114,25 @@ fn shadeSpinner(p: vec2f, center: vec2f, radius: f32, dpr: f32, time: f32, tint:
   let h = u.u1.y;
   let r = u.u1.z;
   let topY = u.u1.w;
-  let satGap = u.u2.x;
-  let satR = u.u2.y;
-  let tone = u.u2.z;
+  let dotsAlpha = clamp(u.u2.x, 0.0, 1.0);
+  let running = clamp(u.u2.y, 0.0, 1.0);
 
-  let totalShift = max(0.0, satGap + satR * 2.0) * 0.5;
-  let cMain = vec2f(u.u0.x * 0.5 - totalShift, topY + h * 0.5);
-  let cSat = vec2f(cMain.x + w * 0.5 + satGap + satR, topY + h * 0.5);
-  let orbCenter = vec2f(cMain.x - w * 0.5 + 15.0, topY + 16.0);
-
-  let d = evalField(p, w, h, r, topY, satGap, satR);
+  let center = vec2f(u.u0.x * 0.5, topY + h * 0.5);
+  let halfSize = max(vec2f(w, h) * 0.5, vec2f(6.0));
+  let rr = min(r, min(halfSize.x, halfSize.y));
+  let d = sdRoundedBox(p - center, halfSize, rr);
   let cov = clamp(0.5 - d * dpr, 0.0, 1.0);
   if (cov <= 0.001) {
     return vec4f(0.0);
   }
 
-  var dotTint = vec3f(0.68, 0.78, 0.65);
-  if (tone > 1.5) {
-    dotTint = vec3f(0.88, 0.73, 0.44);
-  }
   let ivory = vec3f(0.95, 0.94, 0.91);
-
-  // Uniform #0a0a0c carbon fill with a static, even 1px hairline border (no shimmer!)
   let hairMask = clamp(1.0 - abs(d * dpr + 0.75), 0.0, 1.0);
   var rgb = vec3f(0.039, 0.039, 0.045) + ivory * hairMask * 0.14;
 
-  let dotCol = shadeStatusDot(p, orbCenter, dpr, dotTint);
-  rgb = rgb * (1.0 - dotCol.a) + dotCol.rgb;
-
-  if (satR > 4.0) {
-    let ind = shadeSpinner(p, cSat, satR * 0.54, dpr, time, ivory);
-    rgb = rgb * (1.0 - ind.a) + ind.rgb;
+  if (dotsAlpha > 0.005) {
+    let dots = shadeThreeDots(p, center, dpr, time, running) * dotsAlpha;
+    rgb = rgb * (1.0 - dots.a) + dots.rgb;
   }
 
   return vec4f(min(rgb, vec3f(1.0)) * cov, cov);
@@ -190,60 +154,31 @@ in vec2 v_uv;
 out vec4 fragColor;
 uniform vec4 u0; // canvasW, canvasH, dpr, time
 uniform vec4 u1; // islandW, islandH, radius, topY
-uniform vec4 u2; // satGap, satRadius, toneMode, activity
+uniform vec4 u2; // dotsAlpha, running, pad, pad
 
 float sdRoundedBox(vec2 p, vec2 b, float r) {
   vec2 q = abs(p) - b + r;
   return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
-float fsmin(float a, float b, float k) {
-  if (k <= 0.001) return min(a, b);
-  float h = max(k - abs(a - b), 0.0) / k;
-  return min(a, b) - h * h * k * 0.25;
-}
-
-float evalField(vec2 p, float w, float h, float r, float topY, float satGap, float satR) {
-  float totalShift = max(0.0, satGap + satR * 2.0) * 0.5;
-  vec2 cMain = vec2(u0.x * 0.5 - totalShift, topY + h * 0.5);
-  vec2 halfSize = max(vec2(w, h) * 0.5, vec2(8.0));
-  float rr = min(r, min(halfSize.x, halfSize.y));
-  float d = sdRoundedBox(p - cMain, halfSize, rr);
-  if (satR > 0.5) {
-    vec2 cSat = vec2(cMain.x + halfSize.x + satGap + satR, topY + h * 0.5);
-    float dSat = length(p - cSat) - satR;
-    float kBridge = 10.5 * (1.0 - smoothstep(0.5, 5.5, satGap)) * clamp(satR / 14.0, 0.0, 1.0);
-    d = fsmin(d, dSat, kBridge);
-  }
-  return d;
-}
-
-vec4 shadeStatusDot(vec2 p, vec2 center, float dpr, vec3 tint) {
-  float d = length(p - center);
-  if (d > 6.0) return vec4(0.0);
-  float aa = 0.6 / dpr;
-  float core = 1.0 - smoothstep(3.0 - aa, 3.0 + aa, d);
-  return vec4(tint * core, core);
-}
-
-vec4 shadeSpinner(vec2 p, vec2 center, float radius, float dpr, float time, vec3 tint) {
+vec4 shadeThreeDots(vec2 p, vec2 center, float dpr, float time, float running) {
   vec2 q = p - center;
-  float rad = length(q);
-  if (rad > radius + 2.0) return vec4(0.0);
-  float aa = 0.6 / dpr;
-  float strokeW = 1.55;
-  float R = radius - 1.2;
-  float ring = 1.0 - smoothstep(strokeW * 0.5 - aa, strokeW * 0.5 + aa, abs(rad - R));
-  float head = fract(time * 0.85);
-  float ang = atan(q.x, -q.y) / 6.2831853;
-  float behind = fract(head - ang);
-  float arc = exp(-behind * 4.8) * ring;
-  vec2 hp = vec2(sin(head * 6.2831853), -cos(head * 6.2831853)) * R;
-  float hd = length(q - hp);
-  float cap = 1.0 - smoothstep(strokeW * 0.6 - aa, strokeW * 0.6 + aa, hd);
-  float track = ring * 0.16;
-  float a = clamp(track + arc * 0.9 + cap, 0.0, 1.0);
-  return vec4(tint * a, a);
+  if (abs(q.x) > 18.0 || abs(q.y) > 8.0) return vec4(0.0);
+  float aa = 0.55 / dpr;
+  vec3 ivory = vec3(0.95, 0.94, 0.91);
+  float totalA = 0.0;
+  for (int i = 0; i < 3; i++) {
+    float fi = float(i) - 1.0;
+    vec2 dotPos = vec2(fi * 8.0, 0.0);
+    float phase = time * 3.4 - float(i) * 0.85;
+    float wave = mix(0.35, 0.5 + 0.5 * sin(phase), running);
+    float r = mix(1.75, 2.35, wave);
+    float lum = mix(0.32, 0.96, wave);
+    float d = length(q - dotPos) - r;
+    float cov = 1.0 - smoothstep(-aa, aa, d);
+    totalA = max(totalA, cov * lum);
+  }
+  return vec4(ivory * totalA, totalA);
 }
 
 void main() {
@@ -251,35 +186,26 @@ void main() {
   float dpr = max(u0.z, 1.0);
   float time = u0.w;
   float w = u1.x, h = u1.y, r = u1.z, topY = u1.w;
-  float satGap = u2.x, satR = u2.y, tone = u2.z;
+  float dotsAlpha = clamp(u2.x, 0.0, 1.0);
+  float running = clamp(u2.y, 0.0, 1.0);
 
-  float totalShift = max(0.0, satGap + satR * 2.0) * 0.5;
-  vec2 cMain = vec2(u0.x * 0.5 - totalShift, topY + h * 0.5);
-  vec2 cSat = vec2(cMain.x + w * 0.5 + satGap + satR, topY + h * 0.5);
-  vec2 orbCenter = vec2(cMain.x - w * 0.5 + 15.0, topY + 16.0);
-
-  float d = evalField(p, w, h, r, topY, satGap, satR);
+  vec2 center = vec2(u0.x * 0.5, topY + h * 0.5);
+  vec2 halfSize = max(vec2(w, h) * 0.5, vec2(6.0));
+  float rr = min(r, min(halfSize.x, halfSize.y));
+  float d = sdRoundedBox(p - center, halfSize, rr);
   float cov = clamp(0.5 - d * dpr, 0.0, 1.0);
   if (cov <= 0.001) {
     fragColor = vec4(0.0);
     return;
   }
 
-  vec3 dotTint = vec3(0.68, 0.78, 0.65);
-  if (tone > 1.5) {
-    dotTint = vec3(0.88, 0.73, 0.44);
-  }
   vec3 ivory = vec3(0.95, 0.94, 0.91);
-
   float hairMask = clamp(1.0 - abs(d * dpr + 0.75), 0.0, 1.0);
   vec3 rgb = vec3(0.039, 0.039, 0.045) + ivory * hairMask * 0.14;
 
-  vec4 dotCol = shadeStatusDot(p, orbCenter, dpr, dotTint);
-  rgb = rgb * (1.0 - dotCol.a) + dotCol.rgb;
-
-  if (satR > 4.0) {
-    vec4 ind = shadeSpinner(p, cSat, satR * 0.54, dpr, time, ivory);
-    rgb = rgb * (1.0 - ind.a) + ind.rgb;
+  if (dotsAlpha > 0.005) {
+    vec4 dots = shadeThreeDots(p, center, dpr, time, running) * dotsAlpha;
+    rgb = rgb * (1.0 - dots.a) + dots.rgb;
   }
 
   fragColor = vec4(min(rgb, vec3(1.0)) * cov, cov);
@@ -400,12 +326,11 @@ function initWebGl2Backend(canvas: HTMLCanvasElement): GpuBackend | null {
 }
 
 export class DynamicIslandRig {
-  readonly w = new Spring(ATTACHED_W, 20, 0.88)
-  readonly h = new Spring(ATTACHED_H, 18, 0.88)
-  readonly r = new Spring(15, 22, 0.90)
+  // Asymmetric critically-damped springs: width slightly leads height for a natural pillowy unfold
+  readonly w = new Spring(COMPACT_W, 20, 0.88)
+  readonly h = new Spring(COMPACT_H, 18, 0.86)
+  readonly r = new Spring(13, 22, 0.90)
   readonly topY = new Spring(8, 22, 0.90)
-  readonly satGap = new Spring(-22, 18, 0.86)
-  readonly satRadius = new Spring(0, 20, 0.88)
   toneMode = 0
   private backend: GpuBackend | null = null
   private initializing = false
@@ -442,40 +367,29 @@ export class DynamicIslandRig {
     this.startLoop()
   }
 
-  pulseClick(): void {
-    this.startLoop()
-  }
-
   configure(options: {
     readonly tone: "active" | "running" | "waiting"
     readonly isTabRequest: boolean
-    readonly label: string
+    readonly label?: string
     readonly message?: string
-    readonly workStyle?: number
   }): void {
     if (options.tone === "waiting") {
-      this.w.set(WAITING_W)
-      this.h.set(WAITING_H)
-      this.r.set(22)
+      this.w.set(EXPANDED_W)
+      this.h.set(EXPANDED_H)
+      this.r.set(20)
       this.topY.set(10)
-      this.satGap.set(-24)
-      this.satRadius.set(0)
       this.toneMode = options.isTabRequest ? 3 : 2
     } else if (options.tone === "running") {
-      this.w.set(RUNNING_W)
-      this.h.set(RUNNING_H)
-      this.r.set(16)
+      this.w.set(COMPACT_W)
+      this.h.set(COMPACT_H)
+      this.r.set(13)
       this.topY.set(8)
-      this.satGap.set(7)
-      this.satRadius.set(16)
       this.toneMode = 1
     } else {
-      this.w.set(ATTACHED_W)
-      this.h.set(ATTACHED_H)
-      this.r.set(15)
+      this.w.set(COMPACT_W)
+      this.h.set(COMPACT_H)
+      this.r.set(13)
       this.topY.set(8)
-      this.satGap.set(-24)
-      this.satRadius.set(0)
       this.toneMode = 0
     }
     this.startLoop()
@@ -487,33 +401,40 @@ export class DynamicIslandRig {
     const h = this.h.step(dt)
     const r = this.r.step(dt)
     const topY = this.topY.step(dt)
-    const satGap = this.satGap.step(dt)
-    const satR = this.satRadius.step(dt)
 
-    const totalShift = Math.max(0, satGap + satR * 2) * 0.5
-    const mainCenterX = ISLAND_CANVAS_W * 0.5 - totalShift
-    this.contentEl.style.width = `${w.toFixed(1)}px`
-    this.contentEl.style.height = `${h.toFixed(1)}px`
-    this.contentEl.style.left = `${(mainCenterX - w * 0.5).toFixed(1)}px`
+    // Continuous expansion ratio u in [0, 1] drives both the 3-dot dissolve and the permission card reveal
+    const u = Math.max(0, Math.min(1, (w - COMPACT_W) / (EXPANDED_W - COMPACT_W)))
+    const dotsAlpha = 1 - smoothstep(0.0, 0.34, u)
+    const cardAlpha = smoothstep(0.38, 0.94, u)
+    const cardScale = 0.92 + 0.08 * cardAlpha
+    const cardShiftY = (1 - cardAlpha) * -4
+
+    // Keep contentEl at the fixed expanded layout size so text never reflows during morphs
+    this.contentEl.style.width = `${EXPANDED_W}px`
+    this.contentEl.style.height = `${EXPANDED_H}px`
+    this.contentEl.style.left = `${(ISLAND_CANVAS_W * 0.5 - EXPANDED_W * 0.5).toFixed(1)}px`
     this.contentEl.style.top = `${topY.toFixed(1)}px`
-    this.contentEl.style.borderRadius = `${r.toFixed(1)}px`
+    this.contentEl.style.opacity = cardAlpha.toFixed(3)
+    this.contentEl.style.transformOrigin = "50% 0%"
+    this.contentEl.style.transform = `translate3d(0, ${cardShiftY.toFixed(2)}px, 0) scale(${cardScale.toFixed(3)})`
+    this.contentEl.style.pointerEvents = cardAlpha > 0.8 ? "auto" : "none"
 
     if (this.backend) {
       const dpr = this.syncCanvasResolution()
-      const u = this.uniforms
-      u[0] = ISLAND_CANVAS_W
-      u[1] = ISLAND_CANVAS_H
-      u[2] = dpr
-      u[3] = this.simTime
-      u[4] = w
-      u[5] = h
-      u[6] = r
-      u[7] = topY
-      u[8] = satGap
-      u[9] = satR
-      u[10] = this.toneMode
-      u[11] = 1
-      this.backend.draw(u)
+      const buf = this.uniforms
+      buf[0] = ISLAND_CANVAS_W
+      buf[1] = ISLAND_CANVAS_H
+      buf[2] = dpr
+      buf[3] = this.simTime
+      buf[4] = w
+      buf[5] = h
+      buf[6] = r
+      buf[7] = topY
+      buf[8] = dotsAlpha
+      buf[9] = this.toneMode >= 1 ? 1 : 0
+      buf[10] = 0
+      buf[11] = 0
+      this.backend.draw(buf)
     }
   }
 
@@ -536,9 +457,7 @@ export class DynamicIslandRig {
       const animating =
         this.toneMode === 1 ||
         !this.w.resting ||
-        !this.h.resting ||
-        !this.satGap.resting ||
-        !this.satRadius.resting
+        !this.h.resting
       if (animating && this.canvas.isConnected) {
         this.rafId = window.requestAnimationFrame(tick)
       }
