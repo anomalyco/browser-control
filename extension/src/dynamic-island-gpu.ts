@@ -582,17 +582,17 @@ function initWebGl2Backend(canvas: HTMLCanvasElement): GpuBackend | null {
 }
 
 export class DynamicIslandRig {
-  readonly w = new Spring(168, 22, 0.72)
-  readonly h = new Spring(32, 22, 0.74)
-  readonly r = new Spring(16, 24, 0.82)
-  readonly topY = new Spring(10, 24, 0.80)
-  // satGap: negative (-20) means tucked inside the main pill; +7.0 means cleanly separated by 7px of air
-  readonly satGap = new Spring(-20, 20, 0.68)
-  readonly satRadius = new Spring(0, 22, 0.72)
-  readonly defocus = new Spring(0, 28, 0.84)
-  readonly slideY = new Spring(0, 30, 0.82)
-  readonly activity = new Spring(0.25, 18, 0.85)
-  readonly clickPulse = new Spring(0, 26, 0.74)
+  readonly w = new Spring(148, 15.5, 0.64)
+  readonly h = new Spring(30, 13.8, 0.60)
+  readonly r = new Spring(15, 18, 0.76)
+  readonly topY = new Spring(8, 18, 0.74)
+  // satGap: negative (-22) means tucked inside the main pill; +7.5 means cleanly separated by 7.5px of air
+  readonly satGap = new Spring(-22, 14.5, 0.60)
+  readonly satRadius = new Spring(0, 16, 0.64)
+  readonly defocus = new Spring(0, 22, 0.80)
+  readonly slideY = new Spring(0, 22, 0.76)
+  readonly activity = new Spring(0.25, 16, 0.85)
+  readonly clickPulse = new Spring(0, 22, 0.72)
   toneMode = 0
   workStyle = 0
   sheenPhase = 1
@@ -601,6 +601,7 @@ export class DynamicIslandRig {
   private rafId = 0
   private lastTime = 0
   private simTime = 0
+  private virtualMode = false
   private readonly uniforms = new Float32Array(20)
   private lastSignature = ""
   private pointerX = -999
@@ -687,31 +688,37 @@ export class DynamicIslandRig {
     const exactWidth = this.measureLabelWidth(options.label)
     if (options.tone === "waiting") {
       const msgLen = (options.message ?? "").length
-      const targetW = Math.min(396, Math.max(296, Math.min(msgLen * 6.2 + 64, 384)))
-      const targetH = msgLen > 48 ? 104 : 92
+      const targetW = Math.min(396, Math.max(308, Math.min(msgLen * 6.2 + 72, 384)))
+      const targetH = msgLen > 48 ? 108 : 98
       this.w.set(targetW)
       this.h.set(targetH)
-      this.r.set(22)
+      this.r.set(24)
       this.topY.set(10)
-      this.satGap.set(-20)
+      this.satGap.omega = 28
+      this.satRadius.omega = 30
+      this.satGap.set(-28)
       this.satRadius.set(0)
       this.activity.set(0.95)
       this.toneMode = options.isTabRequest ? 3 : 2
     } else if (options.tone === "running") {
       this.w.set(exactWidth)
-      this.h.set(32)
-      this.r.set(16)
+      this.h.set(34)
+      this.r.set(17)
       this.topY.set(8)
-      this.satGap.set(7)
-      this.satRadius.set(16)
+      this.satGap.omega = 15
+      this.satRadius.omega = 17
+      this.satGap.set(7.5)
+      this.satRadius.set(17)
       this.activity.set(1.0)
       this.toneMode = 1
     } else {
-      this.w.set(exactWidth)
-      this.h.set(32)
-      this.r.set(16)
+      this.w.set(Math.min(exactWidth, 148))
+      this.h.set(28)
+      this.r.set(14)
       this.topY.set(8)
-      this.satGap.set(-20)
+      this.satGap.omega = 26
+      this.satRadius.omega = 28
+      this.satGap.set(-28)
       this.satRadius.set(0)
       this.activity.set(0.25)
       this.toneMode = 0
@@ -737,13 +744,22 @@ export class DynamicIslandRig {
 
     const totalShift = Math.max(0, satGap + satR * 2) * 0.5
     const mainCenterX = ISLAND_CANVAS_W * 0.5 - totalShift
-    this.contentEl.style.width = `${w.toFixed(1)}px`
-    this.contentEl.style.height = `${h.toFixed(1)}px`
-    this.contentEl.style.left = `${(mainCenterX - w * 0.5).toFixed(1)}px`
+    const targetW = Math.max(1, this.w.target)
+    const targetH = Math.max(1, this.h.target)
+    const scaleX = Math.max(0.35, w / targetW)
+    const scaleY = Math.max(0.35, h / targetH)
+    const morphDist = Math.hypot(scaleX - 1, scaleY - 1)
+    const contentAlpha = Math.max(0, Math.min(1, 1 - morphDist * 1.15))
+    const morphBlur = Math.min(5.5, defocus * 0.16 + morphDist * 7.5)
+    this.contentEl.style.width = `${targetW.toFixed(1)}px`
+    this.contentEl.style.height = `${targetH.toFixed(1)}px`
+    this.contentEl.style.left = `${(mainCenterX - targetW * 0.5).toFixed(1)}px`
     this.contentEl.style.top = `${topY.toFixed(1)}px`
     this.contentEl.style.borderRadius = `${r.toFixed(1)}px`
-    this.contentEl.style.transform = Math.abs(slideY) > 0.1 ? `translate3d(0, ${slideY.toFixed(2)}px, 0)` : ""
-    this.contentEl.style.filter = defocus > 0.15 ? `blur(${Math.min(3.5, defocus * 0.15).toFixed(2)}px)` : ""
+    this.contentEl.style.transformOrigin = "50% 0%"
+    this.contentEl.style.transform = `translate3d(0, ${slideY.toFixed(2)}px, 0) scale3d(${scaleX.toFixed(3)}, ${scaleY.toFixed(3)}, 1)`
+    this.contentEl.style.opacity = contentAlpha.toFixed(3)
+    this.contentEl.style.filter = morphBlur > 0.12 ? `blur(${morphBlur.toFixed(2)}px)` : ""
 
     let curX = this.pointerX
     let curY = this.pointerY
@@ -790,8 +806,16 @@ export class DynamicIslandRig {
     }
   }
 
+  enableVirtualClock(): void {
+    this.virtualMode = true
+    if (this.rafId) {
+      window.cancelAnimationFrame(this.rafId)
+      this.rafId = 0
+    }
+  }
+
   startLoop(): void {
-    if (this.rafId) return
+    if (this.virtualMode || this.rafId) return
     this.lastTime = performance.now()
     const tick = (now: number) => {
       this.rafId = 0

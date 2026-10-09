@@ -140,11 +140,15 @@ export const ghostCursorClientSource = `(() => {
   };
   const initialX = Math.round(window.innerWidth / 2);
   const initialY = Math.round(window.innerHeight / 2);
+  let virtualTime = null;
+  const clockNow = () => virtualTime !== null ? virtualTime : clockNow();
 
   const state = {
     element: null,
     arrow: null,
-    blurNode: null,
+    headGroup: null,
+    trailGroup: null,
+    trailNodes: [],
     targetX: initialX,
     targetY: initialY,
     renderedX: initialX,
@@ -222,23 +226,36 @@ export const ghostCursorClientSource = `(() => {
     if (state.arrow) {
       const cameraBoost = Math.pow(Math.max(1, state.camera.scale), 0.32);
       const speed = Math.hypot(state.vx, state.vy);
-      const stretch = speed > 180 ? clamp(1 + (speed - 180) / 2600, 1, 1.28) : 1;
+      const stretch = speed > 140 ? clamp(1 + (speed - 140) / 1800, 1, 1.34) : 1;
       const squash = 1 / Math.sqrt(stretch);
-      const velDeg = speed > 180 ? (Math.atan2(state.vy, state.vx) * 180) / PI : 0;
+      const velDeg = speed > 140 ? (Math.atan2(state.vy, state.vx) * 180) / PI : 0;
       const stretchTransform = stretch > 1.005
         ? "rotate(" + formatCoord(velDeg) + "deg) scale(" + formatCoord(stretch) + ", " + formatCoord(squash) + ") rotate(" + formatCoord(-velDeg) + "deg) "
         : "";
-      state.arrow.style.transform = stretchTransform + "rotate(" + formatCoord(state.deg) + "deg) scale(" + formatCoord(state.scale * cameraBoost) + ")";
-      if (state.blurNode) {
-        const blurPx = speed > 220 ? clamp((speed - 220) * 0.0032, 0, 2.8) : 0;
-        const bx = blurPx > 0.05 ? Math.abs(Math.cos((velDeg * PI) / 180)) * blurPx + 0.15 : 0;
-        const by = blurPx > 0.05 ? Math.abs(Math.sin((velDeg * PI) / 180)) * blurPx + 0.15 : 0;
-        state.blurNode.setAttribute("stdDeviation", formatCoord(bx) + " " + formatCoord(by));
+      const headTransform = stretchTransform + "rotate(" + formatCoord(state.deg) + "deg) scale(" + formatCoord(state.scale * cameraBoost) + ")";
+      const headTarget = state.headGroup || state.arrow;
+      headTarget.style.transform = headTransform;
+      if (state.trailGroup && state.trailNodes.length > 0) {
+        if (speed > 160 && !pressed) {
+          state.trailGroup.style.display = "block";
+          const viewScale = 16 / Math.max(16, state.options.size);
+          const shutterSec = 0.012;
+          const gate = smoothstep(160, 520, speed);
+          for (let i = 0; i < state.trailNodes.length; i++) {
+            const frac = (i + 1) / state.trailNodes.length;
+            const dx = -state.vx * shutterSec * frac * viewScale;
+            const dy = -state.vy * shutterSec * frac * viewScale;
+            const node = state.trailNodes[i];
+            node.style.transform = "translate(" + formatCoord(dx) + "px, " + formatCoord(dy) + "px) " + headTransform;
+            node.setAttribute("opacity", formatCoord(Math.pow(1 - frac * 0.85, 1.6) * 0.36 * gate));
+          }
+        } else {
+          state.trailGroup.style.display = "none";
+        }
       }
-      const blurFilter = speed > 220 ? "url(#__bc_cursor_motion_blur__) " : "";
       state.arrow.style.filter = pressed
         ? "drop-shadow(0 1px 2px rgba(0,0,0,0.52))"
-        : blurFilter + "drop-shadow(0 2.5px 5px rgba(0,0,0,0.34)) drop-shadow(0 0.5px 1.5px rgba(0,0,0,0.22))";
+        : "drop-shadow(0 2.5px 5px rgba(0,0,0,0.34)) drop-shadow(0 0.5px 1.5px rgba(0,0,0,0.22))";
     }
   };
 
@@ -344,7 +361,7 @@ export const ghostCursorClientSource = `(() => {
 
   // Tactile specular bloom + SVG variable-stroke shockwave ring
   const spawnClickPulse = (x, y, phase) => {
-    const now = performance.now();
+    const now = clockNow();
     const R = 24 * Math.pow(Math.max(1, state.camera.scale), 0.25);
 
     if (phase === "down") {
@@ -607,7 +624,7 @@ export const ghostCursorClientSource = `(() => {
       state.flight = null;
       return;
     }
-    const timestamp = performance.now();
+    const timestamp = clockNow();
     const dt = state.previousFrameTime === undefined
       ? FRAME_MS / 1000
       : clamp((timestamp - state.previousFrameTime) / 1000, 1 / 240, 0.05);
@@ -616,15 +633,16 @@ export const ghostCursorClientSource = `(() => {
     applyPosition();
     if (active) {
       state.nextTickDue = Math.max(timestamp + 4, (state.nextTickDue || timestamp) + FRAME_MS);
-      scheduleNextTick(Math.round(state.nextTickDue - performance.now()));
+      scheduleNextTick(Math.round(state.nextTickDue - clockNow()));
     } else {
       state.previousFrameTime = undefined;
       state.nextTickDue = 0;
     }
   };
   const startLoop = () => {
+    if (virtualTime !== null) return;
     if (state.tickTimer === undefined) {
-      state.nextTickDue = performance.now();
+      state.nextTickDue = clockNow();
       scheduleNextTick(0);
     }
   };
@@ -634,9 +652,10 @@ export const ghostCursorClientSource = `(() => {
     state.element.style.height = state.options.size + "px";
     state.element.style.zIndex = String(state.options.zIndex);
     const arrow = state.arrow;
-    const pathEl = arrow instanceof SVGSVGElement ? arrow.querySelector("path") : null;
-    if (pathEl) {
-      pathEl.setAttribute("fill", state.options.color);
+    if (arrow instanceof SVGSVGElement) {
+      for (const pathEl of arrow.querySelectorAll("path")) {
+        pathEl.setAttribute("fill", state.options.color);
+      }
     }
   };
   const ensureElement = () => {
@@ -644,7 +663,9 @@ export const ghostCursorClientSource = `(() => {
     if (existing instanceof HTMLDivElement) {
       state.element = existing;
       state.arrow = existing.querySelector("svg");
-      state.blurNode = existing.querySelector("feGaussianBlur");
+      state.headGroup = existing.querySelector("#__bc_cursor_head__");
+      state.trailGroup = existing.querySelector("#__bc_cursor_trail__");
+      state.trailNodes = Array.from(existing.querySelectorAll("#__bc_cursor_trail__ path"));
       return existing;
     }
     const element = document.createElement("div");
@@ -666,34 +687,59 @@ export const ghostCursorClientSource = `(() => {
     arrow.style.width = "100%";
     arrow.style.height = "100%";
     arrow.style.overflow = "visible";
-    arrow.style.transformOrigin = "8.75% 8.75%";
     arrow.style.filter = "drop-shadow(0 2.5px 5px rgba(0,0,0,0.34)) drop-shadow(0 0.5px 1.5px rgba(0,0,0,0.22))";
     const defs = document.createElementNS(svgNamespace, "defs");
     const filter = document.createElementNS(svgNamespace, "filter");
     filter.setAttribute("id", "__bc_cursor_motion_blur__");
-    filter.setAttribute("x", "-60%");
-    filter.setAttribute("y", "-60%");
-    filter.setAttribute("width", "220%");
-    filter.setAttribute("height", "220%");
+    filter.setAttribute("filterUnits", "userSpaceOnUse");
+    filter.setAttribute("x", "-80");
+    filter.setAttribute("y", "-80");
+    filter.setAttribute("width", "176");
+    filter.setAttribute("height", "176");
     const blurNode = document.createElementNS(svgNamespace, "feGaussianBlur");
     blurNode.setAttribute("in", "SourceGraphic");
-    blurNode.setAttribute("stdDeviation", "0 0");
+    blurNode.setAttribute("stdDeviation", "1.6 1.6");
     filter.appendChild(blurNode);
     defs.appendChild(filter);
     arrow.appendChild(defs);
+    const headGroup = document.createElementNS(svgNamespace, "g");
+    headGroup.setAttribute("id", "__bc_cursor_head__");
+    headGroup.style.transformOrigin = "1.4px 1.4px";
     const arrowPath = document.createElementNS(svgNamespace, "path");
+    arrowPath.setAttribute("id", "__bc_cursor_dart__");
     arrowPath.setAttribute("d", cursorPathData);
     arrowPath.setAttribute("fill", state.options.color);
     arrowPath.setAttribute("stroke", "#fafafa");
     arrowPath.setAttribute("stroke-width", "1.5");
     arrowPath.setAttribute("stroke-linejoin", "round");
     arrowPath.setAttribute("paint-order", "stroke");
-    arrow.appendChild(arrowPath);
+    headGroup.appendChild(arrowPath);
+    const trailGroup = document.createElementNS(svgNamespace, "g");
+    trailGroup.setAttribute("id", "__bc_cursor_trail__");
+    trailGroup.setAttribute("filter", "url(#__bc_cursor_motion_blur__)");
+    trailGroup.style.display = "none";
+    const trailNodes = [];
+    for (let i = 0; i < 8; i++) {
+      const p = document.createElementNS(svgNamespace, "path");
+      p.setAttribute("d", cursorPathData);
+      p.setAttribute("fill", state.options.color);
+      p.setAttribute("stroke", "rgba(250, 250, 250, 0.35)");
+      p.setAttribute("stroke-width", "1.1");
+      p.setAttribute("stroke-linejoin", "round");
+      p.setAttribute("paint-order", "stroke");
+      p.style.transformOrigin = "1.4px 1.4px";
+      trailGroup.appendChild(p);
+      trailNodes.push(p);
+    }
+    arrow.appendChild(trailGroup);
+    arrow.appendChild(headGroup);
     element.appendChild(arrow);
     document.documentElement.appendChild(element);
     state.element = element;
     state.arrow = arrow;
-    state.blurNode = blurNode;
+    state.headGroup = headGroup;
+    state.trailGroup = trailGroup;
+    state.trailNodes = trailNodes;
     return element;
   };
   const clearIdleTimers = () => {
@@ -711,7 +757,9 @@ export const ghostCursorClientSource = `(() => {
         state.element?.remove();
         state.element = null;
         state.arrow = null;
-        state.blurNode = null;
+        state.headGroup = null;
+        state.trailGroup = null;
+        state.trailNodes = [];
         state.removeTimer = undefined;
       }, 160);
       state.fadeTimer = undefined;
@@ -744,7 +792,9 @@ export const ghostCursorClientSource = `(() => {
     state.element?.remove();
     state.element = null;
     state.arrow = null;
-    state.blurNode = null;
+    state.headGroup = null;
+    state.trailGroup = null;
+    state.trailNodes = [];
     document.getElementById(stageId)?.remove();
   };
   const restore = (position) => {
@@ -770,7 +820,7 @@ export const ghostCursorClientSource = `(() => {
     element.style.opacity = "1";
     applyPosition();
   };
-  const waitMs = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+  const waitMs = (ms) => virtualTime !== null ? Promise.resolve() : new Promise((resolve) => window.setTimeout(resolve, ms));
   const runSingleMouseAction = (action) => {
     if (state.mode === "disabled" || typeof action?.x !== "number" || typeof action?.y !== "number") {
       return Promise.resolve();
@@ -788,7 +838,7 @@ export const ghostCursorClientSource = `(() => {
 
     if (action.type === "down") {
       element.dataset.pressed = "true";
-      state.activeUntil = performance.now() + 140;
+      state.activeUntil = clockNow() + 140;
       applyPosition();
       spawnClickPulse(action.x, action.y, "down");
       startLoop();
@@ -798,7 +848,7 @@ export const ghostCursorClientSource = `(() => {
     if (action.type === "up") {
       element.dataset.pressed = "false";
       state.vScale = 2.6;
-      state.activeUntil = performance.now() + 360;
+      state.activeUntil = clockNow() + 360;
       applyPosition();
       spawnClickPulse(action.x, action.y, "up");
       startLoop();
@@ -856,7 +906,7 @@ export const ghostCursorClientSource = `(() => {
       state.vy += ny * kick;
       state.flight = null;
       const expectedMs = clamp(120 + Math.sqrt(dist) * 6.2, 120, 310);
-      state.activeUntil = performance.now() + expectedMs + 140;
+      state.activeUntil = clockNow() + expectedMs + 140;
       startLoop();
       scheduleIdleFade();
       return awaitFlightSettle(expectedMs + 140);
@@ -872,7 +922,7 @@ export const ghostCursorClientSource = `(() => {
       ? [{ x: state.renderedX, y: state.renderedY, u: 0 }, ...action.path.slice(1)]
       : null;
     state.flight = {
-      startTime: performance.now(),
+      startTime: clockNow(),
       durationMs,
       dist,
       farFactor,
@@ -895,13 +945,17 @@ export const ghostCursorClientSource = `(() => {
         y1: action.y,
       },
     };
-    state.activeUntil = performance.now() + durationMs + 150;
+    state.activeUntil = clockNow() + durationMs + 150;
     startLoop();
     scheduleIdleFade();
 
     return awaitFlightSettle(durationMs + 160);
   };
   const applyMouseEvent = (action) => {
+    if (virtualTime !== null) {
+      flushFlightResolvers();
+      return runSingleMouseAction(action);
+    }
     const next = state.actionQueue.then(() => runSingleMouseAction(action), () => runSingleMouseAction(action));
     state.actionQueue = next;
     return next;
@@ -930,7 +984,7 @@ export const ghostCursorClientSource = `(() => {
     const cursorPageY = (state.renderedY - state.camera.ty) / state.camera.scale;
     return new Promise((resolve) => {
       state.cameraAnim = {
-        startTime: performance.now(),
+        startTime: clockNow(),
         durationMs,
         logS0: Math.log(Math.max(1, state.camera.scale)),
         logS1: Math.log(S),
@@ -942,7 +996,7 @@ export const ghostCursorClientSource = `(() => {
         cursorPageY,
         resolve,
       };
-      state.activeUntil = performance.now() + durationMs + 60;
+      state.activeUntil = clockNow() + durationMs + 60;
       startLoop();
     });
   };
@@ -954,13 +1008,13 @@ export const ghostCursorClientSource = `(() => {
       const sp = state.spotlight;
       return new Promise((resolve) => {
         state.spotlightAnim = {
-          startTime: performance.now(),
+          startTime: clockNow(),
           durationMs: 200,
           x0: sp.x, y0: sp.y, w0: sp.w, h0: sp.h, a0: sp.alpha,
           x1: sp.x, y1: sp.y, w1: sp.w, h1: sp.h, a1: 0,
           resolve,
         };
-        state.activeUntil = performance.now() + 240;
+        state.activeUntil = clockNow() + 240;
         startLoop();
       });
     }
@@ -1017,13 +1071,13 @@ export const ghostCursorClientSource = `(() => {
 
     return new Promise((resolve) => {
       state.spotlightAnim = {
-        startTime: performance.now(),
+        startTime: clockNow(),
         durationMs: 240,
         x0: sp.x, y0: sp.y, w0: sp.w, h0: sp.h, a0: sp.alpha,
         x1, y1, w1, h1, a1: 1,
         resolve,
       };
-      state.activeUntil = performance.now() + 270;
+      state.activeUntil = clockNow() + 270;
       startLoop();
     });
   };
@@ -1190,6 +1244,16 @@ export const ghostCursorClientSource = `(() => {
     zoomTo,
     setSpotlight,
     showKeys,
+    stepVirtual: (dtMs) => {
+      if (virtualTime === null) virtualTime = performance.now();
+      if (state.tickTimer !== undefined) {
+        window.clearTimeout(state.tickTimer);
+        state.tickTimer = undefined;
+      }
+      virtualTime += dtMs;
+      stepMotion(virtualTime, dtMs / 1000);
+      applyPosition();
+    },
     isVisible: () => state.mode !== "disabled" && Boolean(state.element),
   };
   const restoreSavedState = () => {
