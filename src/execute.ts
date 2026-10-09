@@ -845,7 +845,7 @@ export class ExecuteSandbox {
   }> {
     if (!this.page && !this.defaultPageTargetId && !hasExplicitTargetSelection(targetSelection) && requestTabHint && this.options.requestTabAttach) {
       const { targetId } = await this.options.requestTabAttach(requestTabHint)
-      this.unbindDefaultPage(targetId, { ownsPage: false })
+      this.unbindDefaultPage(targetId, { ownsPage: false, notify: true })
       const { browser, context } = await this.connectContext()
       const page = await this.getSessionPage({ context })
       installPageReadTimeout(page)
