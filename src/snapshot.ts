@@ -528,9 +528,10 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
         ? rootOrSettings
         : (() => {
             if (settings.rootSelector) {
-              const matches = document.querySelectorAll(settings.rootSelector)
+              const allMatches = Array.from(document.querySelectorAll(settings.rootSelector))
+              const matches = allMatches.length > 1 ? allMatches.filter(isVisible) : allMatches
               if (matches.length !== 1) {
-                throw new Error(`snapshot within expects exactly one match for selector: ${settings.rootSelector}; got ${matches.length}`)
+                throw new Error(`snapshot within expects exactly one match for selector: ${settings.rootSelector}; got ${allMatches.length}`)
               }
               return matches[0] as Element
             }

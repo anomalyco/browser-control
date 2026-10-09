@@ -637,16 +637,20 @@ export class BrowserControlSessions {
           continue
         }
         const isAutoNamed = /^mcp-[0-9a-f]{6,}$/i.test(session.id) || /^[a-z]+-[a-z]+-\d{3}$/.test(session.id)
+        const sessionMaxIdleMs = isAutoNamed ? options.maxIdleMs : options.maxIdleMs * 8
+        if (now - updatedAtMs < sessionMaxIdleMs) {
+          continue
+        }
         const hasState = session.sandbox.getStatus().stateKeys.length > 0
         if (session.target?.owner === "relay") {
           if (options.isTargetBusy?.(session.target.id)) continue
           const closed = yield* (
-            isAutoNamed || !hasState
+            isAutoNamed
               ? manager.delete(session.id)
               : manager.reset(session.id).pipe(Effect.map(Boolean))
           ).pipe(Effect.orElseSucceed(() => false))
           if (closed) reaped.push(session.id)
-        } else if (!session.target && (isAutoNamed || !hasState)) {
+        } else if (!session.target && (isAutoNamed || (!hasState && now - updatedAtMs >= options.maxIdleMs * 16))) {
           const deleted = yield* manager.delete(session.id).pipe(Effect.orElseSucceed(() => false))
           if (deleted) reaped.push(session.id)
         }

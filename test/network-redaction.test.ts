@@ -200,11 +200,11 @@ describe("SecretCollector", () => {
       .toEqual([{ name: "Cookie", value: "sid=${BC_SECRET_1}; sid=${BC_SECRET_2}" }])
   })
 
-  it("redacts short exact values from command and execute output", () => {
+  it("redacts 4+ char substrings while keeping 1-char values from corrupting URLs", () => {
     expect(redactKnownValues("https://example.com/v1/dark-mode?limit=10", [
       { ref: "BC_SECRET_1", value: "1" },
       { ref: "BC_SECRET_2", value: "dark" },
-    ])).toBe("https://example.com/v${BC_SECRET_1}/${BC_SECRET_2}-mode?limit=${BC_SECRET_1}0")
+    ])).toBe("https://example.com/v1/${BC_SECRET_2}-mode?limit=10")
   })
 
   it("does not rewrite stable placeholders during exact-value output redaction", () => {

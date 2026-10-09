@@ -1263,6 +1263,21 @@ export class ExecuteSandbox {
       this.recreatedFromClosedUrl = undefined
       page.setDefaultTimeout?.(30_000)
     }
+    if (typeof page.reload === "function" && typeof page.goto === "function") {
+      const originalReload = page.reload.bind(page)
+      const originalGoto = page.goto.bind(page)
+      Object.defineProperty(page, "reload", {
+        configurable: true,
+        value: async (...args: Parameters<Page["reload"]>) => {
+          const previousUrl = this.recreatedFromClosedUrl
+          restoreTimeout()
+          if (previousUrl && safePageUrl(page) === "about:blank") {
+            return await originalGoto(previousUrl, args[0])
+          }
+          return await originalReload(...args)
+        },
+      })
+    }
     if (typeof page.goto === "function") {
       const originalGoto = page.goto.bind(page)
       Object.defineProperty(page, "goto", {

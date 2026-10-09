@@ -144,6 +144,7 @@ export const ghostCursorClientSource = `(() => {
   const state = {
     element: null,
     arrow: null,
+    blurNode: null,
     targetX: initialX,
     targetY: initialY,
     renderedX: initialX,
@@ -213,13 +214,31 @@ export const ghostCursorClientSource = `(() => {
     const pressed = state.element.dataset.pressed === "true";
     const pressOffsetX = pressed ? -0.25 : 0;
     const pressOffsetY = pressed ? 0.65 : 0;
+    state.element.dataset.renderedX = formatCoord(state.renderedX);
+    state.element.dataset.renderedY = formatCoord(state.renderedY);
+    state.element.dataset.vx = formatCoord(state.vx);
+    state.element.dataset.vy = formatCoord(state.vy);
     state.element.style.transform = "translate3d(" + formatCoord(state.renderedX + pressOffsetX) + "px, " + formatCoord(state.renderedY + pressOffsetY) + "px, 0)";
     if (state.arrow) {
       const cameraBoost = Math.pow(Math.max(1, state.camera.scale), 0.32);
-      state.arrow.style.transform = "rotate(" + formatCoord(state.deg) + "deg) scale(" + formatCoord(state.scale * cameraBoost) + ")";
+      const speed = Math.hypot(state.vx, state.vy);
+      const stretch = speed > 180 ? clamp(1 + (speed - 180) / 2600, 1, 1.28) : 1;
+      const squash = 1 / Math.sqrt(stretch);
+      const velDeg = speed > 180 ? (Math.atan2(state.vy, state.vx) * 180) / PI : 0;
+      const stretchTransform = stretch > 1.005
+        ? "rotate(" + formatCoord(velDeg) + "deg) scale(" + formatCoord(stretch) + ", " + formatCoord(squash) + ") rotate(" + formatCoord(-velDeg) + "deg) "
+        : "";
+      state.arrow.style.transform = stretchTransform + "rotate(" + formatCoord(state.deg) + "deg) scale(" + formatCoord(state.scale * cameraBoost) + ")";
+      if (state.blurNode) {
+        const blurPx = speed > 220 ? clamp((speed - 220) * 0.0032, 0, 2.8) : 0;
+        const bx = blurPx > 0.05 ? Math.abs(Math.cos((velDeg * PI) / 180)) * blurPx + 0.15 : 0;
+        const by = blurPx > 0.05 ? Math.abs(Math.sin((velDeg * PI) / 180)) * blurPx + 0.15 : 0;
+        state.blurNode.setAttribute("stdDeviation", formatCoord(bx) + " " + formatCoord(by));
+      }
+      const blurFilter = speed > 220 ? "url(#__bc_cursor_motion_blur__) " : "";
       state.arrow.style.filter = pressed
         ? "drop-shadow(0 1px 2px rgba(0,0,0,0.52))"
-        : "drop-shadow(0 2.5px 5px rgba(0,0,0,0.34)) drop-shadow(0 0.5px 1.5px rgba(0,0,0,0.22))";
+        : blurFilter + "drop-shadow(0 2.5px 5px rgba(0,0,0,0.34)) drop-shadow(0 0.5px 1.5px rgba(0,0,0,0.22))";
     }
   };
 
@@ -615,8 +634,9 @@ export const ghostCursorClientSource = `(() => {
     state.element.style.height = state.options.size + "px";
     state.element.style.zIndex = String(state.options.zIndex);
     const arrow = state.arrow;
-    if (arrow instanceof SVGSVGElement && arrow.firstElementChild) {
-      arrow.firstElementChild.setAttribute("fill", state.options.color);
+    const pathEl = arrow instanceof SVGSVGElement ? arrow.querySelector("path") : null;
+    if (pathEl) {
+      pathEl.setAttribute("fill", state.options.color);
     }
   };
   const ensureElement = () => {
@@ -624,6 +644,7 @@ export const ghostCursorClientSource = `(() => {
     if (existing instanceof HTMLDivElement) {
       state.element = existing;
       state.arrow = existing.querySelector("svg");
+      state.blurNode = existing.querySelector("feGaussianBlur");
       return existing;
     }
     const element = document.createElement("div");
@@ -647,6 +668,19 @@ export const ghostCursorClientSource = `(() => {
     arrow.style.overflow = "visible";
     arrow.style.transformOrigin = "8.75% 8.75%";
     arrow.style.filter = "drop-shadow(0 2.5px 5px rgba(0,0,0,0.34)) drop-shadow(0 0.5px 1.5px rgba(0,0,0,0.22))";
+    const defs = document.createElementNS(svgNamespace, "defs");
+    const filter = document.createElementNS(svgNamespace, "filter");
+    filter.setAttribute("id", "__bc_cursor_motion_blur__");
+    filter.setAttribute("x", "-60%");
+    filter.setAttribute("y", "-60%");
+    filter.setAttribute("width", "220%");
+    filter.setAttribute("height", "220%");
+    const blurNode = document.createElementNS(svgNamespace, "feGaussianBlur");
+    blurNode.setAttribute("in", "SourceGraphic");
+    blurNode.setAttribute("stdDeviation", "0 0");
+    filter.appendChild(blurNode);
+    defs.appendChild(filter);
+    arrow.appendChild(defs);
     const arrowPath = document.createElementNS(svgNamespace, "path");
     arrowPath.setAttribute("d", cursorPathData);
     arrowPath.setAttribute("fill", state.options.color);
@@ -659,6 +693,7 @@ export const ghostCursorClientSource = `(() => {
     document.documentElement.appendChild(element);
     state.element = element;
     state.arrow = arrow;
+    state.blurNode = blurNode;
     return element;
   };
   const clearIdleTimers = () => {
@@ -676,6 +711,7 @@ export const ghostCursorClientSource = `(() => {
         state.element?.remove();
         state.element = null;
         state.arrow = null;
+        state.blurNode = null;
         state.removeTimer = undefined;
       }, 160);
       state.fadeTimer = undefined;
@@ -708,6 +744,7 @@ export const ghostCursorClientSource = `(() => {
     state.element?.remove();
     state.element = null;
     state.arrow = null;
+    state.blurNode = null;
     document.getElementById(stageId)?.remove();
   };
   const restore = (position) => {
