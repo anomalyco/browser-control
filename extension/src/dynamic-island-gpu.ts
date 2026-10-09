@@ -1,5 +1,6 @@
 // Minimal GPU Dynamic Island for Browser Control.
-// Compact: a quiet carbon pill with three breathing ivory dots.
+// Idle: a small carbon pill carrying the Browser Control arrow mark.
+// Working: the pill widens slightly and the mark gives way to three breathing ivory dots.
 // Expanded: the same shape unfolds into the permission / handoff card.
 // Every property is an interruptible spring parameterised like Motion (visualDuration + bounce),
 // so retargeting mid-flight keeps velocity instead of restarting.
@@ -98,6 +99,7 @@ export const ISLAND_CANVAS_W = 420
 export const ISLAND_CANVAS_H = 128
 
 const COMPACT_W = 52
+const IDLE_W = 38
 const COMPACT_H = 26
 const COMPACT_R = 13
 const EXPANDED_W = 324
@@ -109,7 +111,7 @@ const WGSL_SOURCE = /* wgsl */ `
 struct Uniforms {
   u0: vec4f, // canvasW, canvasH, dpr, time
   u1: vec4f, // islandW, islandH, radius, topY
-  u2: vec4f, // dotsAlpha, running, presence, dotScale
+  u2: vec4f, // dotsAlpha, unused, presence, dotScale
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -135,7 +137,7 @@ fn sdRoundedBox(p: vec2f, b: vec2f, r: f32) -> f32 {
   return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
-fn shadeThreeDots(p: vec2f, center: vec2f, dpr: f32, time: f32, running: f32, scale: f32) -> vec4f {
+fn shadeThreeDots(p: vec2f, center: vec2f, dpr: f32, time: f32, scale: f32) -> vec4f {
   let q = (p - center) / max(scale, 0.05);
   if (abs(q.x) > 18.0 || abs(q.y) > 8.0) { return vec4f(0.0); }
   let aa = 0.55 / (dpr * max(scale, 0.05));
@@ -145,7 +147,7 @@ fn shadeThreeDots(p: vec2f, center: vec2f, dpr: f32, time: f32, running: f32, sc
     let fi = f32(i) - 1.0;
     let dotPos = vec2f(fi * 8.0, 0.0);
     let phase = time * 3.4 - f32(i) * 0.85;
-    let wave = mix(0.35, 0.5 + 0.5 * sin(phase), running);
+    let wave = 0.5 + 0.5 * sin(phase);
     let r = mix(1.75, 2.35, wave);
     let lum = mix(0.32, 0.96, wave);
     let d = length(q - dotPos) - r;
@@ -164,7 +166,6 @@ fn shadeThreeDots(p: vec2f, center: vec2f, dpr: f32, time: f32, running: f32, sc
   let r = u.u1.z;
   let topY = u.u1.w;
   let dotsAlpha = clamp(u.u2.x, 0.0, 1.0);
-  let running = clamp(u.u2.y, 0.0, 1.0);
   let presence = clamp(u.u2.z, 0.0, 1.0);
   let dotScale = u.u2.w;
 
@@ -184,7 +185,7 @@ fn shadeThreeDots(p: vec2f, center: vec2f, dpr: f32, time: f32, running: f32, sc
   var rgb = vec3f(0.039, 0.039, 0.045) + ivory * hairMask * 0.14;
 
   if (dotsAlpha > 0.005) {
-    let dots = shadeThreeDots(p, center, dpr, time, running, dotScale) * dotsAlpha;
+    let dots = shadeThreeDots(p, center, dpr, time, dotScale) * dotsAlpha;
     rgb = rgb * (1.0 - dots.a) + dots.rgb;
   }
 
@@ -208,14 +209,14 @@ in vec2 v_uv;
 out vec4 fragColor;
 uniform vec4 u0; // canvasW, canvasH, dpr, time
 uniform vec4 u1; // islandW, islandH, radius, topY
-uniform vec4 u2; // dotsAlpha, running, presence, dotScale
+uniform vec4 u2; // dotsAlpha, unused, presence, dotScale
 
 float sdRoundedBox(vec2 p, vec2 b, float r) {
   vec2 q = abs(p) - b + r;
   return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
-vec4 shadeThreeDots(vec2 p, vec2 center, float dpr, float time, float running, float scale) {
+vec4 shadeThreeDots(vec2 p, vec2 center, float dpr, float time, float scale) {
   vec2 q = (p - center) / max(scale, 0.05);
   if (abs(q.x) > 18.0 || abs(q.y) > 8.0) return vec4(0.0);
   float aa = 0.55 / (dpr * max(scale, 0.05));
@@ -225,7 +226,7 @@ vec4 shadeThreeDots(vec2 p, vec2 center, float dpr, float time, float running, f
     float fi = float(i) - 1.0;
     vec2 dotPos = vec2(fi * 8.0, 0.0);
     float phase = time * 3.4 - float(i) * 0.85;
-    float wave = mix(0.35, 0.5 + 0.5 * sin(phase), running);
+    float wave = 0.5 + 0.5 * sin(phase);
     float r = mix(1.75, 2.35, wave);
     float lum = mix(0.32, 0.96, wave);
     float d = length(q - dotPos) - r;
@@ -241,7 +242,6 @@ void main() {
   float time = u0.w;
   float w = u1.x, h = u1.y, r = u1.z, topY = u1.w;
   float dotsAlpha = clamp(u2.x, 0.0, 1.0);
-  float running = clamp(u2.y, 0.0, 1.0);
   float presence = clamp(u2.z, 0.0, 1.0);
   float dotScale = u2.w;
 
@@ -262,7 +262,7 @@ void main() {
   vec3 rgb = vec3(0.039, 0.039, 0.045) + ivory * hairMask * 0.14;
 
   if (dotsAlpha > 0.005) {
-    vec4 dots = shadeThreeDots(p, center, dpr, time, running, dotScale) * dotsAlpha;
+    vec4 dots = shadeThreeDots(p, center, dpr, time, dotScale) * dotsAlpha;
     rgb = rgb * (1.0 - dots.a) + dots.rgb;
   }
 
@@ -401,6 +401,13 @@ const FOLD = {
   dots: { visualDuration: 0.3, delay: 0.2 },
 } satisfies Record<string, SpringTransition>
 
+// Swapping between the idle mark and the working dots without unfolding.
+const SWAP = {
+  width: { visualDuration: 0.4, bounce: 0.2 },
+  out: { visualDuration: 0.14 },
+  in: { visualDuration: 0.42, bounce: 0.3, delay: 0.06 },
+} satisfies Record<string, SpringTransition>
+
 const APPEAR = { visualDuration: 0.45, bounce: 0.24 } satisfies SpringTransition
 const DISAPPEAR = { visualDuration: 0.26 } satisfies SpringTransition
 
@@ -415,11 +422,12 @@ export class DynamicIslandRig {
   private readonly w = new Spring(COMPACT_W)
   private readonly h = new Spring(COMPACT_H)
   private readonly presence = new Spring(0, 0.001)
-  private readonly running = new Spring(0, 0.001)
-  private readonly dots = new Spring(1, 0.001)
+  private readonly dots = new Spring(0, 0.001)
+  private readonly mark = new Spring(0, 0.001)
   private readonly prompt = new Spring(0, 0.001)
   private readonly actions = new Spring(0, 0.001)
-  private expanded = false
+  private readonly markEl: SVGSVGElement
+  private tone: IslandTone | undefined
   private visible = false
   private exitResolve: (() => void) | undefined
   private backend: GpuBackend | null = null
@@ -438,6 +446,8 @@ export class DynamicIslandRig {
     contentEl.style.height = `${EXPANDED_H}px`
     contentEl.style.left = `${(ISLAND_CANVAS_W - EXPANDED_W) / 2}px`
     contentEl.style.top = `${TOP_Y}px`
+    this.markEl = createMark()
+    canvas.after(this.markEl)
     this.syncCanvasResolution()
     this.setVisible(true)
     void this.ensureBackend()
@@ -464,8 +474,10 @@ export class DynamicIslandRig {
 
   configure(tone: IslandTone): void {
     this.setVisible(true)
-    this.running.to(tone === "running" ? 1 : 0, { visualDuration: 0.4 })
-    this.setExpanded(tone === "waiting")
+    if (tone !== this.tone) {
+      this.transition(this.tone, tone)
+      this.tone = tone
+    }
     // Apply current reveal styles to freshly rendered content even when every spring is at rest.
     this.stepFrame(0)
     this.startLoop()
@@ -489,34 +501,47 @@ export class DynamicIslandRig {
     })
   }
 
-  private setExpanded(expanded: boolean): void {
-    if (expanded === this.expanded) return
-    this.expanded = expanded
-    if (expanded) {
+  private transition(from: IslandTone | undefined, to: IslandTone): void {
+    if (to === "waiting") {
       this.w.to(EXPANDED_W, UNFOLD.width)
       this.h.to(EXPANDED_H, UNFOLD.height)
       this.dots.to(0, UNFOLD.dots)
+      this.mark.to(0, UNFOLD.dots)
       this.prompt.to(1, UNFOLD.prompt)
       this.actions.to(1, UNFOLD.actions)
-    } else {
+      return
+    }
+    const width = to === "running" ? COMPACT_W : IDLE_W
+    const showDots = to === "running" ? 1 : 0
+    if (from === undefined) {
+      this.w.snap(width)
+      this.dots.snap(showDots)
+      this.mark.snap(1 - showDots)
+      return
+    }
+    if (from === "waiting") {
       this.prompt.to(0, FOLD.content)
       this.actions.to(0, FOLD.content)
       this.h.to(COMPACT_H, FOLD.height)
-      this.w.to(COMPACT_W, FOLD.width)
-      this.dots.to(1, FOLD.dots)
+      this.w.to(width, FOLD.width)
+    } else {
+      this.w.to(width, SWAP.width)
     }
+    const enter = from === "waiting" ? FOLD.dots : SWAP.in
+    this.dots.to(showDots, showDots ? enter : SWAP.out)
+    this.mark.to(1 - showDots, showDots ? SWAP.out : { ...SWAP.in, delay: enter.delay })
   }
 
   private get animating(): boolean {
-    const springs = [this.w, this.h, this.presence, this.running, this.dots, this.prompt, this.actions]
-    return springs.some((spring) => !spring.resting) || (this.running.x > 0.001 && this.presence.x > 0.001)
+    const springs = [this.w, this.h, this.presence, this.dots, this.mark, this.prompt, this.actions]
+    return springs.some((spring) => !spring.resting) || (this.dots.x > 0.001 && this.presence.x > 0.001)
   }
 
   stepFrame(dt: number): void {
     this.simTime += dt
     const presence = this.presence.step(dt)
-    const running = this.running.step(dt)
     const dots = this.dots.step(dt)
+    const mark = this.mark.step(dt)
     const prompt = this.prompt.step(dt)
     const actions = this.actions.step(dt)
     const scale = 0.45 + 0.55 * presence
@@ -531,7 +556,10 @@ export class DynamicIslandRig {
     const bottom = EXPANDED_H - h
     this.contentEl.style.clipPath = `inset(0 ${side.toFixed(2)}px ${bottom.toFixed(2)}px ${side.toFixed(2)}px round ${r.toFixed(2)}px)`
     this.contentEl.style.opacity = presence > 0.001 ? "1" : "0"
-    this.contentEl.style.pointerEvents = this.expanded && actions > 0.6 ? "auto" : "none"
+    this.contentEl.style.pointerEvents = this.tone === "waiting" && actions > 0.6 ? "auto" : "none"
+    this.markEl.style.top = `${(TOP_Y + h / 2).toFixed(2)}px`
+    this.markEl.style.opacity = (smoothstep(0, 0.5, mark) * smoothstep(0, 0.4, presence)).toFixed(3)
+    this.markEl.style.transform = `translate(-50%, -50%) scale(${(scale * (0.4 + 0.6 * mark)).toFixed(4)}) rotate(${((1 - mark) * -16).toFixed(2)}deg)`
     reveal(this.contentEl.querySelector<HTMLElement>("#__browser_control_prompt__"), prompt, room, 6)
     reveal(this.contentEl.querySelector<HTMLElement>("#__browser_control_actions__"), actions, room, 8)
 
@@ -552,7 +580,7 @@ export class DynamicIslandRig {
       buf[6] = r
       buf[7] = TOP_Y
       buf[8] = clamp01(dots)
-      buf[9] = clamp01(running)
+      buf[9] = 0
       buf[10] = smoothstep(0, 0.4, presence)
       buf[11] = scale * (0.55 + 0.45 * clamp01(dots))
       this.backend.draw(buf)
@@ -590,6 +618,26 @@ export class DynamicIslandRig {
     this.exitResolve?.()
     this.exitResolve = undefined
   }
+}
+
+// The Browser Control mark: the same macOS arrow the ghost cursor uses.
+function createMark(): SVGSVGElement {
+  const ns = "http://www.w3.org/2000/svg"
+  const svg = document.createElementNS(ns, "svg")
+  svg.setAttribute("viewBox", "1.1 0.5 14.4 20.8")
+  svg.setAttribute("aria-hidden", "true")
+  svg.style.cssText = `position:absolute;left:${ISLAND_CANVAS_W / 2}px;top:0;width:8.3px;height:12px;opacity:0;pointer-events:none;overflow:visible;transform-origin:50% 50%;will-change:transform,opacity;`
+  const path = document.createElementNS(ns, "path")
+  path.setAttribute(
+    "d",
+    "M2.1 1.5 L2.1 17.6 L6.0 13.8 L8.5 19.5 C8.75 20.05 9.4 20.3 9.95 20.05 L11.05 19.55 C11.6 19.3 11.85 18.65 11.6 18.1 L9.1 12.4 L14.5 12.4 L2.1 1.5 Z",
+  )
+  path.setAttribute("fill", "#f4f3ef")
+  path.setAttribute("stroke", "#f4f3ef")
+  path.setAttribute("stroke-width", "0.6")
+  path.setAttribute("stroke-linejoin", "round")
+  svg.append(path)
+  return svg
 }
 
 // Transform follows the spring; opacity resolves faster and is gated by the room the shape has opened up,

@@ -12,7 +12,6 @@ let cursorAnimation: Animation | undefined
 let cursorFill: string | null | undefined
 let cursorFilter: string | undefined
 let islandRig: DynamicIslandRig | undefined
-let idleHideTimer: ReturnType<typeof setTimeout> | undefined
 let collapseCleanupTimer: ReturnType<typeof setTimeout> | undefined
 
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
@@ -272,15 +271,6 @@ function renderStatus(): void {
   host.setAttribute("aria-hidden", String(view.completion === undefined))
   host.dataset.interactive = String(view.completion !== undefined)
   host.dataset.waiting = String(view.completion !== undefined)
-  if (idleHideTimer !== undefined) {
-    clearTimeout(idleHideTimer)
-    idleHideTimer = undefined
-  }
-  if (view.tone === "active") {
-    idleHideTimer = setTimeout(() => {
-      islandRig?.setVisible(false)
-    }, 1_800)
-  }
   clearGhostCursorAttention()
   if (view.message) {
     const prompt = document.createElement("div")
@@ -363,10 +353,6 @@ function clearGhostCursorAttention(): void {
 function clearStatus(): void {
   currentStatus = undefined
   completingHandoffId = undefined
-  if (idleHideTimer !== undefined) {
-    clearTimeout(idleHideTimer)
-    idleHideTimer = undefined
-  }
   if (collapseCleanupTimer !== undefined) {
     clearTimeout(collapseCleanupTimer)
     collapseCleanupTimer = undefined
