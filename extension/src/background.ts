@@ -1025,6 +1025,23 @@ async function requestTabAttach(params: JsonObject | undefined): Promise<JsonObj
   } catch (error) {
     if (!isAlreadyAttachedError(error)) throw error
   }
+  const safeSession = (sessionId || "Browser Control").replace(/[<>&"']/g, "")
+  const safeMessage = message.replace(/[<>&"']/g, "")
+  const popupHtml = [
+    "<style>",
+    ":host { all: initial !important; position: fixed !important; top: 10px !important; left: 50% !important; transform: translateX(-50%) !important; z-index: 2147483647 !important; font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif !important; }",
+    ".island { box-sizing: border-box; width: 368px; padding: 10px 14px 11px; border-radius: 24px; background: #09090b; border: 1px solid rgba(251, 191, 36, 0.38); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28), 0 2px 6px rgba(0, 0, 0, 0.16); color: #fafafa; animation: pop 280ms cubic-bezier(0.22, 1.28, 0.36, 1); transform-origin: 50% 0%; }",
+    "@keyframes pop { from { opacity: 0; transform: scale3d(0.45, 0.32, 1); filter: blur(5px); } to { opacity: 1; transform: scale3d(1, 1, 1); filter: blur(0px); } }",
+    ".hdr { display: flex; align-items: center; gap: 7px; font-size: 10.5px; font-weight: 500; color: rgba(161, 161, 170, 0.9); }",
+    ".dot { width: 7px; height: 7px; border-radius: 50%; background: #fbbf24; box-shadow: 0 0 8px #fbbf24; }",
+    ".msg { margin: 5px 0 9px; font-size: 12.5px; font-weight: 560; letter-spacing: -0.01em; color: #fafafa; }",
+    ".btns { display: flex; gap: 6px; }",
+    "button { flex: 1; padding: 6px 12px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.16); font: 600 11.5px/1.2 -apple-system, BlinkMacSystemFont, sans-serif; color: #fff; cursor: pointer; }",
+    ".allow { background: linear-gradient(180deg, rgba(245, 158, 11, 0.96), rgba(217, 119, 6, 0.92)); }",
+    ".deny { background: rgba(148, 163, 184, 0.16); color: #e2e8f0; }",
+    "</style>",
+    `<div class="island"><div class="hdr"><span class="dot"></span><span>${safeSession} · requesting tab</span></div><div class="msg">${safeMessage}</div><div class="btns"><button class="allow" type="button">Allow · ⌘↵</button><button class="deny" type="button">Not now</button></div></div>`,
+  ].join("")
   const evalResult = await chrome.debugger
     .sendCommand(
       { tabId },
@@ -1038,85 +1055,7 @@ async function requestTabAttach(params: JsonObject | undefined): Promise<JsonObj
           const host = document.createElement("div");
           host.id = "__browser_control_tab_request__";
           const shadow = host.attachShadow({ mode: "open" });
-          shadow.innerHTML = \`
-            <style>
-              :host {
-                all: initial !important;
-                position: fixed !important;
-                top: 10px !important;
-                left: 50% !important;
-                transform: translateX(-50%) !important;
-                z-index: 2147483647 !important;
-                font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif !important;
-              }
-              .island {
-                box-sizing: border-box;
-                width: 368px;
-                padding: 10px 14px 11px;
-                border-radius: 24px;
-                background: #09090b;
-                border: 1px solid rgba(251, 191, 36, 0.38);
-                box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28), 0 2px 6px rgba(0, 0, 0, 0.16);
-                color: #fafafa;
-                animation: pop 280ms cubic-bezier(0.22, 1.28, 0.36, 1);
-                transform-origin: 50% 0%;
-              }
-              @keyframes pop {
-                from { opacity: 0; transform: scale3d(0.45, 0.32, 1); filter: blur(5px); }
-                to { opacity: 1; transform: scale3d(1, 1, 1); filter: blur(0px); }
-              }
-              .hdr {
-                display: flex;
-                align-items: center;
-                gap: 7px;
-                font-size: 10.5px;
-                font-weight: 500;
-                color: rgba(161, 161, 170, 0.9);
-              }
-              .dot {
-                width: 7px;
-                height: 7px;
-                border-radius: 50%;
-                background: #fbbf24;
-                box-shadow: 0 0 8px #fbbf24;
-              }
-              .msg {
-                margin: 5px 0 9px;
-                font-size: 12.5px;
-                font-weight: 560;
-                letter-spacing: -0.01em;
-                color: #fafafa;
-              }
-              .btns {
-                display: flex;
-                gap: 6px;
-              }
-              button {
-                flex: 1;
-                padding: 6px 12px;
-                border-radius: 999px;
-                border: 1px solid rgba(255,255,255,0.16);
-                font: 600 11.5px/1.2 -apple-system, BlinkMacSystemFont, sans-serif;
-                color: #fff;
-                cursor: pointer;
-              }
-              .allow {
-                background: linear-gradient(180deg, rgba(245, 158, 11, 0.96), rgba(217, 119, 6, 0.92));
-              }
-              .deny {
-                background: rgba(148, 163, 184, 0.16);
-                color: #e2e8f0;
-              }
-            </style>
-            <div class="island">
-              <div class="hdr"><span class="dot"></span><span>${(sessionId || "Browser Control").replace(/[<>&"']/g, "")} · requesting tab</span></div>
-              <div class="msg">${message.replace(/[<>&"']/g, "")}</div>
-              <div class="btns">
-                <button class="allow" type="button">Allow · ⌘↵</button>
-                <button class="deny" type="button">Not now</button>
-              </div>
-            </div>
-          \`;
+          shadow.innerHTML = ${JSON.stringify(popupHtml)};
           const finish = (ok) => {
             window.removeEventListener("keydown", onKey, true);
             host.remove();
