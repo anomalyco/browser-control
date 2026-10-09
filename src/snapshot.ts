@@ -1189,6 +1189,17 @@ export function createSnapshotHelpers(page: Page, registry: SnapshotRefRegistry)
           (selected.length === 0 && typeof performance !== "undefined" && performance.now() < 2_500)
         ),
       )
+      try {
+        if (typeof document !== "undefined" && document.documentElement && typeof window !== "undefined") {
+          document.documentElement.dataset.bcTelemetry = JSON.stringify({
+            phase: "snapshot",
+            label: `${selected.length} controls`,
+            workStyle: 1,
+            ts: Date.now(),
+          })
+          window.dispatchEvent(new Event("__browser_control_telemetry__"))
+        }
+      } catch {}
       return {
         entries: selected,
         truncated: truncated || selected.length < entries.length,
@@ -1917,28 +1928,44 @@ async function showScreenshotLabels(page: Page): Promise<readonly ScreenshotLabe
     style.textContent = `
       .${markerClass} {
         position: fixed;
-        min-width: 18px;
+        min-width: 20px;
         box-sizing: border-box;
-        padding: 1px 4px;
-        border: 1px solid #7c3aed;
-        border-radius: 4px;
-        background: #a78bfa;
-        color: #111827;
-        font-weight: 700;
-        line-height: 16px;
+        padding: 1.5px 5px;
+        border: 1px solid rgba(255, 255, 255, 0.28);
+        border-bottom-width: 2px;
+        border-radius: 5px;
+        background: rgba(12, 12, 15, 0.92);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        color: #fafafa;
+        font: 700 10.5px/14px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        letter-spacing: -0.02em;
         text-align: center;
-        box-shadow: 0 1px 3px rgba(17, 24, 39, 0.35);
+        box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, 0.35), 0 2px 6px rgba(0, 0, 0, 0.48), 0 0 0 1px rgba(0, 0, 0, 0.55);
+      }
+      .${markerClass}-ring {
+        position: fixed;
+        box-sizing: border-box;
+        border: 1px dashed rgba(52, 211, 153, 0.42);
+        border-radius: 4px;
+        pointer-events: none;
       }
     `
     container.appendChild(style)
 
-    const markers = labels.map((label) => {
+    const markers = labels.flatMap((label) => {
+      const ring = document.createElement("div")
+      ring.className = `${markerClass}-ring`
+      ring.style.left = `${Math.max(0, label.rect.x - 1)}px`
+      ring.style.top = `${Math.max(0, label.rect.y - 1)}px`
+      ring.style.width = `${Math.max(4, label.rect.width + 2)}px`
+      ring.style.height = `${Math.max(4, label.rect.height + 2)}px`
       const marker = document.createElement("div")
       marker.className = markerClass
       marker.textContent = label.ref
-      marker.style.left = `${Math.max(0, label.rect.x)}px`
-      marker.style.top = `${Math.max(0, label.rect.y - 18)}px`
-      return marker
+      marker.style.left = `${Math.max(2, label.rect.x - 4)}px`
+      marker.style.top = `${Math.max(2, label.rect.y - 16)}px`
+      return [ring, marker]
     })
     container.append(...markers)
 

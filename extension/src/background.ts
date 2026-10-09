@@ -933,6 +933,20 @@ async function handleRuntimeMessage(message: unknown, sender: chrome.runtime.Mes
     }
     return
   }
+  if (tabDecision.action === "tab.detach" && typeof sender.tab?.id === "number") {
+    const detachTabId = sender.tab.id
+    forgetAttachedTab(detachTabId)
+    explicitlyDetachingTabs.add(detachTabId)
+    try {
+      await chrome.debugger.detach({ tabId: detachTabId }).catch(() => {})
+    } finally {
+      explicitlyDetachingTabs.delete(detachTabId)
+    }
+    await setTabBadge(detachTabId, "", "#7c3aed", "Attach to Browser Control").catch(() => {})
+    await sendPageStatusMessage(detachTabId, { action: "page-status.clear" })
+    sendMessage(debuggerDetachedEvent({ tabId: detachTabId, reason: "canceled_by_user" }))
+    return
+  }
   const offscreenMessage = message as OffscreenOutgoingMessage
   if (offscreenMessage.action === "recording.chunk") {
     await sendBinaryAfterConnection(encodeRecordingFrame({

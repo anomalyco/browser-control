@@ -359,7 +359,70 @@ export const ghostCursorClientSource = `(() => {
     ].join(";");
   };
 
-  // Tactile specular bloom + SVG variable-stroke shockwave ring
+  // Tactile specular bloom + SVG variable-stroke shockwave ring + magnetic target lock-on halo
+  const inspectTargetAt = (x, y) => {
+    if (typeof document.elementFromPoint !== "function") return null;
+    const hit = document.elementFromPoint(x, y);
+    if (!(hit instanceof Element)) return null;
+    const el = hit.closest("button, a, input, select, textarea, summary, [role='button'], [role='link'], [role='tab'], [role='menuitem'], [role='option'], [role='checkbox'], [role='radio'], [role='switch'], [role='combobox'], label") || hit;
+    const raw = (
+      el.getAttribute("aria-label") ||
+      el.getAttribute("placeholder") ||
+      (el instanceof HTMLInputElement ? el.value || el.name : "") ||
+      el.textContent ||
+      ""
+    ).replace(/\s+/g, " ").trim();
+    const label = raw.length > 26 ? raw.slice(0, 25).trimEnd() + "…" : raw;
+    const rect = el.getBoundingClientRect();
+    const validRect = rect.width >= 16 && rect.height >= 14 && rect.width <= 520 && rect.height <= 180;
+    const radius = validRect ? (window.getComputedStyle(el).borderRadius || "8px") : "8px";
+    return { label, rect: validRect ? rect : null, radius };
+  };
+  const emitTelemetry = (phase, label, workStyle = 0) => {
+    try {
+      if (!document.documentElement) return;
+      document.documentElement.dataset.bcTelemetry = JSON.stringify({ phase, label: label || "", workStyle, ts: Date.now() });
+      window.dispatchEvent(new Event("__browser_control_telemetry__"));
+    } catch {}
+  };
+  const updateTargetHalo = (x, y, phase) => {
+    const info = inspectTargetAt(x, y);
+    if (phase === "move" && info?.label) {
+      emitTelemetry("move", info.label, 0);
+    } else if (phase === "down") {
+      emitTelemetry("down", info?.label || "", 0);
+    }
+    const stage = ensureStage();
+    let halo = document.getElementById("__bc_target_halo__");
+    if (!info?.rect) {
+      if (halo) halo.style.opacity = "0";
+      return;
+    }
+    if (!halo) {
+      halo = document.createElement("div");
+      halo.id = "__bc_target_halo__";
+      halo.style.cssText = "position:fixed;pointer-events:none;box-sizing:border-box;border:1.5px solid rgba(52,211,153,0.65);box-shadow:0 0 16px rgba(52,211,153,0.22),inset 0 0 8px rgba(52,211,153,0.12);transition:left 150ms cubic-bezier(0.22,1,0.36,1),top 150ms cubic-bezier(0.22,1,0.36,1),width 150ms cubic-bezier(0.22,1,0.36,1),height 150ms cubic-bezier(0.22,1,0.36,1),transform 110ms ease,opacity 180ms ease;opacity:0;";
+      stage.appendChild(halo);
+    }
+    const pad = phase === "down" ? 1 : 3;
+    halo.style.left = formatCoord(info.rect.left - pad) + "px";
+    halo.style.top = formatCoord(info.rect.top - pad) + "px";
+    halo.style.width = formatCoord(info.rect.width + pad * 2) + "px";
+    halo.style.height = formatCoord(info.rect.height + pad * 2) + "px";
+    halo.style.borderRadius = info.radius;
+    if (phase === "down") {
+      halo.style.transform = "scale(0.975)";
+      halo.style.borderColor = "rgba(110, 231, 183, 0.92)";
+      halo.style.opacity = "0.95";
+    } else if (phase === "up") {
+      halo.style.transform = "scale(1.035)";
+      halo.style.opacity = "0";
+    } else {
+      halo.style.transform = "scale(1)";
+      halo.style.borderColor = "rgba(52, 211, 153, 0.58)";
+      halo.style.opacity = "0.78";
+    }
+  };
   const spawnClickPulse = (x, y, phase) => {
     const now = clockNow();
     const R = 24 * Math.pow(Math.max(1, state.camera.scale), 0.25);
@@ -840,6 +903,7 @@ export const ghostCursorClientSource = `(() => {
       element.dataset.pressed = "true";
       state.activeUntil = clockNow() + 140;
       applyPosition();
+      updateTargetHalo(action.x, action.y, "down");
       spawnClickPulse(action.x, action.y, "down");
       startLoop();
       scheduleIdleFade();
@@ -850,12 +914,14 @@ export const ghostCursorClientSource = `(() => {
       state.vScale = 2.6;
       state.activeUntil = clockNow() + 360;
       applyPosition();
+      updateTargetHalo(action.x, action.y, "up");
       spawnClickPulse(action.x, action.y, "up");
       startLoop();
       scheduleIdleFade();
       return waitMs(45);
     }
 
+    updateTargetHalo(action.x, action.y, "move");
     if (!state.hasMovedOnce && Array.isArray(action.path) && action.path.length > 2) {
       state.renderedX = action.path[0].x;
       state.renderedY = action.path[0].y;
@@ -1133,6 +1199,13 @@ export const ghostCursorClientSource = `(() => {
       badge.appendChild(lbl);
     }
     stage.appendChild(badge);
+    badge.animate?.(
+      [
+        { opacity: 0, transform: "translate3d(0, 8px, 0) scale(0.88)", filter: "blur(4px)" },
+        { opacity: 1, transform: "translate3d(0, 0, 0) scale(1)", filter: "blur(0px)" },
+      ],
+      { duration: 220, easing: "cubic-bezier(0.22, 1.25, 0.36, 1)" },
+    );
     state.keysTimer = window.setTimeout(() => {
       badge.remove();
       state.keysTimer = undefined;
@@ -1195,6 +1268,13 @@ export const ghostCursorClientSource = `(() => {
     }
     wrap.append(bar, textCol);
     stage.appendChild(wrap);
+    wrap.animate?.(
+      [
+        { opacity: 0, transform: "translate3d(-50%, 10px, 0) scale(0.92)", filter: "blur(4px)" },
+        { opacity: 1, transform: "translate3d(-50%, 0, 0) scale(1)", filter: "blur(0px)" },
+      ],
+      { duration: 240, easing: "cubic-bezier(0.22, 1.22, 0.36, 1)" },
+    );
   };
   const clearCallouts = () => {
     const stage = document.getElementById(stageId);
@@ -1231,9 +1311,16 @@ export const ghostCursorClientSource = `(() => {
     styleChipAtRect(chip, x, y, height, 1);
     container.append(ring, chip);
     stage.appendChild(container);
+    container.animate?.(
+      [
+        { opacity: 0, transform: "scale(0.94)", filter: "blur(3px)" },
+        { opacity: 1, transform: "scale(1)", filter: "blur(0px)" },
+      ],
+      { duration: 210, easing: "cubic-bezier(0.22, 1.2, 0.36, 1)" },
+    );
   };
   globalThis.__browserControlGhostCursor = {
-    version: 14,
+    version: 15,
     show,
     hide,
     restore,
@@ -1315,7 +1402,7 @@ export function ghostCursorRestoreExpression(position: { readonly x: number; rea
 
 async function ensureGhostCursor(page: Page): Promise<void> {
   const installed = await page.evaluate(
-    () => (globalThis as { __browserControlGhostCursor?: { readonly version?: number } }).__browserControlGhostCursor?.version === 14,
+    () => (globalThis as { __browserControlGhostCursor?: { readonly version?: number } }).__browserControlGhostCursor?.version === 15,
   ).catch(() => false)
   if (!installed) {
     await page.evaluate(ghostCursorClientSource)
