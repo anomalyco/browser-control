@@ -954,15 +954,32 @@ async function requestTabAttach(params: JsonObject | undefined): Promise<JsonObj
   const sessionId = optionalStringParam(params, "sessionId")
   const message = optionalStringParam(params, "message") ?? "Allow Browser Control to use this tab?"
   const timeoutMs = optionalNumberParam(params, "timeoutMs") ?? 60_000
-  const targets = await chrome.debugger.getTargets()
-  const activeTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => [])
-  const activeTabId = activeTabs[0]?.id
+  const [targets, allChromeTabs] = await Promise.all([
+    chrome.debugger.getTargets(),
+    chrome.tabs.query({}).catch(() => [] as chrome.tabs.Tab[]),
+  ])
+  const tabMeta = new Map<number, { readonly active: boolean; readonly lastAccessed: number; readonly windowId: number }>()
+  for (const t of allChromeTabs) {
+    if (typeof t.id === "number") {
+      tabMeta.set(t.id, {
+        active: Boolean(t.active),
+        lastAccessed: typeof t.lastAccessed === "number" ? t.lastAccessed : 0,
+        windowId: t.windowId,
+      })
+    }
+  }
   const owned = await getOwnedDebuggerTabIds(chrome.debugger)
   const webTargets = targets.filter(
     (t) => t.type === "page" && typeof t.tabId === "number" && /^https?:\/\//i.test(t.url ?? "") && !t.attached && !owned.has(t.tabId),
   )
-  // Sort active tab first so bare `requestTab()` picks the user's focused unattached tab
-  webTargets.sort((a, b) => (a.tabId === activeTabId ? -1 : b.tabId === activeTabId ? 1 : 0))
+  // Sort visible active tabs first, ordered by most recently accessed
+  webTargets.sort((a, b) => {
+    const ma = tabMeta.get(a.tabId!)
+    const mb = tabMeta.get(b.tabId!)
+    const activeDiff = Number(Boolean(mb?.active)) - Number(Boolean(ma?.active))
+    if (activeDiff !== 0) return activeDiff
+    return (mb?.lastAccessed ?? 0) - (ma?.lastAccessed ?? 0)
+  })
   const matched = webTargets.find((t) => {
     if (urlIncludes && !(t.url ?? "").toLowerCase().includes(urlIncludes)) return false
     if (titleIncludes && !(t.title ?? "").toLowerCase().includes(titleIncludes)) return false
@@ -976,6 +993,10 @@ async function requestTabAttach(params: JsonObject | undefined): Promise<JsonObj
     )
   }
   const tabId = matched.tabId
+  const meta = tabMeta.get(tabId)
+  if (meta?.windowId !== undefined) {
+    await chrome.windows.update(meta.windowId, { focused: true }).catch(() => {})
+  }
   await chrome.tabs.update(tabId, { active: true }).catch(() => {})
   const requestId = `${tabId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   let contentScriptReached = false
