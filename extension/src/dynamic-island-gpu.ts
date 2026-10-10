@@ -181,8 +181,19 @@ fn shadeThreeDots(p: vec2f, center: vec2f, dpr: f32, time: f32, scale: f32) -> v
   }
 
   let ivory = vec3f(0.95, 0.94, 0.91);
-  let hairMask = clamp(1.0 - abs(d * dpr + 0.75), 0.0, 1.0);
-  var rgb = vec3f(0.039, 0.039, 0.045) + ivory * hairMask * 0.14;
+  let e = vec2f(0.75, 0.0);
+  let n = normalize(vec2f(
+    sdRoundedBox(p - center + e.xy, halfSize, rr) - sdRoundedBox(p - center - e.xy, halfSize, rr),
+    sdRoundedBox(p - center + e.yx, halfSize, rr) - sdRoundedBox(p - center - e.yx, halfSize, rr),
+  ) + vec2f(0.0, 1e-5));
+  let top = clamp(-n.y, 0.0, 1.0);
+  let bottom = clamp(n.y, 0.0, 1.0);
+  let edge = clamp(1.0 - abs(d * dpr + 0.75), 0.0, 1.0);
+  let hair = max(edge * 0.6, 1.0 - smoothstep(0.0, 0.9, abs(-d - 1.4)));
+  let inner = 1.0 - smoothstep(0.0, 5.0, -d);
+  // Static rim light from above: an inset top hairline, a faint bottom bounce, and a soft sheen under the top edge.
+  let gleam = hair * (0.06 + 0.5 * top * top + 0.06 * bottom * bottom) + inner * 0.06 * top * top * top;
+  var rgb = vec3f(0.039, 0.039, 0.045) + ivory * gleam;
 
   if (dotsAlpha > 0.005) {
     let dots = shadeThreeDots(p, center, dpr, time, dotScale) * dotsAlpha;
@@ -258,8 +269,18 @@ void main() {
   }
 
   vec3 ivory = vec3(0.95, 0.94, 0.91);
-  float hairMask = clamp(1.0 - abs(d * dpr + 0.75), 0.0, 1.0);
-  vec3 rgb = vec3(0.039, 0.039, 0.045) + ivory * hairMask * 0.14;
+  vec2 e = vec2(0.75, 0.0);
+  vec2 n = normalize(vec2(
+    sdRoundedBox(p - center + e.xy, halfSize, rr) - sdRoundedBox(p - center - e.xy, halfSize, rr),
+    sdRoundedBox(p - center + e.yx, halfSize, rr) - sdRoundedBox(p - center - e.yx, halfSize, rr)
+  ) + vec2(0.0, 1e-5));
+  float top = clamp(-n.y, 0.0, 1.0);
+  float bottom = clamp(n.y, 0.0, 1.0);
+  float edge = clamp(1.0 - abs(d * dpr + 0.75), 0.0, 1.0);
+  float hair = max(edge * 0.6, 1.0 - smoothstep(0.0, 0.9, abs(-d - 1.4)));
+  float inner = 1.0 - smoothstep(0.0, 5.0, -d);
+  float gleam = hair * (0.06 + 0.5 * top * top + 0.06 * bottom * bottom) + inner * 0.06 * top * top * top;
+  vec3 rgb = vec3(0.039, 0.039, 0.045) + ivory * gleam;
 
   if (dotsAlpha > 0.005) {
     vec4 dots = shadeThreeDots(p, center, dpr, time, dotScale) * dotsAlpha;
