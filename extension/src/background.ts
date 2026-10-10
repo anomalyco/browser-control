@@ -731,7 +731,7 @@ async function getTabCaptureStreamId(tabId: number): Promise<string> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     if (message.includes("Extension has not been invoked") || message.includes("activeTab")) {
-      throw new Error(`${message}. Click the Browser Control extension icon on this tab once before recording.`)
+      throw new Error(`${message}. Chrome only allows tab capture after you click the Browser Control extension icon on this tab. To record without a click, use --mode cdp (the auto default for Browser Control-owned tabs).`)
     }
     throw error
   }

@@ -569,6 +569,11 @@ values fail instead of silently clamping. The start result reports the chosen ra
 Tab capture can include audio; CDP requires `ffmpeg` and has no audio. Use the
 command's `--help` for format and cursor options.
 
+Chrome allows tab capture only after the user clicks the Browser Control icon
+on that tab; no extension permission removes this. For agent-run recordings
+with no click, use CDP: it records any debugger-attached tab, and the encode is
+light (about a quarter of one core for a 15 fps 1440x900 MP4).
+
 Playwright mouse actions automatically reveal the on-page Ghost Cursor
 (`distance-glide` motion + `tactile-bloom` click shockwave). When recording a
 user-facing proof or PR walkthrough video, opt into the `ghostCursor` helpers
