@@ -247,6 +247,12 @@ export class BrowserControlSessions {
     return this.pendingSessionWork.has(id)
   }
 
+  /** Sessions holding a drain open, for relay status diagnostics. */
+  busySessions(): readonly { readonly id: string; readonly executing: boolean }[] {
+    const ids = new Set([...this.executing, ...this.pendingSessionWork.keys()])
+    return Array.from(ids, (id) => ({ id, executing: this.executing.has(id) }))
+  }
+
   hasActiveNetworkCapture(): boolean {
     return Array.from(this.sessions.values()).some((session) => session.sandbox.networkStatus().active)
   }

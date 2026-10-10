@@ -14,6 +14,13 @@ export const RelayLifecycleEvent = Schema.TaggedUnion({
   Requested: requestFields,
   Cancelled: requestFields,
   Stopping: requestFields,
+  Closing: { instanceId: RelayShutdownRequest.fields.instanceId },
+  // The shutdown deadline passed with work still held; sessions reattach from the catalog after restart.
+  ShutdownForced: {
+    instanceId: RelayShutdownRequest.fields.instanceId,
+    elapsedMs: Schema.Number,
+    holders: Schema.Array(Schema.String),
+  },
   Closed: { instanceId: RelayShutdownRequest.fields.instanceId },
   Ready: {
     instanceId: RelayShutdownRequest.fields.instanceId,

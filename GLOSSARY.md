@@ -58,6 +58,14 @@ pre-commit timeout or cancellation leaves the old daemon running. Browser tabs
 and durable session identity are preserved; JavaScript state and refs reset.
 _Avoid_: Session reset, tab replacement, implicit client upgrade
 
+**Relay Shutdown**:
+What a signalled daemon does, including after a committed restart: it closes
+admission and gives accepted work a bounded grace period, then forces teardown.
+Persisted session identity is frozen first, so sessions reattach on the next
+daemon. While admission is closed, the daemon reports its **drain** (phase,
+start, and holders: the requests or sessions it is still waiting on).
+_Avoid_: Restart drain (the reversible pre-commit wait of a Relay Restart)
+
 **Extension Protocol**:
 The compatibility version reported by the extension when it connects to the
 Local Driver Daemon. Store and npm release versions may differ while this

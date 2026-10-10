@@ -68,6 +68,26 @@ export function relayBuildProblem(version: RelayVersion, buildId = browserContro
   return undefined
 }
 
+/** Describes a relay that has stopped accepting work, including what it still waits on. */
+export function relayDrainProblem(version: RelayVersion): string | undefined {
+  const drain = version.drain
+  if (!drain) return undefined
+  const phase = drain.phase === "draining"
+    ? "draining for an explicit restart"
+    : drain.phase === "stopping" ? "stopping after an explicit restart" : "shutting down"
+  const holders = drain.holders.length ? `waiting on ${drain.holders.join(", ")}` : "no remaining work reported"
+  return `Relay has been ${phase} for ${formatElapsed(drain.elapsedMs)} (since ${drain.since}); ${holders}.`
+}
+
+function formatElapsed(milliseconds: number): string {
+  const seconds = Math.floor(milliseconds / 1_000)
+  const hours = Math.floor(seconds / 3_600)
+  const minutes = Math.floor((seconds % 3_600) / 60)
+  if (hours > 0) return `${hours}h ${minutes}m`
+  if (minutes > 0) return `${minutes}m ${seconds % 60}s`
+  return `${seconds}s`
+}
+
 export const ensureRelay = Effect.fn("RelayLifecycle.ensureRelay")(function* (options: EnsureRelayOptions) {
   const buildId = options.buildId ?? browserControlBuildId
   const probe = options.relay.version

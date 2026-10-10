@@ -217,6 +217,9 @@ export function closeHttpServer(server: http.Server): Effect.Effect<void, Error>
       }
       resume(Effect.void)
     })
+    // Everything worth finishing has settled or hit the shutdown deadline; a lingering
+    // request or keep-alive socket must not hold the listener open.
+    server.closeAllConnections()
     return Effect.void
   })
 }

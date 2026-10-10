@@ -252,6 +252,15 @@ export const ExtensionStatus = Schema.Struct({
 
 export interface ExtensionStatus extends Schema.Schema.Type<typeof ExtensionStatus> {}
 
+export const RelayDrain = Schema.Struct({
+  phase: Schema.Literals(["draining", "stopping", "closing"]),
+  since: Schema.String,
+  elapsedMs: Schema.Number,
+  holders: Schema.Array(Schema.String),
+})
+
+export interface RelayDrain extends Schema.Schema.Type<typeof RelayDrain> {}
+
 export const RelayVersion = Schema.Struct({
   version: Schema.String,
   buildId: Schema.optionalKey(Schema.String),
@@ -260,6 +269,7 @@ export const RelayVersion = Schema.Struct({
   pid: Schema.optionalKey(Schema.Number),
   managed: Schema.optionalKey(Schema.Boolean),
   shutdownProtocol: Schema.optionalKey(Schema.Literal(2)),
+  drain: Schema.optionalKey(RelayDrain),
 })
 
 export interface RelayVersion extends Schema.Schema.Type<typeof RelayVersion> {}
