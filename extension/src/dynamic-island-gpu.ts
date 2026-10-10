@@ -111,7 +111,8 @@ const WGSL_SOURCE = /* wgsl */ `
 struct Uniforms {
   u0: vec4f, // canvasW, canvasH, dpr, time
   u1: vec4f, // islandW, islandH, radius, topY
-  u2: vec4f, // dotsAlpha, unused, presence, dotScale
+  u2: vec4f, // dotsAlpha, tint, presence, dotScale
+  u3: vec4f, // rimTint, rimWidth, pad, pad
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
 
@@ -181,16 +182,29 @@ fn shadeThreeDots(p: vec2f, center: vec2f, dpr: f32, time: f32, scale: f32) -> v
   }
 
   let ivory = vec3f(0.95, 0.94, 0.91);
-  let hairMask = clamp(1.0 - abs(d * dpr + 0.75), 0.0, 1.0);
-  var rgb = vec3f(0.039, 0.039, 0.045) + ivory * hairMask * 0.14;
+  let tint = mix(clamp(u.u3.x, 0.0, 1.0), clamp(u.u2.y, 0.0, 1.0), smoothstep(0.5, max(u.u3.y, 0.6), -d));
+  let e = vec2f(0.75, 0.0);
+  let n = normalize(vec2f(
+    sdRoundedBox(p - center + e.xy, halfSize, rr) - sdRoundedBox(p - center - e.xy, halfSize, rr),
+    sdRoundedBox(p - center + e.yx, halfSize, rr) - sdRoundedBox(p - center - e.yx, halfSize, rr),
+  ) + vec2f(0.0, 1e-5));
+  let top = clamp(-n.y, 0.0, 1.0);
+  let bottom = clamp(n.y, 0.0, 1.0);
+  let edge = clamp(1.0 - abs(d * dpr + 0.75), 0.0, 1.0);
+  let hair = max(edge * 0.6, 1.0 - smoothstep(0.0, 0.9, abs(-d - 1.4)));
+  let inner = 1.0 - smoothstep(0.0, 5.0, -d);
+  // Static rim light from above: bright top hairline, faint bottom bounce, soft inner sheen under the top edge.
+  let gleam = hair * (0.06 + 0.5 * top * top + 0.06 * bottom * bottom) + inner * 0.06 * top * top * top;
+  var col = vec4f(vec3f(0.039, 0.039, 0.045) * tint, tint) + vec4f(ivory * gleam, gleam);
+  col = min(col, vec4f(1.0));
 
   if (dotsAlpha > 0.005) {
     let dots = shadeThreeDots(p, center, dpr, time, dotScale) * dotsAlpha;
-    rgb = rgb * (1.0 - dots.a) + dots.rgb;
+    col = col * (1.0 - dots.a) + dots;
   }
 
   let a = cov * presence;
-  return vec4f(min(rgb, vec3f(1.0)) * a, a + shadow * (1.0 - a));
+  return vec4f(col.rgb * a, col.a * a + shadow * (1.0 - cov));
 }
 `
 
@@ -209,7 +223,8 @@ in vec2 v_uv;
 out vec4 fragColor;
 uniform vec4 u0; // canvasW, canvasH, dpr, time
 uniform vec4 u1; // islandW, islandH, radius, topY
-uniform vec4 u2; // dotsAlpha, unused, presence, dotScale
+uniform vec4 u2; // dotsAlpha, tint, presence, dotScale
+uniform vec4 u3; // rimTint, rimWidth, pad, pad
 
 float sdRoundedBox(vec2 p, vec2 b, float r) {
   vec2 q = abs(p) - b + r;
@@ -258,16 +273,27 @@ void main() {
   }
 
   vec3 ivory = vec3(0.95, 0.94, 0.91);
-  float hairMask = clamp(1.0 - abs(d * dpr + 0.75), 0.0, 1.0);
-  vec3 rgb = vec3(0.039, 0.039, 0.045) + ivory * hairMask * 0.14;
+  float tint = mix(clamp(u3.x, 0.0, 1.0), clamp(u2.y, 0.0, 1.0), smoothstep(0.5, max(u3.y, 0.6), -d));
+  vec2 e = vec2(0.75, 0.0);
+  vec2 n = normalize(vec2(
+    sdRoundedBox(p - center + e.xy, halfSize, rr) - sdRoundedBox(p - center - e.xy, halfSize, rr),
+    sdRoundedBox(p - center + e.yx, halfSize, rr) - sdRoundedBox(p - center - e.yx, halfSize, rr)
+  ) + vec2(0.0, 1e-5));
+  float top = clamp(-n.y, 0.0, 1.0);
+  float bottom = clamp(n.y, 0.0, 1.0);
+  float edge = clamp(1.0 - abs(d * dpr + 0.75), 0.0, 1.0);
+  float hair = max(edge * 0.6, 1.0 - smoothstep(0.0, 0.9, abs(-d - 1.4)));
+  float inner = 1.0 - smoothstep(0.0, 5.0, -d);
+  float gleam = hair * (0.06 + 0.5 * top * top + 0.06 * bottom * bottom) + inner * 0.06 * top * top * top;
+  vec4 col = min(vec4(vec3(0.039, 0.039, 0.045) * tint, tint) + vec4(ivory * gleam, gleam), vec4(1.0));
 
   if (dotsAlpha > 0.005) {
     vec4 dots = shadeThreeDots(p, center, dpr, time, dotScale) * dotsAlpha;
-    rgb = rgb * (1.0 - dots.a) + dots.rgb;
+    col = col * (1.0 - dots.a) + dots;
   }
 
   float a = cov * presence;
-  fragColor = vec4(min(rgb, vec3(1.0)) * a, a + shadow * (1.0 - a));
+  fragColor = vec4(col.rgb * a, col.a * a + shadow * (1.0 - cov));
 }
 `
 
@@ -288,7 +314,7 @@ async function initWebGpuBackend(canvas: HTMLCanvasElement): Promise<GpuBackend 
     context.configure({ device, format, alphaMode: "premultiplied" })
     const module = device.createShaderModule({ code: WGSL_SOURCE })
     const uniformBuffer = device.createBuffer({
-      size: 48,
+      size: 64,
       usage: 0x0040 | 0x0008,
     })
     const bindGroupLayout = device.createBindGroupLayout({
@@ -316,7 +342,7 @@ async function initWebGpuBackend(canvas: HTMLCanvasElement): Promise<GpuBackend 
     })
     return {
       draw(uniforms: Float32Array) {
-        device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer, uniforms.byteOffset, 48)
+        device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer, uniforms.byteOffset, 64)
         const encoder = device.createCommandEncoder()
         const pass = encoder.beginRenderPass({
           colorAttachments: [{
@@ -367,6 +393,7 @@ function initWebGl2Backend(canvas: HTMLCanvasElement): GpuBackend | null {
     const u0Loc = gl.getUniformLocation(prog, "u0")
     const u1Loc = gl.getUniformLocation(prog, "u1")
     const u2Loc = gl.getUniformLocation(prog, "u2")
+    const u3Loc = gl.getUniformLocation(prog, "u3")
     return {
       draw(uniforms: Float32Array) {
         gl.viewport(0, 0, canvas.width, canvas.height)
@@ -376,6 +403,7 @@ function initWebGl2Backend(canvas: HTMLCanvasElement): GpuBackend | null {
         gl.uniform4fv(u0Loc, uniforms.subarray(0, 4))
         gl.uniform4fv(u1Loc, uniforms.subarray(4, 8))
         gl.uniform4fv(u2Loc, uniforms.subarray(8, 12))
+        gl.uniform4fv(u3Loc, uniforms.subarray(12, 16))
         gl.drawArrays(gl.TRIANGLES, 0, 6)
       },
     }
@@ -418,7 +446,15 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
   return t * t * (3 - 2 * t)
 }
 
+export type IslandMaterial = {
+  readonly tint: number
+  readonly rimTint: number
+  readonly rimWidth: number
+  readonly frost: number
+}
+
 export class DynamicIslandRig {
+  material: IslandMaterial = { tint: 1, rimTint: 0.25, rimWidth: 6, frost: 0 }
   private readonly w = new Spring(COMPACT_W)
   private readonly h = new Spring(COMPACT_H)
   private readonly presence = new Spring(0, 0.001)
@@ -427,6 +463,7 @@ export class DynamicIslandRig {
   private readonly prompt = new Spring(0, 0.001)
   private readonly actions = new Spring(0, 0.001)
   private readonly markEl: SVGSVGElement
+  private readonly lens: GlassLens
   private tone: IslandTone | undefined
   private visible = false
   private exitResolve: (() => void) | undefined
@@ -436,7 +473,7 @@ export class DynamicIslandRig {
   private lastTime = 0
   private simTime = 0
   private virtualMode = false
-  private readonly uniforms = new Float32Array(12)
+  private readonly uniforms = new Float32Array(16)
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -448,6 +485,7 @@ export class DynamicIslandRig {
     contentEl.style.top = `${TOP_Y}px`
     this.markEl = createMark()
     canvas.after(this.markEl)
+    this.lens = new GlassLens(canvas)
     this.syncCanvasResolution()
     this.setVisible(true)
     void this.ensureBackend()
@@ -563,6 +601,8 @@ export class DynamicIslandRig {
     reveal(this.contentEl.querySelector<HTMLElement>("#__browser_control_prompt__"), prompt, room, 6)
     reveal(this.contentEl.querySelector<HTMLElement>("#__browser_control_actions__"), actions, room, 8)
 
+    this.lens.update(w, h, r, smoothstep(0, 0.4, presence), this.material.frost)
+
     if (this.exitResolve && this.presence.resting && this.presence.target === 0) {
       this.exitResolve()
       this.exitResolve = undefined
@@ -580,7 +620,10 @@ export class DynamicIslandRig {
       buf[6] = r
       buf[7] = TOP_Y
       buf[8] = clamp01(dots)
-      buf[9] = 0
+      // Smoky glass while compact; denser once unfolded so the prompt stays legible over any page.
+      buf[9] = this.lens.active ? this.material.tint : 1
+      buf[12] = this.lens.active ? this.material.rimTint : 1
+      buf[13] = this.material.rimWidth
       buf[10] = smoothstep(0, 0.4, presence)
       buf[11] = scale * (0.55 + 0.45 * clamp01(dots))
       this.backend.draw(buf)
@@ -620,14 +663,132 @@ export class DynamicIslandRig {
   }
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg"
+const LENS_FILTER_ID = "__browser_control_lens__"
+
+// Refracts the page beneath the island: a backdrop-filter SVG displacement whose map bends the rim inward like thick glass.
+// Chromium-only (backdrop-filter: url()), and disabled when the page CSP blocks data: images or transparency is reduced.
+class GlassLens {
+  active = false
+  private readonly element = document.createElement("div")
+  private readonly filter = document.createElementNS(SVG_NS, "filter")
+  private readonly map = document.createElementNS(SVG_NS, "feImage")
+  private readonly displace = document.createElementNS(SVG_NS, "feDisplacementMap")
+  private readonly blur = document.createElementNS(SVG_NS, "feGaussianBlur")
+  private readonly scratch = document.createElement("canvas")
+  private mapKey = ""
+
+  constructor(before: Element) {
+    const svg = document.createElementNS(SVG_NS, "svg")
+    svg.setAttribute("aria-hidden", "true")
+    svg.style.cssText = "position:absolute;width:0;height:0;overflow:hidden;"
+    this.filter.id = LENS_FILTER_ID
+    const attributes = { filterUnits: "userSpaceOnUse", primitiveUnits: "userSpaceOnUse", "color-interpolation-filters": "sRGB", x: "0", y: "0" }
+    for (const [name, value] of Object.entries(attributes)) this.filter.setAttribute(name, value)
+    this.map.setAttribute("result", "map")
+    this.map.setAttribute("preserveAspectRatio", "none")
+    this.map.setAttribute("x", "0")
+    this.map.setAttribute("y", "0")
+    this.displace.setAttribute("in", "SourceGraphic")
+    this.displace.setAttribute("in2", "map")
+    this.displace.setAttribute("xChannelSelector", "R")
+    this.displace.setAttribute("yChannelSelector", "G")
+    const saturate = document.createElementNS(SVG_NS, "feColorMatrix")
+    saturate.setAttribute("type", "saturate")
+    saturate.setAttribute("values", "1.35")
+    this.blur.setAttribute("edgeMode", "duplicate")
+    this.filter.append(this.map, this.displace, this.blur, saturate)
+    svg.append(this.filter)
+    this.element.style.cssText = `position:absolute;display:none;pointer-events:none;backdrop-filter:url(#${LENS_FILTER_ID});`
+    before.before(svg, this.element)
+
+    if (window.matchMedia?.("(prefers-reduced-transparency: reduce)").matches) return
+    this.scratch.width = this.scratch.height = 1
+    const probe = new Image()
+    probe.onload = () => {
+      this.active = true
+    }
+    probe.src = this.scratch.toDataURL()
+  }
+
+  update(w: number, h: number, r: number, opacity: number, frost: number): void {
+    if (!this.active || opacity <= 0.001) {
+      this.element.style.display = "none"
+      return
+    }
+    const key = `${Math.round(w)}x${Math.round(h)}`
+    if (key !== this.mapKey) {
+      this.mapKey = key
+      this.map.setAttribute("href", lensMap(this.scratch, Math.max(2, Math.round(w)), Math.max(2, Math.round(h)), r))
+      this.displace.setAttribute("scale", Math.min(20, h * 0.6).toFixed(1))
+    }
+    this.blur.setAttribute("stdDeviation", frost.toFixed(2))
+    for (const node of [this.filter, this.map]) {
+      node.setAttribute("width", w.toFixed(2))
+      node.setAttribute("height", h.toFixed(2))
+    }
+    const style = this.element.style
+    style.display = "block"
+    style.left = `${(ISLAND_CANVAS_W / 2 - w / 2).toFixed(2)}px`
+    style.top = `${TOP_Y}px`
+    style.width = `${w.toFixed(2)}px`
+    style.height = `${h.toFixed(2)}px`
+    style.borderRadius = `${r.toFixed(2)}px`
+    style.opacity = opacity.toFixed(3)
+  }
+}
+
+// R/G encode the sampling offset: zero in the flat interior, ramping up across a rim bevel and pointing inward.
+function lensMap(canvas: HTMLCanvasElement, w: number, h: number, r: number): string {
+  canvas.width = w
+  canvas.height = h
+  const context = canvas.getContext("2d")
+  if (!context) return ""
+  const image = context.createImageData(w, h)
+  const bx = w / 2
+  const by = h / 2
+  const rr = Math.min(r, bx, by)
+  const bevel = Math.max(4, Math.min(14, h * 0.4))
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const px = x + 0.5 - bx
+      const py = y + 0.5 - by
+      const qx = Math.abs(px) - bx + rr
+      const qy = Math.abs(py) - by + rr
+      let nx = 0
+      let ny = 0
+      let d: number
+      if (qx > 0 && qy > 0) {
+        const length = Math.hypot(qx, qy)
+        d = length - rr
+        nx = (qx / length) * Math.sign(px)
+        ny = (qy / length) * Math.sign(py)
+      } else if (qx > qy) {
+        d = qx - rr
+        nx = Math.sign(px)
+      } else {
+        d = qy - rr
+        ny = Math.sign(py)
+      }
+      const falloff = (1 - clamp01(-d / bevel)) ** 3
+      const i = (y * w + x) * 4
+      image.data[i] = 128 - nx * falloff * 127
+      image.data[i + 1] = 128 - ny * falloff * 127
+      image.data[i + 2] = 128
+      image.data[i + 3] = 255
+    }
+  }
+  context.putImageData(image, 0, 0)
+  return canvas.toDataURL()
+}
+
 // The Browser Control mark: the same macOS arrow the ghost cursor uses.
 function createMark(): SVGSVGElement {
-  const ns = "http://www.w3.org/2000/svg"
-  const svg = document.createElementNS(ns, "svg")
+  const svg = document.createElementNS(SVG_NS, "svg")
   svg.setAttribute("viewBox", "1.1 0.5 14.4 20.8")
   svg.setAttribute("aria-hidden", "true")
   svg.style.cssText = `position:absolute;left:${ISLAND_CANVAS_W / 2}px;top:0;width:8.3px;height:12px;opacity:0;pointer-events:none;overflow:visible;transform-origin:50% 50%;will-change:transform,opacity;`
-  const path = document.createElementNS(ns, "path")
+  const path = document.createElementNS(SVG_NS, "path")
   path.setAttribute(
     "d",
     "M2.1 1.5 L2.1 17.6 L6.0 13.8 L8.5 19.5 C8.75 20.05 9.4 20.3 9.95 20.05 L11.05 19.55 C11.6 19.3 11.85 18.65 11.6 18.1 L9.1 12.4 L14.5 12.4 L2.1 1.5 Z",
