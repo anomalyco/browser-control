@@ -1,5 +1,17 @@
 # @opencode-ai/browser-control
 
+## 0.9.0
+
+### Minor Changes
+
+- 2c5a316: Add a package-managed OpenCode plugin entrypoint that registers Browser Control's
+  bundled MCP server and exposes its packaged workflow through the existing
+  `@browser` skill mention.
+
+### Patch Changes
+
+- 35f4700: Accept extension connections from OpenCode Browser, which can stand in for the Browser Control extension.
+
 ## 0.8.4
 
 ### Patch Changes
