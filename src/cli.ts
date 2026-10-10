@@ -12,6 +12,7 @@ import { parseAdditionalExtensionOrigins } from "./relay-helpers.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"
 import type { ExecuteAftermath, ExecuteLogEntry, ExecuteResponse, NetworkStatusResponse, NetworkStopResponse, RecordingQuality } from "./relay-schema.ts"
 import { startRelay } from "./relay.ts"
+import { installSignalDeadline, shutdownTimeoutConfig } from "./relay-shutdown.ts"
 import { defaultJournalBaseDir, formatJournalEntry, readJournalEntries } from "./session-journal.ts"
 import * as SessionStore from "./session-store.ts"
 import { browserControlVersion } from "./version.ts"
@@ -242,8 +243,10 @@ const serve = Command.make(
   Effect.fn("Cli.serve")(function* () {
     const port = yield* RelayClient.portConfig
     const additionalExtensionOrigins = parseAdditionalExtensionOrigins(yield* RelayClient.extensionOriginsConfig)
+    const shutdownTimeoutMs = yield* shutdownTimeoutConfig
     yield* Effect.scoped(
       Effect.gen(function* () {
+        yield* installSignalDeadline(Math.max(0, shutdownTimeoutMs) + 5_000)
         const relay = yield* startRelay({ port, additionalExtensionOrigins })
         yield* Console.log(`browser-control relay listening at ${relay.url}`)
         yield* Console.log("Load extension/dist as an unpacked extension and click the toolbar button to attach a tab.")
@@ -552,7 +555,7 @@ const status = Command.make(
     if (json) {
       yield* Console.log(JSON.stringify({
         endpoint: relay.endpoint,
-        relay: { running: true, version: version.version, buildId: version.buildId ?? null, stale: buildProblem !== undefined },
+        relay: { running: true, version: version.version, buildId: version.buildId ?? null, stale: buildProblem !== undefined, drain: version.drain ?? null },
         extension: extensionStatus,
         currentSession: current ?? null,
         sessions,
@@ -566,6 +569,10 @@ const status = Command.make(
     yield* Console.log(`Relay: ${relay.endpoint} (${version.version})`)
     if (buildProblem) {
       yield* Console.log(`Warning: ${buildProblem}`)
+    }
+    const drainProblem = RelayLifecycle.relayDrainProblem(version)
+    if (drainProblem) {
+      yield* Console.log(`Warning: ${drainProblem}`)
     }
     yield* Console.log(`Extension: ${extensionStatus.connected ? "connected" : "disconnected"}${extensionStatus.version ? ` (${extensionStatus.version})` : ""}`)
     if ((extensionStatus.rejectedConnections ?? 0) > 0) {

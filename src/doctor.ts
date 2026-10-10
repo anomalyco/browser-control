@@ -1,7 +1,7 @@
 import { Effect, FileSystem, Path, Schema } from "effect"
 import * as RelayClient from "./relay-client.ts"
-import { relayBuildProblem } from "./relay-lifecycle.ts"
-import type { ExtensionStatus, RelayVersion, SessionSummary, TargetSummary } from "./relay-schema.ts"
+import { relayBuildProblem, relayDrainProblem } from "./relay-lifecycle.ts"
+import type { ExtensionStatus, RelayDrain, RelayVersion, SessionSummary, TargetSummary } from "./relay-schema.ts"
 import { extensionProtocolVersion } from "./protocol.ts"
 import * as SessionStore from "./session-store.ts"
 import { browserControlBuildId, browserControlVersion } from "./version.ts"
@@ -73,6 +73,7 @@ export type DoctorReport = {
     readonly version: string | null
     readonly buildId: string | null
     readonly buildMatches: boolean | null
+    readonly drain: RelayDrain | null
     readonly error: string | null
   }
   readonly extension: {
@@ -250,6 +251,7 @@ export const createDoctorReport = Effect.fn("Doctor.createReport")(function* (op
       version: relayResult.ok ? relayResult.value.version : null,
       buildId: relayResult.ok ? relayResult.value.buildId ?? null : null,
       buildMatches: relayBuildMatches,
+      drain: relayResult.ok ? relayResult.value.drain ?? null : null,
       error: relayResult.ok ? null : relayResult.error,
     },
     extension: {
@@ -346,6 +348,7 @@ function buildDoctorChecks(options: {
       message: options.relayResult.ok ? `reachable (${options.relayResult.value.version})` : options.relayResult.error,
     },
     relayBuildCheck({ relayResult: options.relayResult, cliBuildId: browserControlBuildId }),
+    relayDrainCheck(options.relayResult),
     {
       id: "extension-connected",
       label: "extension connection",
@@ -415,6 +418,13 @@ const makeDoctorCheck = (id: string, label: string) => (status: DoctorCheckStatu
   status,
   message,
 })
+
+export function relayDrainCheck(relayResult: ProbeResult<RelayVersion>): DoctorCheck {
+  const check = makeDoctorCheck("relay-drain", "relay admission")
+  if (!relayResult.ok) return check("fail", "relay unreachable")
+  const problem = relayDrainProblem(relayResult.value)
+  return problem ? check("fail", problem) : check("ok", "accepting work")
+}
 
 export function unhealthyTargetsCheck(options: {
   readonly targetsResult: ProbeResult<readonly TargetSummary[]>
@@ -510,6 +520,9 @@ function buildDoctorRecommendations(options: {
   const relayBuildRecommendations = options.relayResult.ok
     ? [relayBuildProblem(options.relayResult.value)].filter((message) => message !== undefined)
     : []
+  const relayDrainRecommendations = options.relayResult.ok && options.relayResult.value.drain
+    ? [`The relay exits by itself once its shutdown deadline passes. If it is still ${options.relayResult.value.drain.phase} after that, stop relay process ${options.relayResult.value.pid ?? "(pid unknown)"} and run any command to start a fresh relay; sessions reattach from the catalog.`]
+    : []
   const extensionRecommendations = options.relayResult.ok && options.extensionResult.ok && !options.extensionResult.value.connected
     ? options.extensionResult.value.protocolCompatible === false
       ? ["Update the Browser Control extension or npm package so their extension protocols are compatible."]
@@ -530,6 +543,7 @@ function buildDoctorRecommendations(options: {
   return [
     ...relayRecommendations,
     ...relayBuildRecommendations,
+    ...relayDrainRecommendations,
     ...extensionRecommendations,
     ...connectionConflictRecommendations,
     ...artifactRecommendations,
@@ -559,7 +573,7 @@ export function formatDoctorReport(report: DoctorReport): string {
     `Endpoint: ${report.endpoint}`,
     `CLI: ${report.cli.version} (${report.cli.buildId})`,
     `Package: ${report.package.name && report.package.version ? `${report.package.name} ${report.package.version}` : report.package.error ?? "unknown"}`,
-    `Relay: ${report.relay.reachable ? `reachable (${report.relay.version ?? "unknown"}, ${report.relay.buildId ?? "unknown build"})` : `unreachable (${report.relay.error ?? "unknown error"})`}`,
+    `Relay: ${report.relay.reachable ? `reachable (${report.relay.version ?? "unknown"}, ${report.relay.buildId ?? "unknown build"})${report.relay.drain ? `, ${report.relay.drain.phase}` : ""}` : `unreachable (${report.relay.error ?? "unknown error"})`}`,
     `Extension: ${formatExtensionSummary(report)}`,
     `Targets: active=${formatNullableNumber(report.targets.active)} child=${formatNullableNumber(report.targets.child)} relay-owned=${report.targets.relayOwned.length} unhealthy=${report.targets.unhealthy.length}`,
     `Sessions: current=${report.sessions.current ?? "none"} total=${report.sessions.all.length} connected=${report.sessions.all.filter((session) => {

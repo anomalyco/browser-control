@@ -3,7 +3,7 @@ import { TestClock } from "effect/testing"
 import { describe, expect, it, vi } from "vitest"
 import { RelayLifecycleEvent } from "../src/relay-lifecycle-log.ts"
 import { RelayShutdownRequest } from "../src/relay-schema.ts"
-import { RelayShutdown } from "../src/relay-shutdown.ts"
+import { installSignalDeadline, RelayShutdown } from "../src/relay-shutdown.ts"
 
 const request = RelayShutdownRequest.make({
   instanceId: "relay-test",
@@ -381,5 +381,53 @@ describe("RelayShutdown", () => {
       expect(shutdown.accepting).toBe(false)
       expect(yield* Effect.flip(shutdown.track(Effect.void))).toMatchObject({ reason: "busy" })
     }))
+  })
+
+  it("reports drain phase, start time, and holders while not accepting work", async () => {
+    await Effect.runPromise(Effect.gen(function* () {
+      const draining = yield* Latch.make()
+      const finish = yield* Latch.make()
+      const { shutdown } = fixture({
+        drain: draining.open.pipe(Effect.andThen(finish.await)),
+        holders: () => ["session instant-hover has pending work"],
+      })
+      expect(shutdown.status()).toBeUndefined()
+      const restart = yield* Effect.forkChild(shutdown.request(request))
+      yield* draining.await
+      const status = shutdown.status(Date.parse(shutdown.status()!.since) + 1_500)
+      expect(status).toMatchObject({ phase: "draining", elapsedMs: 1_500, holders: ["session instant-hover has pending work"] })
+      yield* finish.open
+      yield* Fiber.join(restart)
+      expect(shutdown.status()?.phase).toBe("stopping")
+      yield* shutdown.close()
+      expect(shutdown.status()).toMatchObject({ phase: "closing", since: status?.since })
+    }))
+  })
+})
+
+describe("installSignalDeadline", () => {
+  it("exits after the deadline following a signal, and immediately on a second signal", async () => {
+    const exit = vi.spyOn(process, "exit").mockImplementation(() => undefined as never)
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {})
+    let installed: ((signal: NodeJS.Signals) => void) | undefined
+    try {
+      await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+        const onSignal = yield* installSignalDeadline(20)
+        installed = onSignal
+        expect(process.listeners("SIGTERM")).toContain(onSignal)
+        onSignal("SIGTERM")
+        expect(exit).not.toHaveBeenCalled()
+        yield* Effect.sleep("60 millis")
+        expect(exit).toHaveBeenLastCalledWith(143)
+        onSignal("SIGINT")
+        expect(exit).toHaveBeenCalledTimes(2)
+        expect(exit).toHaveBeenLastCalledWith(130)
+      })))
+      expect(process.listeners("SIGTERM")).not.toContain(installed)
+      expect(process.listeners("SIGINT")).not.toContain(installed)
+    } finally {
+      exit.mockRestore()
+      errors.mockRestore()
+    }
   })
 })

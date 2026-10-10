@@ -645,6 +645,11 @@ Common diagnoses:
   safe shutdown protocol 2. Legacy relays need a one-time coordinated manual
   stop; foreground/source or newer relays are never force-killed or downgraded.
   MCP observational tools remain available on a mismatch.
+- `Relay is draining…` or `Relay is shutting down…`: `status` and `doctor`
+  show the phase, how long it has lasted, and what holds it. A shutting-down
+  relay forces teardown after `BROWSER_CONTROL_SHUTDOWN_TIMEOUT_MS` (default
+  10s) and the next command starts a fresh relay; named sessions reattach. A
+  restart drain that cannot finish is cancelled and the old relay keeps running.
 - Unexpected restart: inspect private endpoint-scoped
   `~/.browser-control/relays/<port>/lifecycle.jsonl` for requester/build/instance
   metadata. Preparing or selecting a development candidate must not restart the

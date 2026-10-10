@@ -4,7 +4,7 @@ import crypto from "node:crypto"
 import fs from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { Clock, Config, Effect, Option, Semaphore } from "effect"
+import { Clock, Config, Effect, Fiber, Option, Semaphore } from "effect"
 import { WebSocket, WebSocketServer, type RawData } from "ws"
 import {
   removeDefaultLightColorSchemeEmulation,
@@ -60,7 +60,7 @@ import { RecordingRelay } from "./recording-relay.ts"
 import { FlightRecorderRelay } from "./flight-recorder.ts"
 import { appendManagedRelayProcessLog } from "./relay-log.ts"
 import { appendRelayLifecycleEvent, RelayLifecycleEvent } from "./relay-lifecycle-log.ts"
-import { RelayShutdown } from "./relay-shutdown.ts"
+import { RelayShutdown, shutdownTimeoutConfig } from "./relay-shutdown.ts"
 import { ProtectedFrameTracker } from "./protected-frames.ts"
 import { RootTargetLifecycle } from "./root-target-lifecycle.ts"
 import { boundedToken, runtimeFailureKind, summarizeDiagnosticUrl, summarizeRuntimeEvaluate } from "./runtime-diagnostics.ts"
@@ -548,6 +548,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   }
   const managed = yield* Config.Boolean("BROWSER_CONTROL_MANAGED_RELAY").pipe(Config.withDefault(false))
   const restartTimeoutMs = yield* Config.Int("BROWSER_CONTROL_RESTART_TIMEOUT_MS").pipe(Config.withDefault(10_000))
+  const shutdownTimeoutMs = yield* shutdownTimeoutConfig
   const idleTabTtlMs = yield* Config.Int("BROWSER_CONTROL_IDLE_TAB_TTL_MS").pipe(Config.withDefault(15 * 60_000))
   const restartRequestId = yield* Config.option(Config.String("BROWSER_CONTROL_RESTART_REQUEST_ID"))
   const lifecycleLogPath = path.join(path.dirname(defaultSessionCatalogPath(port)), "lifecycle.jsonl")
@@ -566,6 +567,15 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       if (Array.from(cdpClients).some((client) => !cdpClients.isSandbox(client))) return "raw-clients"
       if (recordingRelay.hasActiveRecordings() || flightRecorder.hasActiveRecorders() || sessions.hasActiveNetworkCapture()) return "recordings"
       return undefined
+    },
+    holders: () => {
+      const rawClients = Array.from(cdpClients).filter((client) => !cdpClients.isSandbox(client)).length
+      return [
+        ...sessions.busySessions().map((session) => `session ${session.id} ${session.executing ? "executing" : "has pending work"}`),
+        ...(rawClients > 0 ? [`${rawClients} raw CDP client(s)`] : []),
+        ...(recordingRelay.hasActiveRecordings() || flightRecorder.hasActiveRecorders() || sessions.hasActiveNetworkCapture() ? ["active recordings or network captures"] : []),
+        ...(rootLifecycle.isIdle() ? [] : ["tab setup in progress"]),
+      ]
     },
     settle: settleRootWork(),
     quiescent: () => rootLifecycle.isIdle() && sessions.isDrained(),
@@ -742,9 +752,31 @@ const makeRelay = Effect.fnUntraced(function* (options: {
 
   const cleanup = Effect.fnUntraced(function* () {
     if (idleReapTimer) clearInterval(idleReapTimer)
-    yield* shutdownControl.close().pipe(Effect.ignore)
-    yield* sessions.closeAll()
-    yield* rootLifecycle.close()
+    if (managed) {
+      yield* audit(RelayLifecycleEvent.cases.Closing.make({ instanceId: browserId })).pipe(
+        Effect.catch(() => Effect.sync(() => console.error("Failed to record relay closing lifecycle event"))),
+      )
+    }
+    // Accepted work gets a bounded grace period. A stuck execute, handoff, or Playwright
+    // disconnect must not keep a signalled relay alive; sessions reattach from the catalog.
+    const graceful = yield* Effect.forkDetach(Effect.gen(function* () {
+      yield* shutdownControl.close().pipe(Effect.ignore)
+      yield* sessions.closeAll()
+      yield* rootLifecycle.close()
+    }))
+    const settled = yield* Fiber.join(graceful).pipe(Effect.interruptible, Effect.timeoutOption(Math.max(0, shutdownTimeoutMs)))
+    // Teardown below detaches targets; only the graceful phase may change persisted ownership.
+    catalogWritesEnabled = false
+    if (Option.isNone(settled)) {
+      const status = shutdownControl.status()
+      const holders = status?.holders ?? []
+      console.error(`[browser-control relay] shutdown deadline (${shutdownTimeoutMs}ms) passed; forcing close${holders.length ? ` while waiting on: ${holders.join(", ")}` : ""}`)
+      if (managed) {
+        yield* audit(RelayLifecycleEvent.cases.ShutdownForced.make({ instanceId: browserId, elapsedMs: status?.elapsedMs ?? shutdownTimeoutMs, holders })).pipe(
+          Effect.catch(() => Effect.sync(() => console.error("Failed to record forced relay shutdown lifecycle event"))),
+        )
+      }
+    }
     if (managed) {
       yield* audit(RelayLifecycleEvent.cases.Closed.make({ instanceId: browserId })).pipe(
         Effect.catch(() => Effect.sync(() => console.error("Failed to record relay shutdown lifecycle event"))),
@@ -755,7 +787,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     yield* Effect.tryPromise(() => recordingRelay.cleanupAll("Relay closed")).pipe(Effect.ignore)
     yield* Effect.tryPromise(() => flightRecorder.cleanupAll()).pipe(Effect.ignore)
     for (const socket of cdpClients) {
-      socket.close()
+      if (Option.isSome(settled)) socket.close()
+      else socket.terminate()
     }
     extensionRpc.close()
     yield* closeWebSocketServer(websocketServer).pipe(logCloseError("Failed to close websocket server"))
