@@ -1,5 +1,5 @@
 import type { PageStatus } from "../../src/protocol.ts"
-import { DynamicIslandRig, ISLAND_CANVAS_H, ISLAND_CANVAS_W, springCss } from "./dynamic-island-gpu.ts"
+import { DynamicIslandRig, islandStyleSheet } from "./dynamic-island-gpu.ts"
 import { pageStatusFromJson, pageStatusView } from "./page-status.ts"
 
 const hostId = "__browser_control_page_status__"
@@ -160,85 +160,7 @@ function renderStatus(): void {
     host.id = hostId
     const shadow = host.attachShadow({ mode: "open" })
     const style = document.createElement("style")
-    style.textContent = `
-      :host {
-        all: initial !important;
-        position: fixed !important;
-        top: 0 !important;
-        left: 50% !important;
-        width: ${ISLAND_CANVAS_W}px !important;
-        height: ${ISLAND_CANVAS_H}px !important;
-        transform: translateX(-50%) !important;
-        z-index: 2147483647 !important;
-        pointer-events: none !important;
-        user-select: none !important;
-        contain: layout style !important;
-      }
-      :host([data-interactive="true"]) {
-        user-select: text !important;
-      }
-      #__browser_control_island_canvas__ {
-        position: absolute;
-        left: 0;
-        top: 0;
-        width: ${ISLAND_CANVAS_W}px;
-        height: ${ISLAND_CANVAS_H}px;
-        pointer-events: none;
-      }
-      #__browser_control_status__ {
-        position: absolute;
-        box-sizing: border-box;
-        overflow: hidden;
-        padding: 12px 14px;
-        display: flex;
-        flex-direction: column;
-        justify-content: space-between;
-        color: rgba(248, 248, 250, 0.96);
-        font: 540 12.5px/1.28 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
-        letter-spacing: -0.012em;
-        pointer-events: none;
-        opacity: 0;
-      }
-      #__browser_control_prompt__, #__browser_control_actions__ {
-        opacity: 0;
-        transform-origin: 50% 0%;
-        will-change: transform, opacity;
-      }
-      #__browser_control_prompt__ {
-        margin: 0;
-        color: #f4f3ef;
-        font: 560 12.5px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-        letter-spacing: -0.012em;
-        text-align: center;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-      }
-      #__browser_control_actions__ {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-      }
-      button {
-        box-sizing: border-box;
-        flex: 1;
-        padding: 5.5px 12px;
-        border: 0;
-        border-radius: 999px;
-        background: #f4f3ef;
-        box-shadow: inset 0 0.5px 0 #ffffff, 0 1px 2px rgba(0, 0, 0, 0.32);
-        color: #09090b;
-        cursor: pointer;
-        font: 600 11.5px/1.2 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-        letter-spacing: -0.01em;
-        pointer-events: auto;
-        transition: transform ${springCss({ visualDuration: 0.3, bounce: 0.3 })}, opacity 120ms ease;
-      }
-      button:hover { opacity: 0.92; }
-      button:active { transform: scale(0.96); transition-duration: 90ms; transition-timing-function: ease-out; }
-      button:disabled { cursor: default; opacity: 0.65; }
-      button:focus-visible { outline: 2px solid #f4f3ef; outline-offset: 2px; }
-    `
+    style.textContent = islandStyleSheet
     const canvas = document.createElement("canvas")
     canvas.id = "__browser_control_island_canvas__"
     const status = document.createElement("div")
