@@ -142,7 +142,7 @@ export const ghostCursorClientSource = `(() => {
   const initialX = Math.round(window.innerWidth / 2);
   const initialY = Math.round(window.innerHeight / 2);
   let virtualTime = null;
-  const clockNow = () => virtualTime !== null ? virtualTime : clockNow();
+  const clockNow = () => virtualTime !== null ? virtualTime : performance.now();
 
   const state = {
     element: null,

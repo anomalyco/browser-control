@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { chromium } from "playwright-core"
 import { createSnapshotHelpers } from "../src/execute.ts"
+import { ghostCursorClientSource, ghostCursorMouseActionExpression } from "../src/ghost-cursor.ts"
 
 // Real DOM and Playwright locators: deliberately separate from browser-free unit tests.
 const browser = await chromium.launch()
@@ -524,6 +525,27 @@ try {
     const modalPortalSnap = await snapshot()
     assert.match(modalPortalSnap, /textbox "Where from\?" \[ref=e\d+\]/)
     assert.match(modalPortalSnap, /option "San Francisco International Airport \(SFO\) Save" \[ref=e\d+\]/)
+  })
+  await check("ghost cursor runs on the real clock", async () => {
+    await page.setContent('<main><button style="margin:120px">Create</button></main>')
+    const errors: string[] = []
+    const onError = (error: Error) => errors.push(error.message)
+    page.on("pageerror", onError)
+    try {
+      await page.evaluate(ghostCursorClientSource)
+      for (const action of [
+        { type: "move", x: 180, y: 140, button: "none" },
+        { type: "down", x: 180, y: 140, button: "left" },
+        { type: "up", x: 180, y: 140, button: "left" },
+      ] as const) {
+        await page.evaluate(ghostCursorMouseActionExpression(action))
+      }
+      await page.waitForTimeout(400)
+      assert.deepEqual(errors, [])
+      assert.equal(await page.locator("#__browser_control_ghost_cursor__").count(), 1)
+    } finally {
+      page.off("pageerror", onError)
+    }
   })
 } finally {
   await browser.close()
