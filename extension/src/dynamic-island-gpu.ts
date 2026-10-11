@@ -74,7 +74,7 @@ class Spring {
 }
 
 // Samples a critically/under-damped spring into a CSS linear() easing, the same trick Motion uses for CSS springs.
-export function springCss(transition: SpringTransition): string {
+function springCss(transition: SpringTransition): string {
   const { omega, zeta } = springConstants(transition)
   const h = 1 / 480
   const points = [0]
@@ -95,8 +95,8 @@ export function springCss(transition: SpringTransition): string {
   return `${Math.round(elapsed * 1000)}ms linear(${sampled.map((value) => value.toFixed(4)).join(", ")})`
 }
 
-export const ISLAND_CANVAS_W = 420
-export const ISLAND_CANVAS_H = 128
+const ISLAND_CANVAS_W = 420
+const ISLAND_CANVAS_H = 128
 
 const COMPACT_W = 52
 const IDLE_W = 38
@@ -106,6 +106,101 @@ const EXPANDED_W = 324
 const EXPANDED_H = 82
 const EXPANDED_R = 22
 const TOP_Y = 8
+const VIEWPORT_MARGIN = 8
+// Room below the card for its shadow.
+const SHADOW_ROOM = 28
+
+/** Shared by the content script and visual harnesses so both render the exact same card. */
+export const islandStyleSheet = `
+:host {
+  all: initial !important;
+  position: fixed !important;
+  top: 0 !important;
+  left: 50% !important;
+  width: ${ISLAND_CANVAS_W}px !important;
+  height: var(--bc-island-h, ${ISLAND_CANVAS_H}px) !important;
+  transform: translateX(-50%) !important;
+  z-index: 2147483647 !important;
+  pointer-events: none !important;
+  user-select: none !important;
+  contain: layout style !important;
+}
+:host([data-interactive="true"]) {
+  user-select: text !important;
+}
+#__browser_control_island_canvas__ {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: ${ISLAND_CANVAS_W}px;
+  height: var(--bc-island-h, ${ISLAND_CANVAS_H}px);
+  pointer-events: none;
+}
+#__browser_control_status__ {
+  position: absolute;
+  box-sizing: border-box;
+  overflow: hidden;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 10px;
+  color: rgba(248, 248, 250, 0.96);
+  font: 540 12.5px/1.28 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", system-ui, sans-serif;
+  letter-spacing: -0.012em;
+  pointer-events: none;
+  opacity: 0;
+}
+#__browser_control_prompt__, #__browser_control_actions__ {
+  opacity: 0;
+  transform-origin: 50% 0%;
+  will-change: transform, opacity;
+}
+#__browser_control_prompt__ {
+  flex: 0 1 auto;
+  min-height: 0;
+  margin: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  color: #f4f3ef;
+  font: 560 12.5px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  letter-spacing: -0.012em;
+  text-align: center;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(244, 243, 239, 0.3) transparent;
+}
+#__browser_control_prompt__[data-multiline="true"] {
+  text-align: left;
+}
+#__browser_control_actions__ {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+button {
+  box-sizing: border-box;
+  flex: 1;
+  padding: 5.5px 12px;
+  border: 0;
+  border-radius: 999px;
+  background: #f4f3ef;
+  box-shadow: inset 0 0.5px 0 #ffffff, 0 1px 2px rgba(0, 0, 0, 0.32);
+  color: #09090b;
+  cursor: pointer;
+  font: 600 11.5px/1.2 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  letter-spacing: -0.01em;
+  pointer-events: auto;
+  transition: transform ${springCss({ visualDuration: 0.3, bounce: 0.3 })}, opacity 120ms ease;
+}
+button:hover { opacity: 0.92; }
+button:active { transform: scale(0.96); transition-duration: 90ms; transition-timing-function: ease-out; }
+button:disabled { cursor: default; opacity: 0.65; }
+button:focus-visible { outline: 2px solid #f4f3ef; outline-offset: 2px; }
+`
 
 const WGSL_SOURCE = /* wgsl */ `
 struct Uniforms {
@@ -458,26 +553,72 @@ export class DynamicIslandRig {
   private simTime = 0
   private virtualMode = false
   private readonly uniforms = new Float32Array(12)
+  // The unfolded card hugs its content: long prompts wrap and grow it, bounded by the viewport.
+  private cardW = EXPANDED_W
+  private cardH = EXPANDED_H
+  private canvasH = ISLAND_CANVAS_H
+  private readonly onResize = () => {
+    if (this.tone === "waiting") this.fitCard(true)
+  }
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
     private readonly contentEl: HTMLElement,
   ) {
-    contentEl.style.width = `${EXPANDED_W}px`
-    contentEl.style.height = `${EXPANDED_H}px`
-    contentEl.style.left = `${(ISLAND_CANVAS_W - EXPANDED_W) / 2}px`
     contentEl.style.top = `${TOP_Y}px`
+    this.placeCard()
     this.markEl = createMark()
     canvas.after(this.markEl)
     this.syncCanvasResolution()
     this.setVisible(true)
+    window.addEventListener("resize", this.onResize)
     void this.ensureBackend()
+  }
+
+  private placeCard(): void {
+    this.contentEl.style.width = `${this.cardW}px`
+    this.contentEl.style.height = `${this.cardH}px`
+    this.contentEl.style.left = `${((ISLAND_CANVAS_W - this.cardW) / 2).toFixed(2)}px`
+  }
+
+  /** Measures the rendered prompt and actions; retargets the unfold when `animate` and the size changed. */
+  private fitCard(animate: boolean): void {
+    const width = Math.min(EXPANDED_W, Math.max(160, window.innerWidth - VIEWPORT_MARGIN * 2))
+    const maxHeight = Math.max(EXPANDED_H, window.innerHeight - TOP_Y - VIEWPORT_MARGIN - SHADOW_ROOM)
+    this.contentEl.style.width = `${width}px`
+    this.contentEl.style.height = "auto"
+    const height = Math.min(maxHeight, Math.max(EXPANDED_H, Math.ceil(this.contentEl.offsetHeight)))
+    const prompt = this.contentEl.querySelector<HTMLElement>("#__browser_control_prompt__")
+    if (prompt) {
+      const lineHeight = Number.parseFloat(getComputedStyle(prompt).lineHeight) || 16
+      prompt.dataset.multiline = String(prompt.scrollHeight > lineHeight * 1.5)
+    }
+    const changed = Math.abs(width - this.cardW) > 0.5 || Math.abs(height - this.cardH) > 0.5
+    this.cardW = width
+    this.cardH = height
+    this.placeCard()
+    this.ensureCanvasHeight(TOP_Y + height + SHADOW_ROOM)
+    if (animate && changed) {
+      this.w.to(width, UNFOLD.width)
+      this.h.to(height, { ...UNFOLD.height, delay: 0 })
+      this.startLoop()
+    }
+  }
+
+  private ensureCanvasHeight(height: number): void {
+    const next = Math.max(ISLAND_CANVAS_H, Math.ceil(height))
+    if (next === this.canvasH) return
+    this.canvasH = next
+    const root = this.canvas.getRootNode()
+    const host = root instanceof ShadowRoot ? root.host : this.canvas.parentElement
+    if (host instanceof HTMLElement) host.style.setProperty("--bc-island-h", `${next}px`)
+    this.syncCanvasResolution()
   }
 
   private syncCanvasResolution(): number {
     const dpr = Math.min(2.5, Math.max(1, window.devicePixelRatio || 1))
     const pw = Math.round(ISLAND_CANVAS_W * dpr)
-    const ph = Math.round(ISLAND_CANVAS_H * dpr)
+    const ph = Math.round(this.canvasH * dpr)
     if (this.canvas.width !== pw || this.canvas.height !== ph) {
       this.canvas.width = pw
       this.canvas.height = ph
@@ -495,6 +636,7 @@ export class DynamicIslandRig {
 
   configure(tone: IslandTone): void {
     this.setVisible(true)
+    if (tone === "waiting") this.fitCard(this.tone === "waiting")
     if (tone !== this.tone) {
       this.transition(this.tone, tone)
       this.tone = tone
@@ -524,8 +666,8 @@ export class DynamicIslandRig {
 
   private transition(from: IslandTone | undefined, to: IslandTone): void {
     if (to === "waiting") {
-      this.w.to(EXPANDED_W, UNFOLD.width)
-      this.h.to(EXPANDED_H, UNFOLD.height)
+      this.w.to(this.cardW, UNFOLD.width)
+      this.h.to(this.cardH, UNFOLD.height)
       this.dots.to(0, UNFOLD.dots)
       this.mark.to(0, UNFOLD.dots)
       this.prompt.to(1, UNFOLD.prompt)
@@ -568,13 +710,15 @@ export class DynamicIslandRig {
     const scale = 0.45 + 0.55 * presence
     const w = this.w.step(dt) * scale
     const h = this.h.step(dt) * scale
+    // Radius and reveal track the base unfold range, so a tall card is as round and as quick as a short one.
     const unfold = clamp01((this.h.x - COMPACT_H) / (EXPANDED_H - COMPACT_H))
-    const room = smoothstep(0.45, 0.9, Math.min(unfold, clamp01((this.w.x - COMPACT_W) / (EXPANDED_W - COMPACT_W))))
+    const room = smoothstep(0.45, 0.9, Math.min(unfold, clamp01((this.w.x - COMPACT_W) / (this.cardW - COMPACT_W))))
     const r = (COMPACT_R + (EXPANDED_R - COMPACT_R) * unfold) * scale
+    if (this.tone !== "waiting" && this.h.resting) this.ensureCanvasHeight(ISLAND_CANVAS_H)
 
     // Clip the fixed-layout card to the live island shape so text is masked by the surface instead of reflowing.
-    const side = (EXPANDED_W - w) / 2
-    const bottom = EXPANDED_H - h
+    const side = (this.cardW - w) / 2
+    const bottom = this.cardH - h
     this.contentEl.style.clipPath = `inset(0 ${side.toFixed(2)}px ${bottom.toFixed(2)}px ${side.toFixed(2)}px round ${r.toFixed(2)}px)`
     this.contentEl.style.opacity = presence > 0.001 ? "1" : "0"
     this.contentEl.style.pointerEvents = this.tone === "waiting" && actions > 0.6 ? "auto" : "none"
@@ -593,7 +737,7 @@ export class DynamicIslandRig {
       const dpr = this.syncCanvasResolution()
       const buf = this.uniforms
       buf[0] = ISLAND_CANVAS_W
-      buf[1] = ISLAND_CANVAS_H
+      buf[1] = this.canvasH
       buf[2] = dpr
       buf[3] = this.simTime
       buf[4] = w
@@ -632,6 +776,7 @@ export class DynamicIslandRig {
   }
 
   destroy(): void {
+    window.removeEventListener("resize", this.onResize)
     if (this.rafId) {
       window.cancelAnimationFrame(this.rafId)
       this.rafId = 0
