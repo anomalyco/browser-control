@@ -4,6 +4,11 @@ Browser Control is a local browser driver for trusted agents. It controls the
 user's existing Chromium-family browser through a small MV3 extension shim and a
 local Node relay.
 
+## Private Kit Tool
+
+Commit and push straight to `main`, no PRs. Merge any open PR without asking.
+After pushing, update the installed copy. See `~/code/control/AGENTS.md`.
+
 ## Source Of Truth
 
 - Keep `PLAN.md` updated when architecture, scope, install flow, or product
