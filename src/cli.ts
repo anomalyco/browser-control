@@ -18,6 +18,7 @@ import { browserControlVersion } from "./version.ts"
 
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const sessionIdConfig = Config.option(Config.String("BROWSER_CONTROL_SESSION"))
+const agentSessionIdConfig = Config.option(Config.String("OPENCODE_SESSION_ID"))
 const targetUrlConfig = Config.option(Config.String("BROWSER_CONTROL_TARGET_URL"))
 const targetIndexConfig = Config.option(Config.Int("BROWSER_CONTROL_TARGET_INDEX"))
 const encodedCliOperandsMarker = "bc-cli-operands:v1"
@@ -274,12 +275,13 @@ const execute = Command.make(
   {
     code: Argument.String("code").pipe(Argument.variadic({ min: 0 })),
     file: Flag.String("file").pipe(Flag.optional, Flag.withDescription("Read execute code from a file")),
-    session: sessionFlag("Continue an existing Browser Control session; omit to create a fresh one"),
+    session: sessionFlag("Continue an existing session; defaults to the OpenCode agent's session"),
+    rm: Flag.Boolean("rm").pipe(Flag.withDefault(false), Flag.withDescription("Use a fresh one-shot session and close its tabs afterward")),
     targetUrl: Flag.String("target-url").pipe(Flag.optional, Flag.withDescription("Use the attached page whose URL contains this text")),
     targetIndex: Flag.Int("target-index").pipe(Flag.optional, Flag.withDescription("Use the attached page at this zero-based index")),
     json: Flag.Boolean("json").pipe(Flag.withDefault(false), Flag.withDescription("Print a machine-readable result envelope: { ok, isError, text, value, valueUnavailable, error?, logs, warnings, diagnostic?, aftermath, session }")),
   },
-  Effect.fn("Cli.execute")(function* ({ code, file, session, targetUrl, targetIndex, json }) {
+  Effect.fn("Cli.execute")(function* ({ code, file, session, rm, targetUrl, targetIndex, json }) {
     const run = Effect.gen(function* () {
       const relay = yield* RelayClient.Service
       const filePath = Option.getOrUndefined(file)
@@ -292,6 +294,9 @@ const execute = Command.make(
       const executeCode = filePath ? yield* readExecuteFile(filePath) : code.join(" ")
       yield* ensureCliRelayAndExtension()
       const explicitSessionId = Option.getOrUndefined(session) ?? Option.getOrUndefined(yield* sessionIdConfig)
+      if (rm && explicitSessionId) return yield* Effect.fail(new Error("Use --rm without --session or BROWSER_CONTROL_SESSION"))
+      const agentSessionId = Option.getOrUndefined(yield* agentSessionIdConfig)
+      const workSessionId = explicitSessionId ?? (!rm && agentSessionId ? `oc-${agentSessionId}` : undefined)
       const targetUrlValue = Option.getOrUndefined(targetUrl) ?? Option.getOrUndefined(yield* targetUrlConfig)
       const targetIndexValue = Option.getOrUndefined(targetIndex) ?? Option.getOrUndefined(yield* targetIndexConfig)
       if (targetIndexValue !== undefined && targetIndexValue < 0) {
@@ -301,9 +306,10 @@ const execute = Command.make(
         return yield* Effect.fail(new Error("Use only one target selector: --target-url/BROWSER_CONTROL_TARGET_URL or --target-index/BROWSER_CONTROL_TARGET_INDEX"))
       }
       const result = yield* relay.execute({
-        ...(explicitSessionId ? { sessionId: explicitSessionId } : {}),
+        ...(workSessionId ? { sessionId: workSessionId } : {}),
         code: executeCode,
         createIfMissing: !explicitSessionId,
+        ...(rm ? { removeAfterExecute: true } : {}),
         ...(targetUrlValue || targetIndexValue !== undefined
           ? {
             targetSelection: {
@@ -319,7 +325,7 @@ const execute = Command.make(
             : error,
         ),
       )
-      if (!explicitSessionId) {
+      if (!explicitSessionId && !rm) {
         yield* Console.error(formatSessionContinuation(result.session.id))
       }
       return result

@@ -60,7 +60,7 @@ export interface ExecuteSandboxLike {
   /** Shutdown and handoff cancellation await disconnection without closing or forgetting the default tab. */
   disconnectSettled(): Effect.Effect<void, Error>
   /** Adoption rollback cleanup does not settle before started Playwright close promises settle. */
-  closeSettled(): Effect.Effect<void, Error>
+  closeSettled(options?: { readonly clearState?: boolean }): Effect.Effect<void, Error>
   networkStart(options?: NetworkCaptureOptions): Effect.Effect<NetworkCaptureStatus, Error>
   networkStatus(): NetworkCaptureStatus
   networkStop(options?: NetworkCaptureStopOptions): Effect.Effect<NetworkCaptureResult, Error>

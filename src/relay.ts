@@ -65,6 +65,7 @@ import { ProtectedFrameTracker } from "./protected-frames.ts"
 import { RootTargetLifecycle } from "./root-target-lifecycle.ts"
 import { boundedToken, runtimeFailureKind, summarizeDiagnosticUrl, summarizeRuntimeEvaluate } from "./runtime-diagnostics.ts"
 import { shouldExposeChildTarget, TargetRegistry, type RootTargetChange, type TargetOwnershipChange } from "./target-registry.ts"
+import { TabActivity } from "./tab-activity.ts"
 import { browserControlBuildId, browserControlVersion } from "./version.ts"
 
 export const startRelay = Effect.fn("Relay.start")(function* (options: {
@@ -173,6 +174,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     : new SessionCatalog(options.sessionCatalogPath ?? defaultSessionCatalogPath(port))
   let catalogWritesEnabled = false
   const registry = new TargetRegistry()
+  const tabActivity = new TabActivity((tabId, enabled) => sendDebuggerCommand({
+    tabId, method: "Emulation.setFocusEmulationEnabled", params: { enabled },
+  }))
+  let orphanSweepComplete = false
   type TabGroupingMethod = "tabs.group" | "tabs.ungroup"
   const pendingTabGrouping = new Map<number, TabGroupingMethod>()
   const tabGroupingWorkers = new Map<number, Promise<void>>()
@@ -234,6 +239,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     while (true) {
       const target = registry.targetsByTargetId.get(targetId)
       if (target && (extensionRpc.connected || extensionRpc.protocolLegacy === true)) {
+        if (target.owner !== "relay") return
         yield* sendToExtension({ method: "tabs.remove", params: { tabId: target.tabId } })
         return
       }
@@ -430,6 +436,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           }
           activeHandoffTabs.delete(sessionId)
         }
+        return executing ? Effect.void : tabActivity.finish(sessionId)
       },
       onExecuteRecord: (record) => {
         const entry = makeJournalEntry({
@@ -452,6 +459,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         reconcileTargetOwnership(change)
       },
       onReleaseRelayTarget: (targetId) => releaseRelayTarget(targetId),
+      getTargets: () => registry.listRootTargets(),
       onSessionsChanged: async (entries) => {
         if (catalogWritesEnabled) await sessionCatalog?.save(entries)
       },
@@ -732,9 +740,13 @@ const makeRelay = Effect.fnUntraced(function* (options: {
             isTargetBusy: (targetId) => {
               const target = registry.targetsByTargetId.get(targetId)
               if (!target) return false
-              return handoffs.pendingForTab(target.tabId) !== undefined || recordingRelay.isRecordingTab(target.tabId)
+              return isTabBusy(target.tabId)
             },
-          }),
+          }).pipe(Effect.andThen(() => Effect.forEach(
+            tabActivity.idleUserTargets(registry.listRootTargets(), Date.now(), idleTabTtlMs),
+            (target) => detachIdleUserTarget(target.targetInfo.targetId).pipe(Effect.ignore),
+            { discard: true },
+          ))),
         ).catch(() => {})
       }, 60_000)
     : undefined
@@ -962,6 +974,10 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           }
           extensionRpc.markReady()
           for (const target of registry.listRootTargets()) refreshTabGrouping(target.tabId)
+          if (!orphanSweepComplete) {
+            orphanSweepComplete = true
+            void Effect.runPromise(sessions.sweepOrphanedRelayTargets())
+          }
         } else {
           socket.close(1011, "Target inventory reconciliation failed")
         }
@@ -973,6 +989,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
         announcedRootTabIds.add(eventTabId)
         const openerTabId = getNumber(message.params, "openerTabId")
         const openerTarget = openerTabId !== undefined ? registry.routingRootTarget(openerTabId) : undefined
+        const storedSessionId = getString(message.params, "browserControlSessionId")
+        const storedTargetId = getString(message.params, "targetId")
         rootLifecycle.queue({
           tabId: eventTabId,
           attachIfMissing: true,
@@ -982,6 +1000,8 @@ const makeRelay = Effect.fnUntraced(function* (options: {
           ...(openerTarget ? {
             owner: openerTarget.owner,
             ...(openerTarget.browserControlSessionId ? { browserControlSessionId: openerTarget.browserControlSessionId } : {}),
+          } : storedTargetId && storedSessionId && message.params?.owner === "relay" ? {
+            owner: "relay", browserControlSessionId: storedSessionId, expectedTargetId: storedTargetId,
           } : {}),
         })
       }
@@ -1464,6 +1484,11 @@ const makeRelay = Effect.fnUntraced(function* (options: {
       catch: (error) => error instanceof Error ? error : new Error(String(error)),
     })
     const { tabId } = route
+    tabActivity.touch(tabId)
+    const executingSession = cdpClients.sessionId(socket)
+    if (executingSession && sessions.isExecuting(executingSession)) {
+      yield* tabActivity.focus(tabId, executingSession)
+    }
     if (
       route.chromeSessionId === undefined &&
       (normalizedMessage.method === "Page.addScriptToEvaluateOnNewDocument" ||
@@ -1479,7 +1504,9 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     const command = {
       tabId,
       method: normalizedMessage.method,
-      params: normalizedMessage.params ?? {},
+      params: normalizedMessage.method === "Emulation.setFocusEmulationEnabled"
+        ? { enabled: tabActivity.isFocused(tabId) }
+        : normalizedMessage.params ?? {},
       ...(route.chromeSessionId === undefined ? {} : { sessionId: route.chromeSessionId }),
     }
     const sessionId = message.sessionId
@@ -1535,6 +1562,20 @@ const makeRelay = Effect.fnUntraced(function* (options: {
     yield* rootLifecycle.attach({ tabId, owner: "user" })
   })
 
+  function isTabBusy(tabId: number): boolean {
+    // Unowned user tabs are visible to every sandbox, including explicit selectors.
+    return handoffs.pendingForTab(tabId) !== undefined || recordingRelay.isRecordingTab(tabId) ||
+      flightRecorder.isActiveTab(tabId) ||
+      Array.from(sessions.sessions.keys()).some((id) => sessions.isExecuting(id) || sessions.hasPendingWork(id) || sessions.sessions.get(id)?.sandbox.networkStatus().active)
+  }
+
+  const detachIdleUserTarget = Effect.fnUntraced(function* (targetId: string) {
+    const target = registry.targetsByTargetId.get(targetId)
+    if (!target || target.owner !== "user" || isTabBusy(target.tabId)) return
+    yield* sendToExtension({ method: "debugger.detach", params: { tabId: target.tabId } })
+    detachTargetState(target.tabId)
+  })
+
   const createAndAttachTab = Effect.fnUntraced(function* (options: {
     readonly url: string
     readonly active: boolean
@@ -1571,6 +1612,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   })
 
   function presentAttachedTarget(committedTarget: ConnectedTarget): void {
+    tabActivity.touch(committedTarget.tabId)
     const tabId = committedTarget.tabId
     mainFrameIdsByTab.set(tabId, committedTarget.targetInfo.targetId)
     contextDebugLog?.(`target-attached kind=root ${targetDiagnosticIdentity(committedTarget)} ${summarizeDiagnosticUrl(committedTarget.targetInfo.url)}`)
@@ -1610,6 +1652,7 @@ const makeRelay = Effect.fnUntraced(function* (options: {
   })
 
   function clearTabRuntimeState(tabId: number): void {
+    tabActivity.forget(tabId)
     inputLocks.delete(tabId)
     mainFrameIdsByTab.delete(tabId)
     utilityWorldNamesByTab.delete(tabId)

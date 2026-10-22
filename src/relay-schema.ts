@@ -61,6 +61,7 @@ export const ExecuteRequest = Schema.Struct({
   sessionId: Schema.optionalKey(Schema.String),
   code: Schema.String,
   createIfMissing: Schema.Boolean,
+  removeAfterExecute: Schema.optionalKey(Schema.Boolean),
   targetSelection: Schema.optionalKey(TargetSelection),
 })
 

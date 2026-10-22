@@ -81,6 +81,30 @@ const fixture = Effect.fnUntraced(function* () {
 })
 
 describe("root target lifecycle", () => {
+  it("attachment starts unfocused and reconciliation never enables focus or buffering domains", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const f = yield* fixture()
+      const focus: unknown[] = []
+      f.state.intercept = (command) => {
+        if (command.params?.method === "Emulation.setFocusEmulationEnabled") focus.push(command.params.params)
+        return undefined
+      }
+      yield* f.lifecycle.attach({ tabId: 1, owner: "user" })
+      yield* f.lifecycle.reconcile(1)
+      expect(focus).toEqual([{ enabled: false }])
+      expect(f.commands).not.toContain("Network.enable")
+      expect(f.commands).not.toContain("Runtime.enable")
+    })))
+  })
+
+  it("does not restore stale relay ownership onto a recycled tab id", async () => {
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const f = yield* fixture()
+      const target = yield* f.lifecycle.attach({ tabId: 1, owner: "relay", browserControlSessionId: "dead", expectedTargetId: "old-target" })
+      expect(target.owner).toBe("user")
+      expect(target.browserControlSessionId).toBeUndefined()
+    })))
+  })
   it.each([
     ["Page.enable", 1],
     ["Target.getTargetInfo", 1],

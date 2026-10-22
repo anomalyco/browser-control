@@ -54,6 +54,17 @@ Agent / MCP client / CLI
 
 ### Sessions, Target Ownership & CDP Routing
 
+- Bare OpenCode CLI calls reuse `oc-$OPENCODE_SESSION_ID`; `execute --rm` creates
+  a fresh one-shot session and cleans it in the relay even if the caller exits.
+- Reset, delete, and the 15-minute idle reap close all session-owned relay tabs,
+  including popups. Reaping clears JavaScript state and disconnects CDP while
+  retaining explicit session names. User tabs detach after 15 minutes without closing.
+- Focus emulation lasts only for active execute work. Debugger recovery does
+  not eagerly enable Runtime or Network; tab groups keep their collapsed state.
+- The extension remembers exact relay-owned target identities across reconnects.
+  One startup inventory sweep closes known agent tabs whose session is gone;
+  tabs with unknown provenance remain user-owned.
+
 - `TargetRegistry` is the sole live target-ownership authority. Session state
   retains one durable default-target identity and owner (`relay` or `user`),
   persisted per port under `~/.browser-control/relays/<port>/sessions.json`.

@@ -57,23 +57,25 @@ Completion: one execute returns a page result and a readable session id, or
 
 ### 2. Choose The Page Deliberately
 
-The bundled shim 0.0.25 verifies debugger ownership during reconnection. Reload
+The bundled shim 0.0.26 preserves tab ownership during reconnection. Reload
 the unpacked extension after installing this shim update. DevTools-attached tabs
 are excluded from Browser Control's inventory. `page.title()` reads time out
 after five seconds if the page execution context remains unavailable; the read
 timeout does not close or replace the tab.
 
-A bare CLI execute creates a fresh session-owned page and prints the exact
-`--session <id>` continuation command, or you can pass a descriptive session
-name (including an optional emoji, which appears directly on the browser tab
-group and in-page status pill). Every later CLI call must pass that id or set
-`BROWSER_CONTROL_SESSION`; bare execute never guesses from human-shell current
-state.
+A bare CLI execute inside OpenCode reuses `oc-$OPENCODE_SESSION_ID`, so calls
+from the same agent share one default tab. `--session` or
+`BROWSER_CONTROL_SESSION` takes precedence. Outside OpenCode, bare execute
+creates a fresh readable session and prints its continuation command.
+Use `execute --rm` for one-shot scripts: the relay closes all tabs that session
+opened after success or failure, even if the calling CLI disconnects. It cannot
+be combined with an explicit session.
 
 ```bash
 browser-control session new "🎙️ elevenlabs"
 browser-control execute --session "🎙️ elevenlabs" 'return page.url()'
 browser-control execute 'return page.url()'
+browser-control execute --rm 'await page.goto("https://example.com"); return page.title()'
 ```
 
 MCP keeps one implicit process session. Omit `session` for that normal path, or
@@ -203,6 +205,12 @@ browser-control session delete github
 
 Deletion is idempotent for an explicit session id, so cleanup can be safely
 retried when that session is already absent.
+
+Reset, delete, and idle cleanup close every tab the session opened, including
+popups. After 15 idle minutes, all session names release their tabs, JavaScript
+state, and CDP connection; explicit names remain available for the next execute.
+User-owned tabs stay open and their debugger detaches after 15 idle minutes.
+Reattach through the toolbar before adopting them again.
 
 Every execute is journaled under
 `~/.browser-control/sessions/<id>/journal.jsonl`. The journal records code,

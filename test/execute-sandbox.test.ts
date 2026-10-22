@@ -155,6 +155,18 @@ describe("ExecuteSandbox", () => {
     expect(connectOverCDP).not.toHaveBeenCalled()
   })
 
+  it("closing a stateful sandbox clears Page references and disconnects its browser", async () => {
+    const context = new FakeContext()
+    const browser = connect(context)
+    const sandbox = new ExecuteSandbox({ endpointUrl: "http://relay.test" })
+    const result = await Effect.runPromise(sandbox.execute("state.retainedPage = page; return 1"))
+    expect(result.isError).toBe(false)
+    expect(sandbox.getStatus().stateKeys).toEqual(["retainedPage"])
+    await Effect.runPromise(sandbox.closeSettled({ clearState: true }))
+    expect(sandbox.getStatus()).toMatchObject({ connected: false, stateKeys: [] })
+    expect(browser.close).toHaveBeenCalledOnce()
+  })
+
   it.each(["reset", "delete"] as const)("%s releases an adopted identity that never connected", async (operation) => {
     connectOverCDP.mockImplementation(() => new Promise(() => {}))
     const sessions = new BrowserControlSessions("http://relay.test")

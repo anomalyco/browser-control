@@ -47,8 +47,9 @@ After pushing, update the installed copy. See `~/code/control/AGENTS.md`.
 
 ### Sessions, Target Ownership & CDP Routing
 
-- Bare CLI `execute` atomically creates a fresh readable session id (e.g.
-  `cosmic-otter-866`); `--session` or `BROWSER_CONTROL_SESSION` continues it.
+- Bare CLI `execute` reuses `oc-$OPENCODE_SESSION_ID` inside OpenCode; outside it,
+  it creates a fresh readable session id. `--session` or `BROWSER_CONTROL_SESSION`
+  takes precedence. `execute --rm` uses a fresh session with relay-owned cleanup.
   Human session commands persist their current id in `~/.browser-control/session.json`.
 - Relay session descriptors persist per port under
   `~/.browser-control/relays/<port>/sessions.json`. After a relay restart,
@@ -73,6 +74,11 @@ After pushing, update the installed copy. See `~/code/control/AGENTS.md`.
 - `session adopt` makes a user-attached tab the session's default page (and
   auto-selects when only one user-attached tab is open). Adopted tabs are never
   closed by `reset` or `delete`.
+- Reset/delete/idle cleanup closes every registry target owned by the session
+  with `owner: "relay"`. Idle TTL is 15 minutes for all names; sandbox state and
+  CDP connections are released. Idle user tabs detach without closing.
+- Focus emulation is scoped to active execute work. Group updates preserve the
+  user's collapsed state. Startup orphan cleanup requires exact relay ownership.
 - Never auto-collapse Browser Control tab groups (`collapsed: true`) in
   `extension/src/background.ts`. Auto-collapsing hides the open tab titles and
   favicons behind opaque group pills (making it hard for the user to see or find

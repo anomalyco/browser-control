@@ -28,6 +28,7 @@ let reloading = false
 const tabGroupingCommands = new Map<number, Promise<unknown>>()
 const sessionGroups = new Map<string, number>()
 const attachedTabUrls = new Map<number, string>()
+const attachedTabOwners = new Map<number, { readonly owner: "relay"; readonly targetId: string; readonly browserControlSessionId: string }>()
 const pendingTabRequests = new Map<string, (approved: boolean) => void>()
 
 const STORAGE_ATTACHED_TABS_KEY = "browserControlAttachedTabs"
@@ -53,7 +54,7 @@ function writeStoredJson(key: string, value: unknown): void {
 }
 
 function restorePersistentState(): Promise<void> {
-  storageRestored ??= readStoredJson<{ readonly tabId?: unknown; readonly url?: unknown }[]>(
+  storageRestored ??= readStoredJson<{ readonly tabId?: unknown; readonly url?: unknown; readonly owner?: unknown; readonly targetId?: unknown; readonly browserControlSessionId?: unknown }[]>(
     STORAGE_ATTACHED_TABS_KEY,
     [],
   )
@@ -61,6 +62,9 @@ function restorePersistentState(): Promise<void> {
       for (const item of savedTabs) {
         if (typeof item?.tabId === "number" && typeof item?.url === "string" && !attachedTabUrls.has(item.tabId)) {
           attachedTabUrls.set(item.tabId, item.url)
+          if (item.owner === "relay" && typeof item.targetId === "string" && typeof item.browserControlSessionId === "string") {
+            attachedTabOwners.set(item.tabId, { owner: "relay", targetId: item.targetId, browserControlSessionId: item.browserControlSessionId })
+          }
         }
       }
     })
@@ -70,7 +74,7 @@ function restorePersistentState(): Promise<void> {
 
 function saveAttachedTabUrls(): void {
   if (reloading) return
-  const entries = Array.from(attachedTabUrls, ([tabId, url]) => ({ tabId, url }))
+  const entries = Array.from(attachedTabUrls, ([tabId, url]) => ({ tabId, url, ...attachedTabOwners.get(tabId) }))
   writeStoredJson(STORAGE_ATTACHED_TABS_KEY, entries)
 }
 
@@ -83,6 +87,7 @@ async function recordAttachedTab(tabId: number): Promise<void> {
 
 function forgetAttachedTab(tabId: number): void {
   if (reloading) return
+  attachedTabOwners.delete(tabId)
   if (attachedTabUrls.delete(tabId)) {
     saveAttachedTabUrls()
   }
@@ -142,9 +147,6 @@ async function recoverTabDebugger(tabId: number, requireEviction: boolean): Prom
     await Promise.all([
       chrome.debugger.sendCommand({ tabId }, "Page.enable", {}).catch(() => {}),
       chrome.debugger.sendCommand({ tabId }, "Page.setLifecycleEventsEnabled", { enabled: true }).catch(() => {}),
-      chrome.debugger.sendCommand({ tabId }, "Runtime.enable", {}).catch(() => {}),
-      chrome.debugger.sendCommand({ tabId }, "Network.enable", {}).catch(() => {}),
-      chrome.debugger.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {}),
       chrome.debugger.sendCommand({ tabId }, "Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }).catch(() => {}),
     ])
   }
@@ -285,6 +287,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.runtime.onStartup.addListener(() => {
   attachedTabUrls.clear()
+  attachedTabOwners.clear()
   writeStoredJson(STORAGE_ATTACHED_TABS_KEY, [])
 })
 
@@ -449,6 +452,7 @@ async function reannounceAttachedTabs(currentSocket: WebSocket): Promise<void> {
     const tab = await chrome.tabs.get(tabId).catch(() => undefined)
     if (!tab || !storedUrl || (storedUrl !== "about:blank" && tab.url !== storedUrl)) {
       attachedTabUrls.delete(tabId)
+      attachedTabOwners.delete(tabId)
       continue
     }
     await chrome.debugger.attach({ tabId }, "1.3").catch(() => {})
@@ -456,7 +460,7 @@ async function reannounceAttachedTabs(currentSocket: WebSocket): Promise<void> {
   const ownedNow = await getOwnedDebuggerTabIds(chrome.debugger)
   for (const tabId of ownedNow) {
     await recordAttachedTab(tabId)
-    sendOnSocket(currentSocket, { method: "debugger.attached", params: { tabId } })
+    sendOnSocket(currentSocket, { method: "debugger.attached", params: { tabId, ...attachedTabOwners.get(tabId) } })
   }
 }
 
@@ -580,6 +584,14 @@ async function handleCommand(command: ShimCommand, currentSocket: WebSocket): Pr
   if (command.method === "action.setAttached") {
     const tabId = numberParam(command.params, "tabId")
     const attached = Boolean(command.params?.attached)
+    const targetId = optionalStringParam(command.params, "targetId")
+    const browserControlSessionId = optionalStringParam(command.params, "browserControlSessionId")
+    if (attached && command.params?.owner === "relay" && targetId && browserControlSessionId) {
+      attachedTabOwners.set(tabId, { owner: "relay", targetId, browserControlSessionId })
+    } else {
+      attachedTabOwners.delete(tabId)
+    }
+    saveAttachedTabUrls()
     await setTabBadge(tabId, attached ? "ON" : "", "#7c3aed", attached ? "Detach from Browser Control" : "Attach to Browser Control")
     return {}
   }
@@ -749,9 +761,6 @@ async function reconcileBrowserControlGroups(currentGeneration: number): Promise
     if (!isBrowserControlGroupTitle(group.title)) {
       continue
     }
-    if (group.collapsed) {
-      await chrome.tabGroups.update(group.id, { collapsed: false }).catch(() => {})
-    }
     const tabs = await chrome.tabs.query({ groupId: group.id })
     assertCurrentGeneration(currentGeneration)
     for (const tab of tabs) {
@@ -797,8 +806,8 @@ async function groupBrowserControlTab(
       if (tab.groupId !== knownGroup.id) {
         await chrome.tabs.group({ tabIds: [tabId], groupId: knownGroup.id })
       }
-      if (knownGroup.title !== desiredTitle || knownGroup.color !== tabGroupColor || knownGroup.collapsed) {
-        await chrome.tabGroups.update(knownGroup.id, { title: desiredTitle, color: tabGroupColor, collapsed: false })
+      if (knownGroup.title !== desiredTitle || knownGroup.color !== tabGroupColor) {
+        await chrome.tabGroups.update(knownGroup.id, { title: desiredTitle, color: tabGroupColor })
       }
       return { groupId: knownGroup.id }
     }
@@ -806,16 +815,13 @@ async function groupBrowserControlTab(
   if (tab.groupId !== undefined && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
     const currentGroup = await chrome.tabGroups.get(tab.groupId)
     if (currentGroup.title === desiredTitle && currentGroup.color === tabGroupColor) {
-      if (currentGroup.collapsed) {
-        await chrome.tabGroups.update(currentGroup.id, { collapsed: false }).catch(() => {})
-      }
       sessionGroups.set(sessionKey, currentGroup.id)
       return { groupId: currentGroup.id }
     }
     if (isBrowserControlGroupTitle(currentGroup.title)) {
       const groupedTabs = await chrome.tabs.query({ groupId: currentGroup.id })
       if (groupedTabs.length === 1 && groupedTabs[0]?.id === tabId) {
-        await chrome.tabGroups.update(currentGroup.id, { title: desiredTitle, color: tabGroupColor, collapsed: false })
+        await chrome.tabGroups.update(currentGroup.id, { title: desiredTitle, color: tabGroupColor })
         sessionGroups.set(sessionKey, currentGroup.id)
         return { groupId: currentGroup.id }
       }
@@ -841,7 +847,7 @@ async function groupBrowserControlTab(
   })
   await finalizeBrowserControlGrouping({
     assertCurrent: () => assertCurrentSocket(currentSocket),
-    update: () => chrome.tabGroups.update(groupId, { title: desiredTitle, color: tabGroupColor, collapsed: false }).then(() => {}),
+    update: () => chrome.tabGroups.update(groupId, { title: desiredTitle, color: tabGroupColor }).then(() => {}),
     rollback: () => chrome.tabs.ungroup(tabId),
   })
   sessionGroups.set(sessionKey, groupId)

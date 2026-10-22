@@ -482,6 +482,7 @@ function handleCliRequest(options: {
         ...(requestedSessionId ? { sessionId: requestedSessionId } : {}),
         code: request.code,
         createIfMissing: request.createIfMissing,
+        ...(request.removeAfterExecute ? { removeAfterExecute: true } : {}),
         ...(request.targetSelection ? { targetSelection: request.targetSelection } : {}),
       })
       const { setupFailed: _setupFailed, ...wireResult } = result

@@ -690,7 +690,7 @@ export class ExecuteSandbox {
     })
   }
 
-  closeSettled(): Effect.Effect<void, Error> {
+  closeSettled(options: { readonly clearState?: boolean } = {}): Effect.Effect<void, Error> {
     const sandbox = this
     return Effect.gen(function* () {
       const page = sandbox.page
@@ -698,6 +698,7 @@ export class ExecuteSandbox {
       const ownsOpenPage = page !== undefined && sandbox.ownsPage && !page.isClosed()
       sandbox.browser = undefined
       sandbox.unbindDefaultPage(undefined, { notify: true })
+      if (options.clearState) for (const key of Object.keys(sandbox.state)) delete sandbox.state[key]
       yield* sandbox.networkCapture.cancel()
 
       if (ownsOpenPage) {

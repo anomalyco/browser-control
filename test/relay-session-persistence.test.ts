@@ -15,6 +15,31 @@ afterEach(() => {
 })
 
 describe("relay session persistence", () => {
+  it.each(["orphan", "user", "recycled", "live"] as const)("startup orphan sweep preserves provenance: %s", async (kind) => {
+    const port = await freePort()
+    await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+      const relay = yield* startRelay({ port, sessionCatalogPath: null })
+      yield* Effect.tryPromise(async () => {
+        if (kind === "live") {
+          await fetch(new URL("/cli/session/new", relay.url), {
+            method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "owner" }),
+          })
+        }
+        const extension = await openProtocolExtension(relay.url, "current-target", {
+          owner: kind === "user" ? "user" : "relay",
+          targetId: kind === "recycled" ? "old-target" : "current-target",
+          browserControlSessionId: "owner",
+        })
+        try {
+          await waitFor(async () => (await fetch(new URL("/extension/status", relay.url)).then((response) => response.json())).connected === true)
+          if (kind === "orphan") await waitFor(() => extension.commands.some((command) => command.method === "tabs.remove"))
+          expect(extension.commands.filter((command) => command.method === "tabs.remove")).toHaveLength(kind === "orphan" ? 1 : 0)
+        } finally {
+          extension.close()
+        }
+      })
+    })))
+  })
   it("restores a named session after a clean relay restart", async () => {
     const port = await freePort()
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "browser-control-relay-sessions-"))
@@ -249,7 +274,7 @@ type FakeExtensionCommand = {
   readonly params?: { readonly method?: string; readonly tabId?: number }
 }
 
-async function openProtocolExtension(relayUrl: string, targetId?: string): Promise<WebSocket & { readonly commands: FakeExtensionCommand[] }> {
+async function openProtocolExtension(relayUrl: string, targetId?: string, ownership: Record<string, string> = {}): Promise<WebSocket & { readonly commands: FakeExtensionCommand[] }> {
   const commands: FakeExtensionCommand[] = []
   const extension = await openSocket(`${relayUrl.replace("http://", "ws://")}/extension`)
   extension.on("message", (data) => {
@@ -261,7 +286,7 @@ async function openProtocolExtension(relayUrl: string, targetId?: string): Promi
     extension.send(JSON.stringify({ id: command.id, result }))
   })
   extension.send(JSON.stringify({ method: "hello", params: { version: "0.0.23", protocolVersion: 2 } }))
-  if (targetId) extension.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 7 } }))
+  if (targetId) extension.send(JSON.stringify({ method: "debugger.attached", params: { tabId: 7, ...ownership } }))
   extension.send(JSON.stringify({ method: "ready" }))
   return Object.assign(extension, { commands })
 }

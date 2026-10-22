@@ -2,7 +2,7 @@ import { Deferred, Effect, Exit, Fiber, Latch, Result, Schema, Semaphore } from 
 import { defaultPageClosedWarning, ExecuteSandbox, hasExplicitTargetSelection, type ExecuteResult, type ExecuteTargetSelection } from "./execute.ts"
 import type { NetworkCaptureOptions, NetworkCaptureResult, NetworkCaptureStatus, NetworkCaptureStopOptions } from "./network-capture.ts"
 import { generateSessionId } from "./relay-helpers.ts"
-import type { BrowserControlSession, ExecuteSandboxLike, SessionSummary, SessionTarget } from "./relay-types.ts"
+import type { BrowserControlSession, ConnectedTarget, ExecuteSandboxLike, SessionSummary, SessionTarget } from "./relay-types.ts"
 import type { AuthenticatedJsonOutcome, AuthenticatedJsonRequest } from "./relay-schema.ts"
 import type { PersistedSession } from "./session-catalog.ts"
 import {
@@ -31,7 +31,7 @@ type AdoptionResult = {
 
 export type SessionHooks = {
   /** Called when a session starts (true) or finishes (false) an execute. */
-  readonly onExecuteStateChange?: (sessionId: string, executing: boolean) => void
+  readonly onExecuteStateChange?: (sessionId: string, executing: boolean) => void | Effect.Effect<void>
   /** Called after each execute completes, for journaling. Failure is logged and ignored. */
   readonly onExecuteRecord?: (record: SessionExecuteRecord) => unknown | Promise<unknown>
   /** How long lifecycle commands wait for a permit or sandbox operation. */
@@ -44,6 +44,7 @@ export type SessionHooks = {
   readonly onTargetOwnershipChange?: (change: TargetOwnershipChange) => void
   /** Close a live relay-owned target by its durable target id. */
   readonly onReleaseRelayTarget?: (targetId: string) => Effect.Effect<void, Error>
+  readonly getTargets?: () => readonly ConnectedTarget[]
   /** Persist session identity and target continuity after durable lifecycle changes. */
   readonly onSessionsChanged?: (sessions: readonly PersistedSession[]) => unknown | Promise<unknown>
 }
@@ -299,7 +300,7 @@ export class BrowserControlSessions {
         if (manager.sessions.get(id) !== session) {
           return false
         }
-        if (session.target?.owner === "relay") yield* manager.closeRelayTarget(session.target.id).pipe(Effect.ignore)
+        yield* manager.closeSessionRelayTargets(session)
         manager.sessions.delete(id)
         yield* manager.commitPersistence(() => Effect.sync(() => {
           manager.sessions.set(id, session)
@@ -322,7 +323,7 @@ export class BrowserControlSessions {
         if (manager.sessions.get(id) !== existing) {
           return yield* sessionError("inactive", `Session is no longer active: ${id}`, id)
         }
-        if (existing.target?.owner === "relay") yield* manager.closeRelayTarget(existing.target.id).pipe(Effect.ignore)
+        yield* manager.closeSessionRelayTargets(existing)
         const session = manager.createBrowserControlSession(id, existing.readOnly)
         manager.sessions.set(id, session)
         yield* manager.commitPersistence(() => Effect.sync(() => {
@@ -393,9 +394,9 @@ export class BrowserControlSessions {
       sessionId,
       "authenticated request",
       (session) => Effect.gen(function* () {
-        manager.setExecuting(session.id, true)
+        yield* manager.setExecuting(session.id, true)
         const result = yield* session.sandbox.authenticatedJson(pageRequest).pipe(
-          Effect.ensuring(Effect.sync(() => manager.setExecuting(session.id, false))),
+          Effect.ensuring(manager.setExecuting(session.id, false)),
         )
         session.updatedAt = new Date().toISOString()
         yield* manager.commitPersistence()
@@ -415,10 +416,14 @@ export class BrowserControlSessions {
     readonly sessionId?: string
     readonly code: string
     readonly createIfMissing: boolean
+    readonly removeAfterExecute?: boolean
     readonly targetSelection?: ExecuteTargetSelection
   }): Effect.Effect<ExecutionResponse, Error> {
     const manager = this
     return this.withAdmission(options.sessionId, Effect.uninterruptibleMask((restore) => Effect.gen(function* () {
+      if (options.removeAfterExecute && options.sessionId) {
+        return yield* sessionError("invalid-request", "One-shot execute requires a fresh unnamed session")
+      }
       const resolved = yield* manager.resolveWorkSession(options.sessionId, options.createIfMissing)
       const session = resolved.session
       const response = yield* Deferred.make<ExecutionResponse, Error>()
@@ -433,11 +438,11 @@ export class BrowserControlSessions {
           }
           started = true
           session.updatedAt = new Date().toISOString()
-          manager.setExecuting(session.id, true)
+          yield* manager.setExecuting(session.id, true)
           const startedAt = Date.now()
           const result = yield* session.sandbox
             .execute(options.code, { ...(options.targetSelection ? { targetSelection: options.targetSelection } : {}) })
-            .pipe(Effect.ensuring(Effect.sync(() => manager.setExecuting(session.id, false))))
+            .pipe(Effect.ensuring(manager.setExecuting(session.id, false)))
           if (resolved.created && result.setupFailed) {
             return yield* sessionError("setup-failed", result.text, session.id)
           }
@@ -464,7 +469,9 @@ export class BrowserControlSessions {
         onFailure: (error) => (resolved.created
           ? manager.cleanupCreatedSession(session)
           : Effect.void).pipe(Effect.andThen(Deferred.fail(response, error))),
-        onSuccess: (value) => Deferred.succeed(response, value),
+        onSuccess: (value) => (options.removeAfterExecute
+          ? manager.cleanupCreatedSession(session)
+          : Effect.void).pipe(Effect.andThen(Deferred.succeed(response, value))),
       })))
       const workerFiber = yield* manager.forkTracked(worker, session.id)
       return yield* restore(Deferred.await(response)).pipe(
@@ -636,24 +643,14 @@ export class BrowserControlSessions {
         if (!Number.isFinite(updatedAtMs) || now - updatedAtMs < options.maxIdleMs) {
           continue
         }
-        const isAutoNamed = /^mcp-[0-9a-f]{6,}$/i.test(session.id) || /^[a-z]+-[a-z]+-\d{3}$/.test(session.id)
-        const sessionMaxIdleMs = isAutoNamed ? options.maxIdleMs : options.maxIdleMs * 8
-        if (now - updatedAtMs < sessionMaxIdleMs) {
-          continue
-        }
-        const hasState = session.sandbox.getStatus().stateKeys.length > 0
-        if (session.target?.owner === "relay") {
-          if (options.isTargetBusy?.(session.target.id)) continue
-          const closed = yield* (
-            isAutoNamed
-              ? manager.delete(session.id)
-              : manager.reset(session.id).pipe(Effect.map(Boolean))
-          ).pipe(Effect.orElseSucceed(() => false))
-          if (closed) reaped.push(session.id)
-        } else if (!session.target && (isAutoNamed || (!hasState && now - updatedAtMs >= options.maxIdleMs * 16))) {
-          const deleted = yield* manager.delete(session.id).pipe(Effect.orElseSucceed(() => false))
-          if (deleted) reaped.push(session.id)
-        }
+        const targets = manager.sessionTargets(session.id)
+        if (targets.some((target) => options.isTargetBusy?.(target.targetInfo.targetId)) ||
+          (session.target && options.isTargetBusy?.(session.target.id))) continue
+        // Both paths clear state and disconnect CDP. Keep explicit names resumable.
+        const autoNamed = /^mcp-[0-9a-f]{6,}$/i.test(session.id) || /^[a-z]+-[a-z]+-\d{3}$/.test(session.id)
+        const reset = yield* (autoNamed ? manager.delete(session.id) : manager.reset(session.id).pipe(Effect.map(Boolean)))
+          .pipe(Effect.orElseSucceed(() => false))
+        if (reset) reaped.push(session.id)
       }
       return reaped
     })
@@ -684,17 +681,20 @@ export class BrowserControlSessions {
     return this.sessionSummary(session)
   }
 
-  private setExecuting(id: string, executing: boolean): void {
-    if (executing) {
-      this.executing.add(id)
-    } else {
-      this.executing.delete(id)
-    }
-    try {
-      this.hooks.onExecuteStateChange?.(id, executing)
-    } catch (error) {
-      console.error("Session execute-state hook failed", error)
-    }
+  private setExecuting(id: string, executing: boolean): Effect.Effect<void> {
+    return Effect.suspend(() => {
+      if (executing) {
+        this.executing.add(id)
+      } else {
+        this.executing.delete(id)
+      }
+      try {
+        return this.hooks.onExecuteStateChange?.(id, executing) ?? Effect.void
+      } catch (error) {
+        console.error("Session execute-state hook failed", error)
+      }
+      return Effect.void
+    })
   }
 
   private recordExecute(record: SessionExecuteRecord): Effect.Effect<void> {
@@ -788,13 +788,13 @@ export class BrowserControlSessions {
   }
 
   private closeBrowserControlSessionSettled(session: BrowserControlSession): Effect.Effect<void> {
-    return session.sandbox.closeSettled().pipe(Effect.ignore)
+    return session.sandbox.closeSettled({ clearState: true }).pipe(Effect.ignore)
   }
 
   private releaseSessionTargetOwnership(session: BrowserControlSession): Effect.Effect<void> {
-    const target = session.target
-    if (!target) return Effect.void
-    this.notifyTargetOwnershipChange(this.targetOwnership.releaseTargetOwnership(target.id, session.id))
+    const ids = new Set(this.sessionTargets(session.id).map((target) => target.targetInfo.targetId))
+    if (session.target) ids.add(session.target.id)
+    for (const id of ids) this.notifyTargetOwnershipChange(this.targetOwnership.releaseTargetOwnership(id, session.id))
     delete session.target
     return Effect.void
   }
@@ -802,6 +802,39 @@ export class BrowserControlSessions {
   private closeRelayTarget(targetId: string): Effect.Effect<void, Error> {
     const close = this.hooks.onReleaseRelayTarget?.(targetId)
     return close ?? Effect.void
+  }
+
+  private sessionTargets(id: string): readonly ConnectedTarget[] {
+    return (this.hooks.getTargets?.() ?? []).filter((target) => target.browserControlSessionId === id)
+  }
+
+  private closeSessionRelayTargets(session: BrowserControlSession): Effect.Effect<void, Error> {
+    return Effect.gen({ self: this }, function* () {
+      const closed = new Set<string>()
+      // Closing the durable default waits for inventory after reconnect. Rescan
+      // afterward so newly announced secondary tabs are included as well.
+      const defaultId = session.target?.owner === "relay" ? session.target.id : undefined
+      if (defaultId) {
+        yield* this.closeRelayTarget(defaultId)
+        closed.add(defaultId)
+      }
+      while (true) {
+        const targets = this.sessionTargets(session.id).filter((target) => target.owner === "relay" && !closed.has(target.targetInfo.targetId))
+        if (targets.length === 0) return
+        for (const target of targets) {
+          yield* this.closeRelayTarget(target.targetInfo.targetId)
+          closed.add(target.targetInfo.targetId)
+        }
+      }
+    })
+  }
+
+  /** Called once after startup inventory; unknown/user-owned tabs are never inferred. */
+  sweepOrphanedRelayTargets(): Effect.Effect<void> {
+    return Effect.forEach(this.hooks.getTargets?.() ?? [], (target) =>
+      target.owner === "relay" && target.browserControlSessionId && !this.sessions.has(target.browserControlSessionId)
+        ? this.closeRelayTarget(target.targetInfo.targetId).pipe(Effect.ignore)
+        : Effect.void, { discard: true })
   }
 
   private notifyTargetOwnershipChange(change: TargetOwnershipChange): void {
@@ -906,6 +939,7 @@ export class BrowserControlSessions {
     const manager = this
     return Effect.gen(function* () {
       if (manager.sessions.get(session.id) !== session) return
+      yield* manager.closeSessionRelayTargets(session).pipe(Effect.ignore)
       manager.sessions.delete(session.id)
       yield* manager.releaseSessionTargetOwnership(session)
       yield* manager.closeBrowserControlSession(session)
