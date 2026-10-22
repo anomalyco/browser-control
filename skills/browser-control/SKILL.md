@@ -63,7 +63,7 @@ are excluded from Browser Control's inventory. `page.title()` reads time out
 after five seconds if the page execution context remains unavailable; the read
 timeout does not close or replace the tab.
 
-A bare CLI execute inside OpenCode reuses `oc-$OPENCODE_SESSION_ID`, so calls
+A bare CLI execute inside OpenCode reuses `oc-$OPENCODE_SESSION_ID` (lowercased), so calls
 from the same agent share one default tab. `--session` or
 `BROWSER_CONTROL_SESSION` takes precedence. Outside OpenCode, bare execute
 creates a fresh readable session and prints its continuation command.

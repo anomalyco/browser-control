@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url"
 import { createDoctorReport, formatDoctorReport, formatTargetSummary } from "./doctor.ts"
 import { runMcpServer } from "./mcp.ts"
 import * as RelayClient from "./relay-client.ts"
-import { parseAdditionalExtensionOrigins } from "./relay-helpers.ts"
+import { isValidSessionId, parseAdditionalExtensionOrigins } from "./relay-helpers.ts"
 import * as RelayLifecycle from "./relay-lifecycle.ts"
 import type { ExecuteAftermath, ExecuteLogEntry, ExecuteResponse, NetworkStatusResponse, NetworkStopResponse, RecordingQuality } from "./relay-schema.ts"
 import { startRelay } from "./relay.ts"
@@ -226,6 +226,12 @@ export function executeJsonEnvelope(result: ExecuteResponse): ExecuteJsonEnvelop
   }
 }
 
+// OpenCode ids are mixed-case; relay session ids must be lowercase (journal dirs live on case-insensitive disks).
+function agentDefaultSessionId(agentSessionId: string | undefined): string | undefined {
+  const id = agentSessionId ? `oc-${agentSessionId.toLowerCase()}` : undefined
+  return id && isValidSessionId(id) ? id : undefined
+}
+
 export function formatSessionContinuation(sessionId: string): string {
   return `Session: ${sessionId}. Continue with --session ${sessionId}.`
 }
@@ -296,7 +302,7 @@ const execute = Command.make(
       const explicitSessionId = Option.getOrUndefined(session) ?? Option.getOrUndefined(yield* sessionIdConfig)
       if (rm && explicitSessionId) return yield* Effect.fail(new Error("Use --rm without --session or BROWSER_CONTROL_SESSION"))
       const agentSessionId = Option.getOrUndefined(yield* agentSessionIdConfig)
-      const agentWorkSessionId = agentSessionId ? `oc-${agentSessionId}` : undefined
+      const agentWorkSessionId = agentDefaultSessionId(agentSessionId)
       const workSessionId = explicitSessionId ?? (rm ? undefined : agentWorkSessionId)
       const targetUrlValue = Option.getOrUndefined(targetUrl) ?? Option.getOrUndefined(yield* targetUrlConfig)
       const targetIndexValue = Option.getOrUndefined(targetIndex) ?? Option.getOrUndefined(yield* targetIndexConfig)

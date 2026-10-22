@@ -102,10 +102,10 @@ function runCli(args: string[], overrides: NodeJS.ProcessEnv = {}) {
 
 describe("CLI opt-in boolean flags", { timeout: 70_000 }, () => {
   it("reuses the agent identity for successive unnamed executes", async () => {
-    for (let i = 0; i < 2; i++) await runCli(["execute", "return 1"], { OPENCODE_SESSION_ID: "ses_agent" })
+    for (let i = 0; i < 2; i++) await runCli(["execute", "return 1"], { OPENCODE_SESSION_ID: "ses_e9d744b52ffe5iJFeCm3sIeaoA" })
     expect(requests.map((request) => request.body)).toEqual([
-      { sessionId: "oc-ses_agent", code: "return 1", createIfMissing: true },
-      { sessionId: "oc-ses_agent", code: "return 1", createIfMissing: true },
+      { sessionId: "oc-ses_e9d744b52ffe5ijfecm3sieaoa", code: "return 1", createIfMissing: true },
+      { sessionId: "oc-ses_e9d744b52ffe5ijfecm3sieaoa", code: "return 1", createIfMissing: true },
     ])
   })
 
@@ -115,7 +115,7 @@ describe("CLI opt-in boolean flags", { timeout: 70_000 }, () => {
   })
 
   it("an explicit agent default session recreates itself after idle reaping", async () => {
-    await runCli(["execute", "--session", "oc-ses_agent", "return 1"], { OPENCODE_SESSION_ID: "ses_agent" })
+    await runCli(["execute", "--session", "oc-ses_agent", "return 1"], { OPENCODE_SESSION_ID: "ses_Agent" })
     expect(requests[0]?.body).toEqual({ sessionId: "oc-ses_agent", code: "return 1", createIfMissing: true })
   })
 

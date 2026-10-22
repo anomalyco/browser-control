@@ -54,7 +54,7 @@ Agent / MCP client / CLI
 
 ### Sessions, Target Ownership & CDP Routing
 
-- Bare OpenCode CLI calls reuse `oc-$OPENCODE_SESSION_ID`; `execute --rm` creates
+- Bare OpenCode CLI calls reuse `oc-$OPENCODE_SESSION_ID` (lowercased); `execute --rm` creates
   a fresh one-shot session and cleans it in the relay even if the caller exits.
 - Reset, delete, and the 15-minute idle reap close all session-owned relay tabs,
   including popups. Reaping clears JavaScript state and disconnects CDP while

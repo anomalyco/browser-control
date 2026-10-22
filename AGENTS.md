@@ -47,7 +47,7 @@ After pushing, update the installed copy. See `~/code/control/AGENTS.md`.
 
 ### Sessions, Target Ownership & CDP Routing
 
-- Bare CLI `execute` reuses `oc-$OPENCODE_SESSION_ID` inside OpenCode; outside it,
+- Bare CLI `execute` reuses `oc-$OPENCODE_SESSION_ID` (lowercased) inside OpenCode; outside it,
   it creates a fresh readable session id. `--session` or `BROWSER_CONTROL_SESSION`
   takes precedence. `execute --rm` uses a fresh session with relay-owned cleanup.
   Human session commands persist their current id in `~/.browser-control/session.json`.
