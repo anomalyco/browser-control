@@ -114,6 +114,11 @@ describe("CLI opt-in boolean flags", { timeout: 70_000 }, () => {
     expect(requests[0]?.body).toEqual({ sessionId: "chosen", code: "return 1", createIfMissing: false })
   })
 
+  it("an explicit agent default session recreates itself after idle reaping", async () => {
+    await runCli(["execute", "--session", "oc-ses_agent", "return 1"], { OPENCODE_SESSION_ID: "ses_agent" })
+    expect(requests[0]?.body).toEqual({ sessionId: "oc-ses_agent", code: "return 1", createIfMissing: true })
+  })
+
   it("--rm asks the relay to clean a fresh session and prints no continuation", async () => {
     const { stderr } = await runCli(["execute", "--rm", "return 1"], { OPENCODE_SESSION_ID: "ses_agent" })
     expect(stderr).toBe("")

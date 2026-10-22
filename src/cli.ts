@@ -296,7 +296,8 @@ const execute = Command.make(
       const explicitSessionId = Option.getOrUndefined(session) ?? Option.getOrUndefined(yield* sessionIdConfig)
       if (rm && explicitSessionId) return yield* Effect.fail(new Error("Use --rm without --session or BROWSER_CONTROL_SESSION"))
       const agentSessionId = Option.getOrUndefined(yield* agentSessionIdConfig)
-      const workSessionId = explicitSessionId ?? (!rm && agentSessionId ? `oc-${agentSessionId}` : undefined)
+      const agentWorkSessionId = agentSessionId ? `oc-${agentSessionId}` : undefined
+      const workSessionId = explicitSessionId ?? (rm ? undefined : agentWorkSessionId)
       const targetUrlValue = Option.getOrUndefined(targetUrl) ?? Option.getOrUndefined(yield* targetUrlConfig)
       const targetIndexValue = Option.getOrUndefined(targetIndex) ?? Option.getOrUndefined(yield* targetIndexConfig)
       if (targetIndexValue !== undefined && targetIndexValue < 0) {
@@ -308,7 +309,8 @@ const execute = Command.make(
       const result = yield* relay.execute({
         ...(workSessionId ? { sessionId: workSessionId } : {}),
         code: executeCode,
-        createIfMissing: !explicitSessionId,
+        // Idle reaping deletes oc-* sessions, so the agent's own printed --session hint must recreate it.
+        createIfMissing: !explicitSessionId || explicitSessionId === agentWorkSessionId,
         ...(rm ? { removeAfterExecute: true } : {}),
         ...(targetUrlValue || targetIndexValue !== undefined
           ? {

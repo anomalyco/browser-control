@@ -646,8 +646,9 @@ export class BrowserControlSessions {
         const targets = manager.sessionTargets(session.id)
         if (targets.some((target) => options.isTargetBusy?.(target.targetInfo.targetId)) ||
           (session.target && options.isTargetBusy?.(session.target.id))) continue
-        // Both paths clear state and disconnect CDP. Keep explicit names resumable.
-        const autoNamed = /^mcp-[0-9a-f]{6,}$/i.test(session.id) || /^[a-z]+-[a-z]+-\d{3}$/.test(session.id)
+        // Both paths clear state and disconnect CDP. Keep explicit names resumable;
+        // oc-* agent defaults are recreated on demand, so deleting them bounds the catalog.
+        const autoNamed = /^mcp-[0-9a-f]{6,}$/i.test(session.id) || /^[a-z]+-[a-z]+-\d{3}$/.test(session.id) || session.id.startsWith("oc-")
         const reset = yield* (autoNamed ? manager.delete(session.id) : manager.reset(session.id).pipe(Effect.map(Boolean)))
           .pipe(Effect.orElseSucceed(() => false))
         if (reset) reaped.push(session.id)

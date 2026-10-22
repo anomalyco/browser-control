@@ -172,6 +172,21 @@ describe("BrowserControlSessions", () => {
     await Effect.runPromise(sessions.closeAll())
   })
 
+  it("idle reap deletes agent default sessions instead of keeping them forever", async () => {
+    const closed: string[] = []
+    const sessions = new BrowserControlSessions("http://relay.test", () => makeFakeSandbox(), {
+      getTargets: () => [tab("agent-tab", "oc-ses_agent")],
+      onReleaseRelayTarget: (id) => Effect.sync(() => { closed.push(id) }),
+    })
+    sessions.createNew("oc-ses_agent").updatedAt = new Date(0).toISOString()
+    sessions.createNew("named").updatedAt = new Date(0).toISOString()
+    expect(await Effect.runPromise(sessions.reapIdleRelaySessions({ maxIdleMs: 100, now: 101 }))).toEqual(["oc-ses_agent", "named"])
+    expect(closed).toEqual(["agent-tab"])
+    expect(sessions.sessions.has("oc-ses_agent")).toBe(false)
+    expect(sessions.sessions.has("named")).toBe(true)
+    await Effect.runPromise(sessions.closeAll())
+  })
+
   it("orphan sweep closes only positively owned relay targets without a session", async () => {
     const closed: string[] = []
     const sessions = new BrowserControlSessions("http://relay.test", () => makeFakeSandbox(), {
