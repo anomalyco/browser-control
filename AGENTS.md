@@ -13,7 +13,7 @@ After pushing, update the installed copy. See `~/code/control/AGENTS.md`.
 
 - Keep `PLAN.md` updated when architecture, scope, install flow, or product
   preferences change.
-- Keep `CONTEXT.md` updated when domain language changes.
+- Keep `GLOSSARY.md` updated when domain language changes.
 - Keep `skills/browser-control/SKILL.md` updated when the agent-facing workflow,
   commands, setup steps, or troubleshooting behavior changes, and sync it to
   `~/.config/opencode/skills/browser-control/skill.md`.
