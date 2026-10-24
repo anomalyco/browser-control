@@ -18,6 +18,8 @@ export default {
     "scripts/wikipedia-cursor-demo.js",
   ],
   project: ["src/**/*.ts!", "extension/src/**/*.ts!", "scripts/*.{ts,js}", "gauntlet/**/*.ts", "test/**/*.ts"],
+  // Vendored from control-kit by its sync script; unused exports are expected.
+  ignore: ["src/control-contract.ts"],
   // Package scripts discover the TS command entrypoints; Vitest discovers tests.
   vitest: { entry: ["test/**/*.test.ts"] },
   // Align the transitive Node runtime with Effect's prerelease scope layout.
