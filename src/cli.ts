@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
 import { Config, Console, Effect, FileSystem, Layer, Option, Predicate, Result, Schema } from "effect"
-import { Argument, Command, Flag } from "effect/cli"
+import { Argument, CliError, Command, Flag } from "effect/cli"
 import path from "node:path"
 import process from "node:process"
 import { fileURLToPath } from "node:url"
@@ -15,6 +15,7 @@ import { startRelay } from "./relay.ts"
 import { defaultJournalBaseDir, formatJournalEntry, readJournalEntries } from "./session-journal.ts"
 import * as SessionStore from "./session-store.ts"
 import { browserControlVersion } from "./version.ts"
+import { ExitCode, failure, printJson, takeJsonFlag } from "./control-contract.ts"
 
 const packageRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)))
 const sessionIdConfig = Config.option(Config.String("BROWSER_CONTROL_SESSION"))
@@ -33,8 +34,29 @@ const tabIdFlag = (description?: string) => {
   return description ? flag.pipe(Flag.withDescription(description)) : flag
 }
 const failExit = Effect.sync(() => {
-  process.exitCode = 1
+  process.exitCode = ExitCode.failure
 })
+const exitWith = (code: number) => Effect.sync(() => {
+  process.exitCode = code
+})
+
+const hostErrorTags = new Set(["RelayClient.RelayUnreachable", "RelayLifecycle.RelayStartFailed", "RelayLifecycle.ExtensionDisconnected"])
+
+/** control-kit exit codes: 4 when the relay or extension can't be reached, otherwise 1. */
+export function exitCodeForError(error: unknown): number {
+  const tag = Predicate.isObject(error) && Predicate.hasProperty(error, "_tag") ? error._tag : undefined
+  return Predicate.isString(tag) && hostErrorTags.has(tag) ? ExitCode.host : ExitCode.failure
+}
+
+/** `--json` may come before the subcommand, which Effect CLI rejects, so move it after the command's own arguments. */
+export function hoistJsonFlag(args: ReadonlyArray<string>): { readonly json: boolean; readonly argv: ReadonlyArray<string> } {
+  const delimiter = args.indexOf("--")
+  const { json, argv } = takeJsonFlag(delimiter === -1 ? args : args.slice(0, delimiter))
+  if (!json) return { json, argv: args }
+  return { json, argv: [...argv, "--json", ...(delimiter === -1 ? [] : args.slice(delimiter))] }
+}
+
+const stderrLine = (message: string) => Console.error(`browser-control: ${message.split("\n")[0]!.slice(0, 300)}`)
 
 export function resolveExplicitSessionSelector(options: {
   readonly positional: string | undefined
@@ -339,20 +361,20 @@ const execute = Command.make(
       return result
     })
     if (json) {
-      const envelope = yield* run.pipe(
-        Effect.map(executeJsonEnvelope),
-        Effect.catch((error) => Effect.succeed(errorJsonEnvelope(error))),
-      )
-      yield* Console.log(JSON.stringify(envelope, null, 2))
+      const outcome = yield* Effect.result(run)
+      const envelope = Result.isFailure(outcome) ? errorJsonEnvelope(outcome.failure) : executeJsonEnvelope(outcome.success)
+      // printJson writes synchronously, so large envelopes survive a piped stdout.
+      yield* Effect.sync(() => printJson(envelope))
       if (!envelope.ok) {
-        yield* failExit
+        yield* stderrLine(envelope.error?.message ?? envelope.text)
+        yield* exitWith(Result.isFailure(outcome) ? exitCodeForError(outcome.failure) : ExitCode.failure)
       }
       return
     }
     const outcome = yield* Effect.result(run)
     if (Result.isFailure(outcome)) {
       yield* Console.error(outcome.failure.message)
-      yield* failExit
+      yield* exitWith(exitCodeForError(outcome.failure))
       return
     }
     const result = outcome.success
@@ -540,20 +562,20 @@ const status = Command.make(
             sessions: [],
             targets: [],
           }, null, 2))
-        } else {
-          yield* Console.error(`Relay status failed: ${relayResult.failure.message}`)
         }
-        yield* failExit
+        yield* Console.error(`Relay status failed: ${relayResult.failure.message}`)
+        yield* exitWith(ExitCode.host)
         return
       }
       const stopped = RelayLifecycle.stoppedRelayStatus(relay.endpoint)
       if (json) {
         yield* Console.log(JSON.stringify(stopped, null, 2))
+        yield* stderrLine(`relay is not running at ${relay.endpoint}`)
       } else {
         yield* Console.log(`Relay: stopped (${relay.endpoint})`)
         yield* Console.log("Run browser-control execute to start it automatically.")
       }
-      yield* failExit
+      yield* exitWith(ExitCode.host)
       return
     }
     const version = relayResult.success
@@ -1076,12 +1098,26 @@ const mainLayer = Layer.mergeAll(RelayClient.layerFetch, SessionStore.layer).pip
   Layer.provideMerge(NodeServices.layer),
 )
 
-Command.runWith(browserControl, { version: browserControlVersion })(normalizeCliArguments(process.argv.slice(2))).pipe(
+const cliArgs = hoistJsonFlag(process.argv.slice(2))
+const subcommand = cliArgs.argv.find((arg) => !arg.startsWith("-"))
+const commandName = subcommand ? `browser-control ${subcommand}` : "browser-control"
+
+// Effect CLI parse errors exit 2 and, in --json mode, print a control-kit failure envelope.
+const reportUsageError = (error: CliError.CliError) => Effect.gen(function* () {
+  const errors = error._tag === "ShowHelp" ? error.errors : [error]
+  if (errors.length === 0) return
+  const message = errors.map((e) => e.message).join("; ")
+  if (cliArgs.json) yield* Effect.sync(() => printJson(failure(commandName, "usage", message, { exitCode: ExitCode.usage })))
+  yield* exitWith(ExitCode.usage)
+})
+
+Command.runWith(browserControl, { version: browserControlVersion })(normalizeCliArguments(cliArgs.argv)).pipe(
   Effect.catchTags({
     "RelayClient.RelayRejected": (error) => Console.error(error.message).pipe(Effect.andThen(failExit)),
-    "RelayClient.RelayUnreachable": (error) => Console.error(error.message).pipe(Effect.andThen(failExit)),
+    "RelayClient.RelayUnreachable": (error) => Console.error(error.message).pipe(Effect.andThen(exitWith(ExitCode.host))),
     "RelayClient.RelayDecodeFailed": (error) => Console.error(error.message).pipe(Effect.andThen(failExit)),
   }),
+  Effect.catchIf(CliError.isCliError, reportUsageError),
   Effect.provide(mainLayer),
   NodeRuntime.runMain,
 )

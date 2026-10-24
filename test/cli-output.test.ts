@@ -17,7 +17,9 @@ vi.mock("@effect/platform-node", async (importOriginal) => {
 import {
   browserControl,
   executeJsonEnvelope,
+  exitCodeForError,
   formatRecordingQuality,
+  hoistJsonFlag,
   formatSessionContinuation,
   normalizeCliArguments,
   resolveExplicitSessionSelector,
@@ -114,6 +116,19 @@ describe("CLI argument normalization", () => {
   it("leaves other commands unchanged", () => {
     const args = ["execute", "--", "return page.url()"]
     expect(normalizeCliArguments(args)).toBe(args)
+  })
+
+  it("moves a leading --json after the command's arguments, before the delimiter", () => {
+    expect(hoistJsonFlag(["--json", "execute", "--", "return 1"])).toEqual({ json: true, argv: ["execute", "--json", "--", "return 1"] })
+    expect(hoistJsonFlag(["--json", "session", "list"])).toEqual({ json: true, argv: ["session", "list", "--json"] })
+    const args = ["secrets", "run", "github", "--", "tool", "--json"]
+    expect(hoistJsonFlag(args)).toEqual({ json: false, argv: args })
+  })
+
+  it("maps relay and extension reachability failures to exit 4", () => {
+    expect(exitCodeForError({ _tag: "RelayClient.RelayUnreachable", message: "down" })).toBe(4)
+    expect(exitCodeForError({ _tag: "RelayLifecycle.ExtensionDisconnected", message: "gone" })).toBe(4)
+    expect(exitCodeForError(new Error("Target index must be a non-negative integer"))).toBe(1)
   })
 
   it("finds secrets run after leading command flags", () => {

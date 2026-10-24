@@ -264,8 +264,11 @@ Single expressions return automatically, so this shorter form also works:
 browser-control execute --session docs 'await page.title()'
 ```
 
-Use `--file script.js` for longer programs and `--json` for a machine-readable
-result envelope. Delete the session when you finish:
+Use `--file script.js` for longer programs and `--json` (anywhere on the command
+line) for a machine-readable result envelope. Exit codes follow the control-kit
+contract: 2 bad arguments, 4 relay or extension unreachable, 1 anything else.
+JSON failures also print one `browser-control: <message>` line on stderr.
+Delete the session when you finish:
 
 ```bash
 browser-control session delete docs
