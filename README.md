@@ -619,6 +619,41 @@ original tab and target (or call `assertTabPreserved` directly). Cases that need
 tab receive one as `page`; set `userTabCleanupGraceMs` if the fixture can leave
 that tab's renderer busy at cleanup time.
 
+### App gauntlet
+
+`pnpm gauntlet:apps` evaluates browser agents end to end on two fake apps served
+from one loopback server: Junglemart (Amazon-style: search, filters, pagination,
+sponsored lookalikes, variants, out-of-stock sizes, a protection-plan upsell,
+address validation, paid shipping pre-selected, promo codes, card form) and
+Grubber (Uber Eats-style: address gate, membership modal, a closed restaurant,
+sold-out items, required option groups, a lazily loaded menu section, the
+one-restaurant cart rule, an add-on upsell, a pre-checked membership box,
+delivery or pickup). Data is fake, the only accepted card is
+`4242 4242 4242 4242`, and nothing leaves the machine: pages carry a same-origin
+CSP and the runner aborts every request outside the app origin.
+
+Each of the 10 tasks (`pnpm gauntlet:apps --list`) seeds its own run, isolated
+by a cookie, and is graded from the server's final state (the right cart or
+order with the right options), never from screenshots. Ordered milestones show
+where a failed run stalled. The runner uses headless Chromium with a throwaway
+context per run and writes JSONL plus a Markdown summary (success, steps, wall
+time, cost, stall point) to `artifacts/gauntlet-apps/`.
+
+```bash
+pnpm gauntlet:apps                                   # scripted reference policy; must pass 10/10
+pnpm gauntlet:apps --policy ./agent.ts --arms a,b --tasks eats --reps 3
+pnpm gauntlet:apps --report a.jsonl,b.jsonl          # one summary over several runs
+node --import tsx gauntlet/apps/server.ts            # browse the apps on :19830
+```
+
+A policy module exports a `GauntletPolicy` (`gauntlet/apps/policy.ts`), an
+array or a record of them. It gets the task (goal, the only text it may type,
+step cap) and a Playwright `page`, and reports each action through `step()`.
+Use `bun` instead of `tsx` when the policy needs Bun APIs. To add a task, add it
+to `gauntlet/apps/tasks.ts` with a `grade` that fails on the untouched seed
+(`test/gauntlet-apps.test.ts` checks this) and a script in
+`gauntlet/apps/reference.ts`.
+
 `pnpm smoke:snapshot` runs native-role/ref, portal-dialog, and dense-list
 regressions against an isolated Chromium browser using the real snapshot code.
 Install its browser with `pnpm exec playwright-core install chromium` if needed.

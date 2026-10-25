@@ -58,6 +58,7 @@
     "smoke": "tsx scripts/smoke.ts",
     "gauntlet": "tsx scripts/gauntlet.ts",
     "gauntlet:isolated": "tsx scripts/gauntlet-isolated.ts",
+    "gauntlet:apps": "tsx scripts/gauntlet-apps.ts",
     "smoke:snapshot": "tsx scripts/check-snapshot.ts",
     "repro:screenshot-zoom": "tsx scripts/check-screenshot-zoom.ts",
     "repro:page-preservation": "tsx scripts/check-page-preservation.ts",
