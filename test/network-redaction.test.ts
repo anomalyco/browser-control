@@ -194,6 +194,16 @@ describe("SecretCollector", () => {
       .toEqual([{ name: "Location", value: "/callback?code=${BC_SECRET_1}#done" }])
   })
 
+  it("keeps the CORS credentials flag out of secret slots and output redaction", () => {
+    const collector = new SecretCollector()
+    expect(collector.protectHeaders([
+      { name: "Access-Control-Allow-Credentials", value: "true" },
+    ], "response")).toEqual([{ name: "Access-Control-Allow-Credentials", value: "true" }])
+    expect(collector.slots()).toEqual([])
+    expect(collector.redactValue({ visible: true })).toEqual({ visible: true })
+    expect(collector.redactText("checkbox checked: true")).toBe("checkbox checked: true")
+  })
+
   it("preserves duplicate cookie names as independent references", () => {
     const collector = new SecretCollector()
     expect(collector.protectHeaders([{ name: "Cookie", value: "sid=first; sid=second" }], "request"))
