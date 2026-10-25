@@ -28,6 +28,8 @@ const { values: args } = parseArgs({
     list: { type: "boolean", default: false },
     /** Comma-separated JSONL files to summarize together, without running anything. */
     report: { type: "string" },
+    /** Keep the rows already in --out and run only the missing rep/task/arm combinations. */
+    resume: { type: "boolean", default: false },
   },
 })
 
@@ -164,13 +166,15 @@ const selected = args.tasks === "all" ? tasks : tasks.filter((t) => args.tasks!.
 const out = args.out ?? path.join("artifacts", "gauntlet-apps", `${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`)
 fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true })
 
+const rows: Row[] = args.resume && fs.existsSync(out) ? fs.readFileSync(out, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as Row) : []
+const done = new Set(rows.map((r) => `${r.rep}|${r.task}|${r.arm}`))
 const server = await startAppServer()
 const browser = await chromium.launch({ headless: true, args: ["--disable-gpu", "--mute-audio", "--no-first-run"] })
-const rows: Row[] = []
 try {
   for (let rep = 1; rep <= Number(args.reps); rep++)
     for (const task of selected)
       for (const policy of rep % 2 ? chosen : [...chosen].reverse()) {
+        if (done.has(`${rep}|${task.id}|${policy.name}`)) continue
         const row = { rep, ...(await runOne(server, browser, task, policy)) }
         rows.push(row)
         fs.appendFileSync(out, JSON.stringify({ ...row, at: new Date().toISOString() }) + "\n")
