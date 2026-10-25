@@ -4,7 +4,7 @@ import { Effect, Layer } from "effect"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { createDoctorReport, extensionProtocolCheck, formatTargetSummary, relayBuildCheck, unhealthyTargetsCheck } from "../src/doctor.ts"
+import { createDoctorReport, extensionProtocolCheck, formatTargetSummary, relayBuildCheck, relayDrainCheck, unhealthyTargetsCheck } from "../src/doctor.ts"
 import * as RelayClient from "../src/relay-client.ts"
 import * as SessionStore from "../src/session-store.ts"
 
@@ -72,6 +72,25 @@ describe("relayBuildCheck", () => {
       cliBuildId: "dev",
       relayResult: { ok: true, value: { version: "0.1.0", buildId: "build-from-dist" } },
     })).toMatchObject({ status: "warn", message: "runtime build-from-dist does not match CLI dev" })
+  })
+})
+
+describe("relayDrainCheck", () => {
+  it("accepts a relay that is admitting work", () => {
+    expect(relayDrainCheck({ ok: true, value: { version: "0.1.0" } })).toMatchObject({ status: "ok", message: "accepting work" })
+  })
+
+  it("fails with the drain duration and what still holds it", () => {
+    expect(relayDrainCheck({
+      ok: true,
+      value: {
+        version: "0.1.0",
+        drain: { phase: "closing", since: "2026-10-10T18:10:00.000Z", elapsedMs: 2_712_000, holders: ["1 accepted request(s)", "session instant-hover executing"] },
+      },
+    })).toMatchObject({
+      status: "fail",
+      message: "Relay has been shutting down for 45m 12s (since 2026-10-10T18:10:00.000Z); waiting on 1 accepted request(s), session instant-hover executing.",
+    })
   })
 })
 
