@@ -1,5 +1,7 @@
 # Browser Control
 
+> **This project has moved to [Browse](https://github.com/anomalyco/browse).** Install it with `npx @opencode/browse install`. browser-control is no longer maintained.
+
 Browser Control lets trusted coding agents run Playwright against your existing
 Chromium-family browser. It uses your real browser profile, including logged-in
 sessions and installed extensions, instead of launching a separate headless
