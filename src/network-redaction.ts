@@ -20,6 +20,10 @@ const secretHeaders = new Set([
   "csrf-token",
   "x-xsrf-token",
 ])
+// Header names that match `secretNamePattern` but never carry a credential value.
+const nonSecretHeaders = new Set([
+  "access-control-allow-credentials",
+])
 
 export class SecretCollector {
   private readonly slotsByRef = new Map<string, MutableCredentialSlot>()
@@ -165,6 +169,7 @@ export class SecretCollector {
       const match = /^(\S+)\s+(.+)$/.exec(value)
       if (match) return `${match[1]} ${this.reference(match[2] ?? "", source)}`
     }
+    if (nonSecretHeaders.has(lower)) return value
     if (secretHeaders.has(lower) || secretNamePattern.test(lower)) {
       return this.reference(value, source)
     }
